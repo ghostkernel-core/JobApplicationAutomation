@@ -21,6 +21,18 @@ Check EN/DE language and visible document quality:
 - Visible PDF layout defects: body text and CV skill values must be left aligned/ragged-right, not centered or fully justified; wrapped lines must have natural word spacing and uniform line gaps; no large stretched spaces in narrow columns.
 - Cover letters must show visible paragraph separation/double-line style gaps between body paragraphs while still fitting on one page.
 
+To judge anything visual, rasterise the page and look at it — extracted text cannot show
+alignment, spacing, or a block sitting a few millimetres too low:
+
+```
+python scripts/pdf_to_images.py "<folder>/<file>.pdf"
+```
+
+It writes `page-01.png`, `page-02.png`, … into `_tmp/pdf_pages/<pdf stem>/`; read those with the
+Read tool. `--pages 2 --dpi 200` narrows or sharpens. Never write page images into the
+deliverable folder, and never `import fitz`/PyMuPDF — it is AGPL and was deliberately removed
+(`THIRD-PARTY-NOTICES.md`).
+
 Also proofread the Interview Prep PDF for spelling, grammar, and layout quality the same
 way. It is private prep, not an application document — do not flag its deliberate mentions
 of unclaimed tools, gaps, or visa/relocation/logistics topics as unsupported claims or

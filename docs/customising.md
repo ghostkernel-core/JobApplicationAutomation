@@ -66,10 +66,19 @@ inspect the text `latex_healthcheck.py` extracts), and confirm punctuation survi
 committing to a font change.
 
 `pypdf` reads text only — it has no renderer. When a step needs to *look* at a page as an image
-(the proofreading and final-QA steps do this to judge alignment and spacing), rasterise with
-`pypdfium2` (`pip install pypdfium2`), or shell out to `pdftoppm`, which ships with both MiKTeX
-and Poppler. Do not reach for PyMuPDF: it is AGPL-licensed, and dropping it is precisely why
-this project uses `pypdf` (see [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md)).
+(the proofreading and final-QA steps do this to judge alignment and spacing), use
+`scripts/pdf_to_images.py`:
+
+```bash
+python scripts/pdf_to_images.py "<folder>/Name - CV.pdf"
+python scripts/pdf_to_images.py "<...>.pdf" --pages 1 --dpi 200
+```
+
+It renders with `pypdfium2` (`pip install pypdfium2`) and falls back to `pdftoppm`, which ships
+with both MiKTeX and Poppler, so it works either way. PNGs land in `_tmp/pdf_pages/<pdf stem>/`,
+never in the deliverable folder — step 09 requires that folder to hold only the final documents.
+Do not reach for PyMuPDF: it is AGPL-licensed, and dropping it is precisely why this project uses
+`pypdf` (see [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md)).
 
 ## Tweaking the `rules/` files
 
@@ -117,8 +126,6 @@ Three scripts under `scripts/` manage the yearly application tracker workbook
   column list is the *initial* layout only — the live sheet is whatever columns you have since
   added or removed, and `append_tracker_entry.py` reads columns from the header row rather than
   assuming this list.
-- **`backfill_tracker_locations.py`** — a one-off, kept only as the audit trail for how
-  pre-tracker applications had their locations filled in. Not part of the regular workflow.
 
 The tracker workbook lives outside every deliverable folder, so the per-application cleanup rule
 in [The Pipeline](./the-pipeline.md) never touches it, and it is never committed to git — see

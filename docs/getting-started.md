@@ -10,8 +10,12 @@ This is a linear checklist. Follow it in order; each step assumes the previous o
 - **A LaTeX toolchain**: `xelatex` or `latexmk` on `PATH`, or the `LATEX_ENGINE` environment
   variable pointing at the binary. MiKTeX and TeX Live both work; MiKTeX's `latexmk` can require
   Perl, but `xelatex` alone is enough for this pipeline.
-- **`openpyxl`**, for the tracker workbook (`python -m pip install openpyxl` if it is not already
+- **`openpyxl`**, for the tracker workbook, and **`pypdf`**, which the healthcheck uses to read
+  compiled PDFs back as text (`python -m pip install openpyxl pypdf` if they are not already
   present in your interpreter).
+- **`pypdfium2`** (optional), only if you want `scripts/pdf_to_images.py` to rasterise a page for
+  visual inspection. Without it the script falls back to `pdftoppm`, which ships with MiKTeX and
+  Poppler.
 - **A Telegram bot**, created via [BotFather](https://t.me/BotFather) — needed only for the
   watcher, not for the manual pipeline.
 

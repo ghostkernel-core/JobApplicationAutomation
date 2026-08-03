@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import queue
 import threading
 from typing import Any
 
@@ -36,22 +37,44 @@ from .base import USER_AGENT
 
 log = logging.getLogger("watcher.fetch.browser")
 
-# Poll runs are sequential, but the watcher's scheduler and a manual --source
-# run can overlap. One context, one lock.
-_LOCK = threading.Lock()
-_STATE: dict[str, Any] = {"playwright": None, "context": None}
-
 LAUNCH_TIMEOUT_MS = 60_000
+
+# Playwright's sync API is greenlet-based and bound to the thread that created
+# it: touching a context from any other thread raises "Cannot switch to a
+# different thread". The watcher dispatches each poll with
+# `asyncio.to_thread(poll_once, ...)`, which draws from the default executor
+# pool, so consecutive polls generally land on *different* threads. A cached
+# context therefore worked on the first poll and raised on every one after it,
+# until both browser-backed sources hit failures_before_disable and switched
+# themselves off.
+#
+# A lock does not fix this. Serialising access still lets the work migrate
+# between threads; what Playwright requires is that it never move at all. So
+# the browser lives on one dedicated thread that owns it for the life of the
+# process, and every public function here hands that thread a closure and waits
+# for the result. One worker also means one operation at a time, which is what
+# the old lock was for.
+_WORK: queue.Queue | None = None
+_WORKER: threading.Thread | None = None
+_WORKER_LOCK = threading.Lock()
+
+# How often a waiting caller re-checks that the worker is still alive. Only
+# affects how fast a dead worker is noticed, not throughput.
+_LIVENESS_POLL_S = 0.5
 
 
 class BrowserUnavailable(RuntimeError):
     """Playwright is not installed, or the browser would not start."""
 
 
-def _context():
-    """The shared persistent context, launched on first use."""
-    if _STATE["context"] is not None:
-        return _STATE["context"]
+def _open_context(state: dict[str, Any]):
+    """The shared persistent context, launched on first use.
+
+    Only ever called on the worker thread, so everything it creates belongs to
+    that thread for good.
+    """
+    if state["context"] is not None:
+        return state["context"]
 
     try:
         from playwright.sync_api import sync_playwright
@@ -85,17 +108,15 @@ def _context():
         raise BrowserUnavailable(f"could not launch chromium: {exc}") from exc
 
     context.set_default_timeout(LAUNCH_TIMEOUT_MS)
-    _STATE["playwright"] = playwright
-    _STATE["context"] = context
+    state["playwright"] = playwright
+    state["context"] = context
     log.info("browser context started at %s", BROWSER_PROFILE_DIR)
     return context
 
 
-def close() -> None:
-    """Shut the browser down. Idempotent; registered with atexit."""
-    with _LOCK:
-        context, playwright = _STATE["context"], _STATE["playwright"]
-        _STATE["context"] = _STATE["playwright"] = None
+def _shutdown(state: dict[str, Any]) -> None:
+    context, playwright = state["context"], state["playwright"]
+    state["context"] = state["playwright"] = None
     for closer in (getattr(context, "close", None), getattr(playwright, "stop", None)):
         if closer is None:
             continue
@@ -103,6 +124,69 @@ def close() -> None:
             closer()
         except Exception:  # noqa: BLE001 - shutdown must not raise
             pass
+
+
+def _serve(work: queue.Queue) -> None:
+    """The worker loop. Owns the Playwright objects from birth to shutdown."""
+    state: dict[str, Any] = {"playwright": None, "context": None}
+    try:
+        while True:
+            job = work.get()
+            if job is None:  # shutdown sentinel
+                return
+            func, box, done = job
+            try:
+                box["value"] = func(_open_context(state))
+            except BaseException as exc:  # noqa: BLE001 - relayed to the caller
+                box["error"] = exc
+            finally:
+                done.set()
+    finally:
+        _shutdown(state)
+
+
+def _submit(func):
+    """Run `func(context)` on the browser thread and return its result here.
+
+    Exceptions are re-raised in the calling thread, so callers see the same
+    behaviour as a direct call.
+    """
+    global _WORK, _WORKER
+    with _WORKER_LOCK:
+        if _WORKER is None or not _WORKER.is_alive():
+            _WORK = queue.Queue()
+            _WORKER = threading.Thread(target=_serve, args=(_WORK,),
+                                       name="playwright-owner", daemon=True)
+            _WORKER.start()
+        work, worker = _WORK, _WORKER
+
+    box: dict[str, Any] = {}
+    done = threading.Event()
+    work.put((func, box, done))
+
+    # Wait, but not forever: if the worker dies mid-job nothing would ever set
+    # the event, and a hung poll is harder to diagnose than a failed one.
+    while not done.wait(_LIVENESS_POLL_S):
+        if not worker.is_alive():
+            raise BrowserUnavailable("browser worker thread died")
+
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
+def close() -> None:
+    """Shut the browser down. Idempotent; registered with atexit."""
+    global _WORK, _WORKER
+    with _WORKER_LOCK:
+        work, worker = _WORK, _WORKER
+        _WORK = _WORKER = None
+    if work is None or worker is None or not worker.is_alive():
+        return
+    work.put(None)
+    # The context teardown talks to a real browser process; give it room, but
+    # never block interpreter exit on it. The thread is a daemon either way.
+    worker.join(timeout=20)
 
 
 atexit.register(close)
@@ -135,8 +219,7 @@ def json_api(
     "this search had no results", which is the failure mode that lets a broken
     scraper go unnoticed for a month.
     """
-    with _LOCK:
-        context = _context()
+    def job(context):
         page = context.new_page()
         try:
             _warm(page, site_url)
@@ -177,16 +260,17 @@ def json_api(
             except Exception:  # noqa: BLE001
                 pass
 
+    return _submit(job)
+
 
 def evaluate(url: str, script: str, timeout: int = 30) -> Any:
     """Load a page and evaluate one JS expression against it.
 
-    Exists so callers never have to reach for the module's lock or context
-    themselves — the lock is not reentrant, and a nested acquisition from a
-    fetcher would deadlock the whole poll.
+    Exists so callers never have to reach for the browser thread or the context
+    themselves — every entry point here must go through `_submit`, or the
+    Playwright objects get touched from the wrong thread.
     """
-    with _LOCK:
-        context = _context()
+    def job(context):
         page = context.new_page()
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
@@ -197,11 +281,12 @@ def evaluate(url: str, script: str, timeout: int = 30) -> Any:
             except Exception:  # noqa: BLE001
                 pass
 
+    return _submit(job)
+
 
 def page_text(url: str, wait_selector: str | None = None, timeout: int = 30) -> str:
     """Rendered visible text of a page. Used for hydrating a posting body."""
-    with _LOCK:
-        context = _context()
+    def job(context):
         page = context.new_page()
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
@@ -217,6 +302,8 @@ def page_text(url: str, wait_selector: str | None = None, timeout: int = 30) -> 
                 page.close()
             except Exception:  # noqa: BLE001
                 pass
+
+    return _submit(job)
 
 
 def available() -> bool:

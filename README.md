@@ -148,13 +148,15 @@ Index: [docs/README.md](./docs/README.md).
 CLAUDE.md            the pipeline definition — the runtime instruction set
 scripts/             deterministic tooling, no model tokens: init_workspace,
                      render_latex_application (payload → .tex → PDF),
-                     latex_healthcheck, check_latex_toolchain, append_tracker_entry
+                     latex_healthcheck, check_latex_toolchain, append_tracker_entry,
+                     pdf_to_images (rasterise a page for visual inspection)
 rules/               writing style, CV/letter rules, German-market conventions,
                      integrity, naming, anti-fingerprint; slices/ = per-agent context
 master/LaTeX/        locked templates (cv_en, cv_de, letter_en, letter_de,
                      interview_prep_en), shared macros, fonts, images
 automation/          the watcher — self-contained: own venv, config, sqlite state,
-                     logs, one fetcher module per board; hooks/guard.py sandbox hook
+                     logs, one fetcher module per board; hooks/guard.py sandbox hook;
+                     watcherctl.py is the start/stop/status front door
 .claude/agents/      the specialist subagents, 00–12
 docs/                the long-form documentation
 ```

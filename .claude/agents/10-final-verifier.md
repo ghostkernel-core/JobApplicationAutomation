@@ -25,4 +25,16 @@ Check:
 - Visible PDF layout is clean in every document: body text and CV skill values are left aligned/ragged-right, not centered or fully justified; wrapped lines have natural word spacing and uniform line gaps. Cover letters may keep only the sender-address block right aligned.
 - English and German cover letters have visible paragraph separation/double-line style gaps between body paragraphs, not dense single-block text.
 
+To check anything visual, rasterise the page and look at it — extracted text cannot show
+alignment, spacing, or a block sitting a few millimetres too low:
+
+```
+python scripts/pdf_to_images.py "<folder>/<file>.pdf"
+```
+
+It writes `page-01.png`, `page-02.png`, … into `_tmp/pdf_pages/<pdf stem>/`; read those with the
+Read tool. `--pages 2 --dpi 200` narrows or sharpens. Never write page images into the
+deliverable folder — that would fail your own cleanliness check — and never `import
+fitz`/PyMuPDF, which is AGPL and was deliberately removed (`THIRD-PARTY-NOTICES.md`).
+
 Return `PASS | FIXED | REJECTED` with concise findings. Do not debug LaTeX structure that deterministic checks already failed; tell orchestrator to fix payload/template/rendering locally first.

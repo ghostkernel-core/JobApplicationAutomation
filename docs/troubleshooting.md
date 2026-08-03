@@ -142,9 +142,10 @@ band, never for something the filter simply failed to read.
 
 ## Build refuses to start when `build_settings.json` is missing
 
-**Symptom:** `start_watcher.py` exits with
-`automation/build_settings.json is missing. Run: python scripts/init_workspace.py`; or
-`start_claude.py` prints the same as a warning (interactive sessions do not need it).
+**Symptom:** `py automation/watcherctl.py start` (or the `start_watcher.py` shim onto it) fails
+its preflight with `automation/build_settings.json is missing. Run: python
+scripts/init_workspace.py`; or `start_claude.py` prints the same as a warning (interactive
+sessions do not need it).
 
 **Cause:** `build_settings.json` is generated, not committed — a fresh clone has only
 `build_settings.template.json`, and headless builds cannot run without the substituted file

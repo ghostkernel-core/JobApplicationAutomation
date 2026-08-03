@@ -3,8 +3,7 @@
 This folder is the workspace owner's job-application workspace (identity in identity.toml, facts in rules/00-canonical-profile.md) for the German / EU market.
 
 Claude Code / Cowork is the active agent system. It uses native subagents defined in
-`.claude/agents/`. (This project was migrated from an earlier OpenCode setup; the old
-OpenCode config, runner scripts, and the previous DOCX-based Claude setup have been removed.)
+`.claude/agents/`, one per pipeline step.
 
 ## Trigger
 
@@ -90,9 +89,6 @@ cleanup rule does not touch it.
 from the folder tree). It refuses to overwrite an existing file without `--force` — do not pass
 `--force` on a workbook that has user-entered status data. Its column list is the *initial*
 layout only; the live sheet is whatever the user has since made it.
-
-`scripts/backfill_tracker_locations.py` is the one-off that filled locations for the pre-tracker
-2026 applications, kept as the audit trail for where each one came from.
 
 ## Model Assignment
 
