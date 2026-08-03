@@ -6,19 +6,30 @@ Three inputs, deliberately separated:
     sources.toml  what to scrape — the file the user edits most often
     .env          secrets, so neither of the above ever holds a token
 
+Every numeric knob in config.toml can also be set from the environment, which
+wins over the file. The name is mechanical: `WATCHER_<SECTION>_<KEY>`, so
+`[match] notify_threshold` is `WATCHER_MATCH_NOTIFY_THRESHOLD`. This is for
+tuning a running deployment without editing a tracked file; config.toml stays
+the place where a value lives with the comment explaining why it is that value.
+
 Paths are derived from this file's location, so the watcher works regardless of
 how the drive is mounted or which directory it was launched from.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import tomllib
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
+
+log = logging.getLogger("watcher.config")
+
+_Number = TypeVar("_Number", int, float)
 
 # automation/watcher/config.py -> automation/ -> repo root
 AUTOMATION_DIR = Path(__file__).resolve().parent.parent
@@ -84,9 +95,40 @@ def _read_toml(path: Path) -> dict[str, Any]:
         return tomllib.load(handle)
 
 
+def env_name(section: str, key: str) -> str:
+    """The environment variable that overrides `[section] key` in config.toml."""
+    return f"WATCHER_{section}_{key}".upper()
+
+
+def _from_env(section: str, key: str,
+              cast: Callable[[str], _Number]) -> _Number | None:
+    """Read one knob from the environment, or None if unset or unusable.
+
+    A malformed value warns and falls through to config.toml rather than
+    raising: a typo in an env var should not stop an always-on watcher from
+    starting, and the warning names the variable so it is findable in the log.
+    """
+    raw = os.environ.get(env_name(section, key))
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return cast(raw.strip())
+    except ValueError:
+        log.warning("ignoring %s=%r — not a valid %s; using config.toml",
+                    env_name(section, key), raw, cast.__name__)
+        return None
+
+
 @dataclass(frozen=True)
 class Config:
-    """Behaviour knobs from config.toml, with defaults for anything omitted."""
+    """Behaviour knobs from config.toml, with defaults for anything omitted.
+
+    Numeric knobs resolve in three layers, first hit wins: environment variable
+    (`WATCHER_<SECTION>_<KEY>`), then config.toml, then the default argument
+    here. Non-numeric settings — model names, `enabled` switches, `claude_bin`
+    — are file-only on purpose: they change what runs rather than how hard it
+    runs, so they should be visible in a tracked file.
+    """
 
     poll: dict[str, Any] = field(default_factory=dict)
     match: dict[str, Any] = field(default_factory=dict)
@@ -94,22 +136,29 @@ class Config:
     build: dict[str, Any] = field(default_factory=dict)
     kb: dict[str, Any] = field(default_factory=dict)
 
+    def _num(self, section_name: str, section: dict[str, Any], key: str,
+             default: _Number, cast: Callable[[str], _Number] = int) -> _Number:
+        override = _from_env(section_name, key, cast)
+        if override is not None:
+            return override
+        return cast(section.get(key, default))  # type: ignore[arg-type]
+
     # --- poll -------------------------------------------------------------
     @property
     def interval_minutes(self) -> int:
-        return int(self.poll.get("interval_minutes", 30))
+        return self._num("poll", self.poll, "interval_minutes", 30)
 
     @property
     def max_age_days(self) -> int:
-        return int(self.poll.get("max_age_days", 14))
+        return self._num("poll", self.poll, "max_age_days", 14)
 
     @property
     def http_timeout(self) -> int:
-        return int(self.poll.get("timeout_seconds", 30))
+        return self._num("poll", self.poll, "timeout_seconds", 30)
 
     @property
     def failures_before_disable(self) -> int:
-        return int(self.poll.get("failures_before_disable", 3))
+        return self._num("poll", self.poll, "failures_before_disable", 3)
 
     # --- match ------------------------------------------------------------
     @property
@@ -118,36 +167,36 @@ class Config:
 
     @property
     def batch_size(self) -> int:
-        return int(self.match.get("batch_size", 8))
+        return self._num("match", self.match, "batch_size", 8)
 
     @property
     def notify_threshold(self) -> int:
-        return int(self.match.get("notify_threshold", 70))
+        return self._num("match", self.match, "notify_threshold", 70)
 
     @property
     def digest_threshold(self) -> int:
-        return int(self.match.get("digest_threshold", 40))
+        return self._num("match", self.match, "digest_threshold", 40)
 
     @property
     def description_chars(self) -> int:
-        return int(self.match.get("description_chars", 4000))
+        return self._num("match", self.match, "description_chars", 4000)
 
     @property
     def match_timeout(self) -> int:
-        return int(self.match.get("timeout_seconds", 180))
+        return self._num("match", self.match, "timeout_seconds", 180)
 
     # --- notify -----------------------------------------------------------
     @property
     def digest_hour(self) -> int:
-        return int(self.notify.get("digest_hour", 19))
+        return self._num("notify", self.notify, "digest_hour", 19)
 
     @property
     def heartbeat_hour(self) -> int:
-        return int(self.notify.get("heartbeat_hour", 9))
+        return self._num("notify", self.notify, "heartbeat_hour", 9)
 
     @property
     def snooze_days(self) -> int:
-        return int(self.notify.get("snooze_days", 7))
+        return self._num("notify", self.notify, "snooze_days", 7)
 
     # --- build ------------------------------------------------------------
     @property
@@ -172,15 +221,15 @@ class Config:
 
     @property
     def build_timeout_minutes(self) -> int:
-        return int(self.build.get("timeout_minutes", 45))
+        return self._num("build", self.build, "timeout_minutes", 45)
 
     @property
     def duplicate_title_ratio(self) -> float:
-        return float(self.build.get("duplicate_title_ratio", 0.8))
+        return self._num("build", self.build, "duplicate_title_ratio", 0.8, float)
 
     @property
     def duplicate_lookback_days(self) -> int:
-        return int(self.build.get("duplicate_lookback_days", 365))
+        return self._num("build", self.build, "duplicate_lookback_days", 365)
 
     # --- kb consolidation --------------------------------------------------
     @property
@@ -197,26 +246,26 @@ class Config:
     @property
     def kb_weekday(self) -> int:
         """0 = Monday, per `datetime.date.weekday()`."""
-        return int(self.kb.get("weekday", 6))
+        return self._num("kb", self.kb, "weekday", 6)
 
     @property
     def kb_hour(self) -> int:
-        return int(self.kb.get("hour", 18))
+        return self._num("kb", self.kb, "hour", 18)
 
     @property
     def kb_min_decisions(self) -> int:
         """Below this many new decisions there is nothing to generalise from,
         and the run is skipped rather than producing a confident rule out of
         two data points."""
-        return int(self.kb.get("min_decisions", 5))
+        return self._num("kb", self.kb, "min_decisions", 5)
 
     @property
     def kb_lookback(self) -> int:
-        return int(self.kb.get("lookback", 60))
+        return self._num("kb", self.kb, "lookback", 60)
 
     @property
     def kb_timeout(self) -> int:
-        return int(self.kb.get("timeout_seconds", 180))
+        return self._num("kb", self.kb, "timeout_seconds", 180)
 
 
 @dataclass(frozen=True)
@@ -345,6 +394,12 @@ def source_key(entry: dict[str, Any]) -> str:
 
 @lru_cache(maxsize=1)
 def load_config() -> Config:
+    # Populate the environment first: the numeric knobs read os.environ on every
+    # access, and the CLI entry points (`-m watcher.match --replay`, the ctl
+    # subcommands) never call load_env() themselves. Without this an override in
+    # .env would apply to the long-running watcher but be silently ignored by
+    # the tools used to check its behaviour — the worst possible split.
+    load_env()
     raw = _read_toml(CONFIG_PATH)
     return Config(
         poll=raw.get("poll", {}),
