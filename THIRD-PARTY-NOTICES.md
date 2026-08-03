@@ -38,11 +38,34 @@ These are required to run the system but are **not** redistributed here — you 
 yourself, under their own terms:
 
 - **Claude Code CLI** and the Anthropic API, which the pipeline and the headless builds invoke.
+  A commercial service, not an open-source component.
 - **A LaTeX distribution** (MiKTeX or TeX Live) providing `xelatex`/`latexmk`.
-- **Python packages** listed in `automation/requirements.txt`, installed into the watcher's own
-  virtual environment, plus `openpyxl` for the tracker workbook.
-- **Playwright** and its Chromium download, an optional dependency used only by the
-  browser-based portal fetchers.
+- **Python packages** from `automation/requirements.txt`, installed into the watcher's own
+  virtual environment:
+
+  | Package | Licence |
+  |---|---|
+  | requests | Apache-2.0 |
+  | beautifulsoup4 | MIT |
+  | openpyxl | MIT |
+  | playwright | Apache-2.0 |
+  | python-telegram-bot | LGPL-3.0 |
+  | PyMuPDF | AGPL-3.0 **or** commercial |
+
+Two of those are copyleft and worth understanding before you build on this.
+
+**python-telegram-bot (LGPL-3.0)** is used unmodified as a library, which is precisely the case
+the LGPL exists to permit. It imposes no conditions on this repository's own code.
+
+**PyMuPDF (AGPL-3.0)** is the one to be deliberate about. It is used in a single function
+(`pdf_text_and_pages` in `scripts/latex_healthcheck.py`) to read a compiled PDF back as text and
+count its pages, behind an optional import that degrades to a warning when the package is
+absent. The AGPL's obligations attach to *distributing* the software or *offering it to users
+over a network* — neither applies to running this workspace locally on your own machine, which
+is unrestricted private use. This repository does not redistribute PyMuPDF; `pip` installs it
+separately, so the MIT licence above remains an accurate statement about the code committed
+here. If you intend to host this as a network service, read AGPL section 13 first, or replace
+the dependency: `pypdf` (BSD-3-Clause) or a `pdftotext` subprocess covers the same two calls.
 
 Job boards and portals are accessed through their own public endpoints and remain subject to
 their respective terms of service. Nothing from them is redistributed in this repository.
