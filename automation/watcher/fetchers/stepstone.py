@@ -85,6 +85,17 @@ def _search_url(query: str, where: str, page: int) -> str:
     return path if page <= 1 else f"{path}?page={page}"
 
 
+def search_urls(entry: dict[str, Any]) -> list[tuple[str, str]]:
+    """(query, first-page search URL) for every query this portal is polled on.
+
+    The same builder the fetcher uses, so a status report shows the page that
+    is really being read rather than a hand-written approximation of it.
+    """
+    where = entry.get("location") or ""
+    return [(query, _search_url(query, where, 1))
+            for query in entry.get("queries") or []]
+
+
 def _posting(item: dict[str, Any], source: str) -> Posting | None:
     title = (item.get("title") or "").strip()
     href = (item.get("url") or "").strip()

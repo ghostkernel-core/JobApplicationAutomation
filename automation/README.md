@@ -22,7 +22,10 @@ are handed to `.venv` as child processes.
 
 ```cmd
 cd "<workspace root>\automation"
-py watcherctl.py status          :: running? since when? how are the sources?
+py watcherctl.py status          :: running? watching what? with which settings?
+py watcherctl.py status --verbose      :: ...plus the endpoints actually polled
+py watcherctl.py status --sources-only :: boards, portals and their URLs only
+py watcherctl.py status --brief        :: process state + the health table, nothing else
 py watcherctl.py start           :: start in the background, detached from this console
 py watcherctl.py stop            :: stop every running instance
 py watcherctl.py restart
@@ -68,6 +71,7 @@ Underneath, the entrypoint is still directly usable, and every sub-command below
 | `-m watcher.discover --company X` | probe ATS providers for a company's board token |
 | `-m watcher.whoami` | print the chat id of whoever messages the bot next |
 | `-m watcher.health` | per-source failure counts; `--reset <source>` re-enables a disabled one |
+| `-m watcher.status` | every watched board and portal with its URL, then every setting in force |
 | `-m watcher.builder --posting <id> --dry-run` | print argv, cwd, prompt, and dedupe verdict; spawn nothing |
 | `-m watcher.kb --propose` | build this week's profile_kb.md proposal and print it; write nothing |
 
@@ -81,7 +85,32 @@ Telegram reply and nowhere else — that is the whole containment story (see bel
 | `sources.toml` | the boards being watched **and the filters applied to them**. `[[ats]]` entries are the reliable tier (public JSON); `[[portal]]` entries are marked `fragile` and disable themselves after repeated failures. `[filters.location]`, `[filters.seniority]`, `[filters.experience]` decide what survives. |
 | `config.toml` | intervals, score thresholds, timeouts, `[build] enabled`. No secrets. |
 | `profile_kb.md` | matching preferences that grow from your replies. **Tunes matching only** — document facts come from `rules/00-canonical-profile.md` and nowhere else. |
-| `.env` | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`. Never commit, never move into `config.toml`. |
+| `.env` | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, plus optional numeric overrides (below). Never commit, never move the tokens into `config.toml`. |
+
+`py watcherctl.py status` prints what these three files add up to — every board and portal with
+the URL being watched, then the filters, thresholds, schedules and build settings actually in
+force, with any value coming from an environment override marked as such. It reads the same
+loaders and URL builders the poller uses, so it cannot show a setting or an endpoint that
+differs from the one being polled.
+
+### Overriding a number from the environment
+
+Every numeric knob in `config.toml` can also be set as `WATCHER_<SECTION>_<KEY>` — so
+`[match] notify_threshold` is `WATCHER_MATCH_NOTIFY_THRESHOLD`. Resolution order is
+environment → `config.toml` → built-in default, and a real shell export beats the `.env` file:
+
+```
+WATCHER_MATCH_NOTIFY_THRESHOLD=75 py watcherctl.py poll
+```
+
+A malformed value logs a warning and falls back to the file — a typo in an env var never
+stops the watcher from starting. `automation/.env.example` lists all 20 names.
+
+This is for tuning a live deployment. Anything permanent belongs in `config.toml`, where the
+value sits next to the comment explaining why it is that value and stays visible in git —
+`.env` is git-ignored, so a threshold parked there is invisible to everyone including you in
+three months. Model names, `claude_bin`, and the `[build]`/`[kb]` `enabled` switches are
+deliberately **not** overridable: they change what runs, not how hard it runs.
 
 Generated, not edited: `state/watch.db` (postings, verdicts, notifications, decisions, builds,
 source health), `state/profile_digest.md` (cache, regenerates when the canonical profile

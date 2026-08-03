@@ -216,7 +216,7 @@ def run_in_venv(args: list[str]) -> int:
 # commands
 # --------------------------------------------------------------------------
 
-def cmd_status(_args: argparse.Namespace) -> int:
+def cmd_status(args: argparse.Namespace) -> int:
     procs = find_watchers()
     if not procs:
         print("watcher: NOT RUNNING")
@@ -238,7 +238,16 @@ def cmd_status(_args: argparse.Namespace) -> int:
         print(f"log: {WATCHER_LOG} (does not exist yet)")
 
     print()
-    return run_in_venv(["-m", "watcher.health"])
+    if args.brief:
+        # The old shape: process state plus the per-source health table, and
+        # nothing that needs the config files parsed.
+        return run_in_venv(["-m", "watcher.health"])
+    extra = ["-m", "watcher.status"]
+    if args.verbose:
+        extra.append("--verbose")
+    if args.sources_only:
+        extra.append("--sources-only")
+    return run_in_venv(extra)
 
 
 def preflight() -> int:
@@ -410,7 +419,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("status", help="is it running, and how are the sources doing")
+    status = sub.add_parser(
+        "status", help="is it running, what is it watching, with which settings")
+    status.add_argument("--brief", action="store_true",
+                        help="process state and the per-source health table only")
+    status.add_argument("--sources-only", action="store_true",
+                        help="skip the settings sections")
+    status.add_argument("--verbose", "-v", action="store_true",
+                        help="also show the endpoints actually being polled")
 
     start = sub.add_parser("start", help="start it in the background")
     start.add_argument("--force", action="store_true",

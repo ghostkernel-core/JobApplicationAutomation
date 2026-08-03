@@ -8,6 +8,7 @@ one broken portal never costs a poll.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..normalize import Posting
@@ -43,6 +44,35 @@ def fetch_source(entry: dict[str, Any], timeout: int) -> list[Posting]:
         return ats.fetch(entry, timeout)
     module = _load_portal(entry.get("name", ""))
     return module.fetch(entry, timeout)
+
+
+@dataclass(frozen=True)
+class SourceUrls:
+    """Where a source lives, for anything that reports rather than fetches.
+
+    `board` is the page a person opens, `feed` the endpoint the poller calls
+    (empty for portals, which have one URL per query), and `searches` the
+    per-query search pages. Every field can be empty: a status report must
+    still print a source whose URLs cannot be built.
+    """
+
+    board: str = ""
+    feed: str = ""
+    searches: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+
+
+def source_urls(entry: dict[str, Any]) -> SourceUrls:
+    if entry.get("kind") == "ats" or "provider" in entry:
+        board, feed = ats.urls(entry)
+        return SourceUrls(board=board, feed=feed)
+    try:
+        module = _load_portal(entry.get("name", ""))
+    except SourceNotImplemented:
+        return SourceUrls()
+    searches = ()
+    if hasattr(module, "search_urls"):
+        searches = tuple(module.search_urls(entry))
+    return SourceUrls(board=getattr(module, "SITE", ""), searches=searches)
 
 
 def hydrate(posting: Posting, timeout: int) -> str:
