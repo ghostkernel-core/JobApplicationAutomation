@@ -7,9 +7,9 @@ import sys
 from pathlib import Path
 
 try:
-    import fitz  # type: ignore
+    from pypdf import PdfReader  # type: ignore
 except Exception:  # noqa: BLE001
-    fitz = None
+    PdfReader = None
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -88,13 +88,14 @@ def read_text(path: Path) -> str:
 
 
 def pdf_text_and_pages(path: Path) -> tuple[int, str, list[str]]:
-    if fitz is None:
-        return 0, "", ["PyMuPDF/fitz is not available; cannot inspect PDFs"]
+    if PdfReader is None:
+        return 0, "", ["pypdf is not available; cannot inspect PDFs"]
     errors: list[str] = []
     try:
-        doc = fitz.open(str(path))
-        text = "\n".join(page.get_text() for page in doc)
-        return doc.page_count, text, errors
+        reader = PdfReader(str(path))
+        # extract_text() returns None for a page with no text layer, not "".
+        text = "\n".join((page.extract_text() or "") for page in reader.pages)
+        return len(reader.pages), text, errors
     except Exception as exc:  # noqa: BLE001
         return 0, "", [f"{path.name}: cannot read PDF: {exc}"]
 

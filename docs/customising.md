@@ -59,11 +59,17 @@ To use your own font, drop the `.ttf` files into `master/LaTeX/fonts/` and adjus
 them — the Helvetica Neue filenames are explicitly git-ignored.
 
 One warning if you swap fonts: **re-verify that punctuation survives PDF text extraction.** The
-proofreading and healthcheck steps both read the compiled PDF back as text (via PyMuPDF), and
+proofreading and healthcheck steps both read the compiled PDF back as text (via `pypdf`), and
 some fonts silently drop or mangle apostrophes and semicolons during extraction, which breaks
 those checks without breaking the visible PDF. Compile one document, run `pdftotext` over it (or
 inspect the text `latex_healthcheck.py` extracts), and confirm punctuation survived before
 committing to a font change.
+
+`pypdf` reads text only — it has no renderer. When a step needs to *look* at a page as an image
+(the proofreading and final-QA steps do this to judge alignment and spacing), rasterise with
+`pypdfium2` (`pip install pypdfium2`), or shell out to `pdftoppm`, which ships with both MiKTeX
+and Poppler. Do not reach for PyMuPDF: it is AGPL-licensed, and dropping it is precisely why
+this project uses `pypdf` (see [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md)).
 
 ## Tweaking the `rules/` files
 

@@ -49,23 +49,23 @@ yourself, under their own terms:
   | beautifulsoup4 | MIT |
   | openpyxl | MIT |
   | playwright | Apache-2.0 |
+  | pypdf | BSD-3-Clause |
   | python-telegram-bot | LGPL-3.0 |
-  | PyMuPDF | AGPL-3.0 **or** commercial |
 
-Two of those are copyleft and worth understanding before you build on this.
+There is deliberately **no AGPL dependency here**, and only one copyleft one.
 
 **python-telegram-bot (LGPL-3.0)** is used unmodified as a library, which is precisely the case
-the LGPL exists to permit. It imposes no conditions on this repository's own code.
+the LGPL exists to permit. It imposes no conditions on this repository's own code, and nothing
+propagates to the MIT licence above.
 
-**PyMuPDF (AGPL-3.0)** is the one to be deliberate about. It is used in a single function
-(`pdf_text_and_pages` in `scripts/latex_healthcheck.py`) to read a compiled PDF back as text and
-count its pages, behind an optional import that degrades to a warning when the package is
-absent. The AGPL's obligations attach to *distributing* the software or *offering it to users
-over a network* — neither applies to running this workspace locally on your own machine, which
-is unrestricted private use. This repository does not redistribute PyMuPDF; `pip` installs it
-separately, so the MIT licence above remains an accurate statement about the code committed
-here. If you intend to host this as a network service, read AGPL section 13 first, or replace
-the dependency: `pypdf` (BSD-3-Clause) or a `pdftotext` subprocess covers the same two calls.
+**On reading PDFs.** `pdf_text_and_pages` in `scripts/latex_healthcheck.py` reads a compiled PDF
+back as text and counts its pages, behind an optional import that degrades to a warning when the
+package is absent. This used **PyMuPDF**, which is AGPL-3.0 (or paid commercial). That imposed
+nothing on local private use — the AGPL's obligations attach to *distributing* the software or
+*offering it over a network* — but it was a trap for anyone forking this and hosting it, so it
+was replaced with `pypdf` (BSD-3-Clause). If you need to rasterise a page to an image rather
+than extract its text, use `pypdfium2` (BSD-3-Clause/Apache-2.0) or the `pdftoppm` executable;
+please don't reintroduce PyMuPDF.
 
 Job boards and portals are accessed through their own public endpoints and remain subject to
 their respective terms of service. Nothing from them is redistributed in this repository.
