@@ -98,11 +98,23 @@ process from an earlier session, or (rarely) two installs configured to share on
 
 **Fix:** find and stop the other process:
 
+```bash
+py automation/watcherctl.py status     # lists every live instance, with pid and start time
+py automation/watcherctl.py stop       # stops all of them
+py automation/watcherctl.py start      # bring one back
+```
+
+`restart` does the last two in one step. If you would rather look yourself:
+
 ```powershell
 Get-CimInstance Win32_Process -Filter "Name like '%python%'" |
   Where-Object { $_.CommandLine -like '*run_watcher*' } |
-  Select-Object ProcessId, CreationDate
+  Select-Object ProcessId, ParentProcessId, CreationDate
 ```
+
+A venv's `pythonw.exe` is a launcher stub that re-executes the real interpreter as a child, so
+one healthy watcher shows up here as two rows — a parent with one thread and a child with
+several. Two *unrelated* rows, with different start times, are the actual conflict.
 
 If two installs are genuinely meant to run independently, give each its own bot token from
 BotFather — see [Privacy and Security](./privacy-and-security.md).

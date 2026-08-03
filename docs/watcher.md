@@ -128,14 +128,31 @@ python run_watcher.py --once                       # one poll + score + notify, 
 python run_watcher.py --digest                      # send the digest now
 ```
 
-Only one instance may run at a time. Two launchers at the repository root wrap this:
-`python start_watcher.py` preflights the venv, `.env`, and `build_settings.json`, then starts the
-watcher detached, guarded by a pidfile so a second instance cannot start by accident;
-`python start_watcher.py --status` reports whether it's running without starting anything.
+Only one instance may run at a time, and in day-to-day use you do not drive `run_watcher.py`
+directly — `automation/watcherctl.py` wraps it. It preflights the venv, `.env` token and
+`build_settings.json`, starts the watcher detached, refuses to start a second instance, and
+handles everything after the start too:
 
-For unattended operation, put a shortcut to `pythonw run_watcher.py` in `shell:startup`
-(Windows), or use a scheduler task with restart-on-failure. A daily heartbeat message exists
-specifically so silence is distinguishable from a crash.
+```bash
+py automation/watcherctl.py status     # running? since when? how are the sources?
+py automation/watcherctl.py start
+py automation/watcherctl.py stop
+py automation/watcherctl.py restart
+py automation/watcherctl.py logs -n 50 -f
+```
+
+It imports nothing from `watcher` and needs no third-party package, so it runs under any
+interpreter on the machine and hands the commands that need real dependencies to
+`automation/.venv`. Instances are found by scanning the process table for a `run_watcher`
+command line rather than by a pidfile, so it also sees a watcher that was started by hand.
+`start_watcher.py` at the repository root still works — it is a thin shim onto
+`watcherctl start` / `watcherctl status`.
+
+For unattended operation, use a scheduler task at logon running
+`py automation/watcherctl.py start` with restart-on-failure, or the same line as a shortcut in
+`shell:startup` (Windows). Going through `watcherctl` means a logon while the watcher is already
+running is a no-op rather than a second instance fighting the first for the bot token. A daily
+heartbeat message exists specifically so silence is distinguishable from a crash.
 
 ## Replying on Telegram
 

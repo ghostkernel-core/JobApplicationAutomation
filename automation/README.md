@@ -15,24 +15,39 @@ poll sources → dedupe → prefilter (free) → score (haiku) → Telegram
 
 ## Run it
 
-**Every command uses this folder's own interpreter.** The global Python has conflicting pins
-(`python-telegram-bot <21` vs the 22.8 this needs) and cannot run the watcher.
+`watcherctl.py` is the front door. It is the one file here that imports nothing from `watcher`
+and needs no third-party package, so **any** interpreter on the machine can run it — including
+the global Python, which cannot run the watcher itself. Commands that need the real dependencies
+are handed to `.venv` as child processes.
 
-```powershell
+```cmd
 cd "<workspace root>\automation"
-.\.venv\Scripts\python.exe run_watcher.py              # the real thing
-.\.venv\Scripts\python.exe run_watcher.py --once       # one poll+score+notify, then exit
-.\.venv\Scripts\python.exe run_watcher.py --digest     # send the digest now
+py watcherctl.py status          :: running? since when? how are the sources?
+py watcherctl.py start           :: start in the background, detached from this console
+py watcherctl.py stop            :: stop every running instance
+py watcherctl.py restart
+py watcherctl.py poll            :: one fetch/score/notify cycle in the foreground
+py watcherctl.py poll --dry-run --source portal:stepstone
+py watcherctl.py health          :: per-source status table
+py watcherctl.py reset portal:stepstone
+py watcherctl.py digest          :: send the digest now
+py watcherctl.py logs -n 50 -f   :: tail watcher.log, -f to follow
 ```
 
 Only one instance may run at a time — two processes long-polling the same bot token produce a
-stream of `telegram.error.Conflict: terminated by other getUpdates request`. If you see that,
-something from an earlier session is still alive:
+stream of `telegram.error.Conflict: terminated by other getUpdates request`. `start` refuses when
+one is already up, and `status` finds instances by command line rather than by a pid file, so it
+still sees a watcher someone started by hand. A venv's `pythonw.exe` is a launcher stub that
+re-executes the real interpreter as a child, so one watcher is two OS processes; `status` reports
+the root and `stop` kills the tree.
+
+Underneath, the entrypoint is still directly usable, and every sub-command below is still
+`python -m watcher.<module>`:
 
 ```powershell
-Get-CimInstance Win32_Process -Filter "Name like '%python%'" |
-  Where-Object { $_.CommandLine -like '*run_watcher*' } |
-  Select-Object ProcessId, CreationDate
+.\.venv\Scripts\python.exe run_watcher.py              # the real thing, in the foreground
+.\.venv\Scripts\python.exe run_watcher.py --once
+.\.venv\Scripts\python.exe run_watcher.py --digest
 ```
 
 ### Useful sub-commands
@@ -229,6 +244,10 @@ message says it is rebuilding over an incomplete attempt.
 
 ## Autostart
 
-A shortcut to `pythonw run_watcher.py` in `shell:startup`, or a Task Scheduler "at logon" task
-with restart-on-failure. The daily heartbeat exists so that silence is distinguishable from a
-crash — if it stops arriving, the watcher is down.
+A Task Scheduler "at logon" task running `py watcherctl.py start` (start-in set to this folder),
+or the same line as a shortcut in `shell:startup`. Going through `watcherctl` rather than
+`pythonw run_watcher.py` directly means a logon while the watcher is already running is a no-op
+instead of a second instance fighting the first for the bot token.
+
+The daily heartbeat exists so that silence is distinguishable from a crash — if it stops
+arriving, the watcher is down.
