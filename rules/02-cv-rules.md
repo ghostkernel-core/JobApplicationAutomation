@@ -34,7 +34,7 @@ The CV is produced from locked LaTeX templates in `master/LaTeX/templates/`, not
   - `<file_prefix> - Lebenslauf.tex` and `.pdf`.
   - `<file_prefix>` comes from `identity.toml` `[person].file_prefix`.
 - Use `MM/YYYY` dates; English uses `Present`, German uses `aktuell`.
-- English documents must avoid German umlauts and `ß`. Use established English names where available (for example `South Westphalia University of Applied Sciences`), otherwise transliterate German proper nouns with `ä -> ae`, `ö -> oe`, `ü -> ue`, `Ä -> Ae`, `Ö -> Oe`, `Ü -> Ue`, `ß -> ss`.
+- English documents must avoid German umlauts and `ß`. Use established English names where available (for example a German institution whose official English name replaces "Universität" with "University"), otherwise transliterate German proper nouns with `ä -> ae`, `ö -> oe`, `ü -> ue`, `Ä -> Ae`, `Ö -> Oe`, `Ü -> Ue`, `ß -> ss`.
 - Update the date line to the application date.
 - All content must remain real text in the PDF, not images.
 
@@ -53,8 +53,8 @@ The CV writer/localizer returns a structured payload with short fields, for exam
     {"date": "03/2021 - 09/2021", "title": "IoT-Based Air Emission Monitoring and Forecasting", "bullets": ["..."]}
   ],
   "education": [
-    {"date": "10/2015 - 09/2020", "degree": "M. Sc. Systems Engineering and Engineering Management", "details": ["South Westphalia University of Applied Sciences, Soest, Germany", "Master's Thesis: Anomaly Detection and Automatic Update of an Ensemble Classifier Using Evidence Theory."]},
-    {"date": "09/2010 - 02/2014", "degree": "B. Sc. Electrical and Electronic Engineering", "details": ["American International University, Dhaka, Bangladesh", "Focus Area: Electronics and Embedded Systems"]}
+    {"date": "10/2016 - 09/2019", "degree": "M. Sc. Example Field of Study", "details": ["Example Technical University, Example City, Example Country", "Master's Thesis: Example Thesis Title on a Representative Method."]},
+    {"date": "09/2011 - 02/2015", "degree": "B. Sc. Example Undergraduate Field", "details": ["Example National University, Example City, Example Country", "Focus Area: Example Focus Area"]}
   ],
   "skills": [
     {"category": "Artificial Intelligence (AI)", "items": [{"label": "Machine Learning", "value": "..."}]},
@@ -63,7 +63,7 @@ The CV writer/localizer returns a structured payload with short fields, for exam
     {"category": "Technologies", "items": [{"label": "Platforms", "value": "..."}]},
     {"category": "Visualization and Web", "items": [{"label": "Visualization", "value": "..."}]}
   ],
-  "languages": {"German": "B1+", "English": "C1+", "Bengali": "Native"},
+  "languages": {"German": "B1+", "English": "C1+", "<native language>": "Native"},
   "date_line": "<city>, 19. June 2026"
 }
 ```

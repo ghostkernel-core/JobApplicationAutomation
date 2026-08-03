@@ -137,11 +137,11 @@ Do not ask a model to debug deterministic LaTeX/PDF defects. Run `scripts/latex_
 - Languages: English only by default; add German (Lebenslauf + Anschreiben) only when the user requests it.
 - Folder: `<YYYY>/<Company>/YYYY-MM-DD - <Role>/`.
 - No AI fingerprints in application documents (CV, Lebenslauf, cover letter, Anschreiben). No authorship signature or tool credit, no assistant voice, no meta-commentary, no bracketed placeholders, and no model or AI-vendor name in any casing — Claude, GPT/ChatGPT, Sonnet, Opus, Haiku, Anthropic, OpenAI, Gemini, Llama, Mistral, Copilot, Ollama, LM Studio, LangChain, MCP, or any other assistant/foundation-model brand. Canonical entries are not exempt: `OpenAI Gym` renders as "reinforcement-learning environments (Gym)", `Ollama` as "self-hosted LLM runtime". Generic terms (LLM, NLP, computer vision, PyTorch) are unaffected. Only the employer's own role title, company name, and product name may keep a banned word, never a line describing the candidate. Interview Prep is exempt from the name ban but not from the authorship-signature ban. Full rule: `rules/07-humanlike-anti-ai.md` section F.
-- Source of truth: `/master` + `rules/00-canonical-profile.md`. The pre-2026 archives
-  (`/Targeted`, `/Non Targeted`, `/2025`) were deleted on 2026-08-02; nothing outside `/master`
-  and `rules/` is a fact source. `/Documents` holds scanned personal papers (residence permit,
-  degree certificate, Zwischenzeugnisse) — attachments for an application, never a fact source
-  and never a style reference.
+- Source of truth: `/master` + `rules/00-canonical-profile.md`. Nothing outside `/master` and
+  `rules/` is a fact source — not past application folders, not the posting, not the web. If the
+  workspace holds a `/Documents` folder of scanned personal papers (residence permit, degree
+  certificates, references), those are attachments for an application, never a fact source and
+  never a style reference.
 - Never create compiler working directories inside the deliverable folder.
 
 ## Stop And Ask Only When

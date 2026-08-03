@@ -4,7 +4,7 @@
 
 - Lebenslauf: tabellarisch, reverse-chronological, max 2 pages. Sections: PERSÖNLICHE DATEN, BERUFSERFAHRUNG, PROJEKTE, AUSBILDUNG, TECHNOLOGIE-STACKS, SPRACHKENNTNISSE.
 - Anschreiben: DIN-formal, 1 page max. `Sie` form. `Sehr geehrte Frau <Name> / Sehr geehrter Herr <Name> / Sehr geehrte Damen und Herren`. Bold subject without `Betreff:`. Closing: `Mit freundlichen Grüßen`. No DOCX.
-- Use proper German umlauts (ä ö ü ß). Never ASCII transliterations (Nationalitaet, fuer, ueber, Gruessen, Strasse, Suedwestfalen).
+- Use proper German umlauts (ä ö ü ß). Never ASCII transliterations (Nationalitaet, fuer, ueber, Gruessen, Strasse, Duesseldorf).
 - Dates: `MM/YYYY`. Use `aktuell` for Present. Date line: `<city>, 19. Juni 2026` style, where `<city>` is `identity.toml` `[person].city`.
 - German level: B1+. Do not claim B2/C1/native/verhandlungssicher.
 - Keep proper nouns, company names, technology names unchanged — except banned AI-vendor names, which must never be reintroduced during localization.

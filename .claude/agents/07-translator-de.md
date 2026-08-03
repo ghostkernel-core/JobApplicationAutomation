@@ -15,7 +15,8 @@ Output compact German payloads only, not `.tex`, PDF, or DOCX:
 
 Rules:
 - Localize idiomatically for Germany/EU; do not translate word-for-word.
-- German labels: Adresse, E-Mail, Telefon, Geburtsdatum, Nationalität, Deutsch/Englisch/Bengalisch. Always use proper German umlauts and ß; do not use ASCII transliterations such as Nationalitaet, fuer, ueber, Gruessen, Strasse, Muenchen, or Suedwestfalen in German documents.
+- German labels: Adresse, E-Mail, Telefon, Geburtsdatum, Nationalität, and the candidate's own languages localized to German (e.g. Deutsch/Englisch/<Muttersprache>). Always use proper German umlauts and ß; do not use ASCII transliterations such as Nationalitaet, fuer, ueber, Gruessen, Strasse, Muenchen, or Duesseldorf in German documents.
+- The `languages` keys in `cv_payload_de` are printed verbatim as the Lebenslauf's language labels, so they must be the German names (`Deutsch`, `Englisch`, …), never the English ones carried over from `cv_payload_en`. Keep the same language order as the English payload.
 - Dates use `aktuell`, not `Present`.
 - German date line: `<city>, 19. Juni 2026` style, where `<city>` is `identity.toml` `[person].city`.
 - German level remains B1+; do not claim B2/C1/native/negotiation-level German.

@@ -1,0 +1,7 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security issue
+    url: https://github.com/ghostkernel-core/JobApplicationAutomation/security/advisories/new
+    about: >-
+      For anything involving credentials, data exposure, or a way to escape the build sandbox,
+      please use a private security advisory instead of a public issue.

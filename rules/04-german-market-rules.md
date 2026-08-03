@@ -28,14 +28,14 @@ The target market is always Germany / the EU. Every application ships an English
 - Closing: `Mit freundlichen Grüßen` + name.
 - Enclosure: `Anlagen: Lebenslauf`.
 - Tone: sachlich, konkret, glaubwürdig. Prefer evidence over overselling.
-- Use proper German umlauts and ß in all German documents and German addresses/names where known. Do not use ASCII transliterations such as `fuer`, `ueber`, `Gruessen`, `Strasse`, `Muenchen`, `Suedwestfalen`, `Nationalitaet`, or `PERSOENLICHE` unless quoting an exact ASCII-only source string.
+- Use proper German umlauts and ß in all German documents and German addresses/names where known. Do not use ASCII transliterations such as `fuer`, `ueber`, `Gruessen`, `Strasse`, `Muenchen`, `Duesseldorf`, `Nationalitaet`, or `PERSOENLICHE` unless quoting an exact ASCII-only source string.
 - English documents use the opposite convention: use established English names where available, otherwise transliterate German names with `ae/oe/ue/ss` and avoid `ä/ö/ü/ß`.
 
 ## Language level to state
 
 - German: B1+.
 - English: C1+.
-- Bengali: Muttersprache / native.
+- Native language: Muttersprache / native.
 - Do not claim B2, C1, native, or negotiation-level German unless `rules/00-canonical-profile.md` is updated.
 - Prefer simple wording such as `Deutsch: B1+`, not `verhandlungssicher`.
 

@@ -6,8 +6,12 @@
 !/.gitignore
 !/.claude/
 !/CLAUDE.md
-!/README - How to use this system.md
 !/README.md
+!/docs/
+!/LICENSE
+!/THIRD-PARTY-NOTICES.md
+!/SECURITY.md
+!/CONTRIBUTING.md
 !/identity.toml.example
 !/scripts/
 !/rules/
@@ -24,6 +28,7 @@
 /rules/00-canonical-profile.md
 /rules/_digest.md
 /rules/slices/_facts*.md
+/rules/stale_patterns.txt
 
 # Watcher secrets, preferences, learned state, runtime, and generated sandbox config
 /automation/.env

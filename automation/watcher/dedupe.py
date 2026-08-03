@@ -177,11 +177,10 @@ OPTIONAL_PDFS = tuple(
 def missing_documents(folder: str | Path) -> list[str]:
     """Which required PDFs are absent from a deliverable folder.
 
-    A folder alone is not proof that an application exists.
-    `2026/Synergeticon/2026-07-13 - AI Engineer` holds no PDFs at all — an
-    abandoned run. Treating that as "already applied" would block the role from
-    ever being retried, so the duplicate check asks for the documents, not the
-    directory.
+    A folder alone is not proof that an application exists. A run that died
+    partway leaves `<YYYY>/<Company>/<date> - <Role>/` behind with no PDFs in
+    it. Treating that as "already applied" would block the role from ever being
+    retried, so the duplicate check asks for the documents, not the directory.
     """
     path = Path(folder)
     if not path.is_dir():

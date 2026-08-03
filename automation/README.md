@@ -19,7 +19,7 @@ poll sources → dedupe → prefilter (free) → score (haiku) → Telegram
 (`python-telegram-bot <21` vs the 22.8 this needs) and cannot run the watcher.
 
 ```powershell
-cd "D:\Job Applications\automation"
+cd "<workspace root>\automation"
 .\.venv\Scripts\python.exe run_watcher.py              # the real thing
 .\.venv\Scripts\python.exe run_watcher.py --once       # one poll+score+notify, then exit
 .\.venv\Scripts\python.exe run_watcher.py --digest     # send the digest now
@@ -184,7 +184,7 @@ or none of them carrying a reason. A bare yes/no teaches the matcher nothing.
 ## Builds and containment
 
 Headless builds run `claude -p --permission-mode bypassPermissions --settings
-build_settings.json`, cwd pinned to `D:\Job Applications`, with the URL and note on stdin.
+build_settings.json`, cwd pinned to the workspace root, with the URL and note on stdin.
 `bypassPermissions` is what makes an unattended 11-step run possible; two layers narrow it.
 
 1. **`build_settings.json` deny rules.** Explicit denies still apply under `bypassPermissions`.
@@ -196,7 +196,7 @@ build_settings.json`, cwd pinned to `D:\Job Applications`, with the URL and note
 2. **`hooks/guard.py`**, a blocking `PreToolUse` hook on Bash/Edit/Write/Read. Exit 2 blocks
    the call and its stderr becomes the reason the model sees. It blocks destructive commands,
    credential and system paths, and any *write* outside the workspace; reads may roam, because
-   the canonical profile cites work under `D:\PHD Works`. Every decision is appended to
+   the canonical profile cites work under `D:\Research Archive`. Every decision is appended to
    `logs/builds/guard.log`. `--self-test` runs the fixture table.
 
    The hook's `command` must be the **absolute venv interpreter path**. Bare `python` resolves

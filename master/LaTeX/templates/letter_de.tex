@@ -1,7 +1,13 @@
 \documentclass[11pt,a4paper]{article}
 \usepackage[a4paper,top=17mm,bottom=12mm,left=17.5mm,right=20.3mm]{geometry}
 \usepackage{fontspec}
+% See letter_en.tex for why Helvetica Neue is preferred; the Liberation branch exists only so
+% a clone without the proprietary font files still compiles.
+\IfFileExists{fonts/HelveticaNeue-regular.ttf}{
 \setmainfont{HelveticaNeue-regular.ttf}[Path=fonts/,BoldFont=HelveticaNeue-bold.ttf,ItalicFont=HelveticaNeue-italic.ttf,BoldItalicFont=HelveticaNeue-boldItalic.ttf]
+}{
+\setmainfont{LiberationSans-Regular.ttf}[Path=fonts/,BoldFont=LiberationSans-Bold.ttf,ItalicFont=LiberationSans-Italic.ttf,BoldItalicFont=LiberationSans-BoldItalic.ttf]
+}
 \usepackage{xcolor}
 \definecolor{body}{HTML}{222222}
 \definecolor{ruleblue}{HTML}{458fe9}

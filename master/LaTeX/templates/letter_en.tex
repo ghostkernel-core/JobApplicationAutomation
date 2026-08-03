@@ -7,7 +7,13 @@
 % fallback was tried previously and silently drops every semicolon glyph on pdftotext
 % extraction (ATS/copy-paste impact), which is worse than the apostrophe issue it aimed
 % to avoid. Re-verify with pdftotext against a real compiled document before changing this.
+% The Liberation branch exists only so a clone without the proprietary Helvetica files still
+% compiles; it carries the semicolon caveat above, so re-verify extraction before relying on it.
+\IfFileExists{fonts/HelveticaNeue-regular.ttf}{
 \setmainfont{HelveticaNeue-regular.ttf}[Path=fonts/,BoldFont=HelveticaNeue-bold.ttf,ItalicFont=HelveticaNeue-italic.ttf,BoldItalicFont=HelveticaNeue-boldItalic.ttf]
+}{
+\setmainfont{LiberationSans-Regular.ttf}[Path=fonts/,BoldFont=LiberationSans-Bold.ttf,ItalicFont=LiberationSans-Italic.ttf,BoldItalicFont=LiberationSans-BoldItalic.ttf]
+}
 \usepackage{xcolor}
 \definecolor{body}{HTML}{222222}
 \definecolor{ruleblue}{HTML}{458fe9}

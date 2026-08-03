@@ -18,7 +18,7 @@ Payload requirements:
 - `projects`: canonical projects only, ordered/emphasized for the posting.
 - `education`: canonical education only, in master-style structured entries: `date`, `degree`, `details` with institution/thesis/focus bullets. Do not collapse degrees into one-line bullet strings.
 - `skills`: master-style categorized expertise blocks only. Preserve the master categories: Artificial Intelligence (AI), Project Management, Software Development, Technologies, Visualization and Web. Reorder/trim supported skills inside those rows only; do not collapse expertise into broad custom rows.
-- `languages`: German B1+, English C1+, Bengali native.
+- `languages`: preserve the candidate's real languages and levels from the canonical profile, in the candidate's own order (for example `{"German": "B1+", "English": "C1+", "<native language>": "Native"}`). Each key is printed verbatim as the CV's language label, so use the real language name, never a placeholder.
 - English payload text must avoid German umlauts and `ß`; use established English names where available, otherwise transliterate `ä/ö/ü/ß` as `ae/oe/ue/ss`.
 - `date_line`: application date line for the candidate's city (`identity.toml` `[person].city`).
 - `trim_notes`: optional notes if content may overflow the fixed LaTeX layout.

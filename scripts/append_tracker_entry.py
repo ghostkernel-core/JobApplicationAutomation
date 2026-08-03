@@ -12,11 +12,11 @@ field from the write instead of breaking the run.
 
 Usage:
     python scripts/append_tracker_entry.py \
-        --company "Bayer" \
+        --company "ExampleCo" \
         --position "Machine Learning Engineer" \
         --date 2026-08-02 \
         --location "Frankfurt am Main" --country "Germany" \
-        --folder "D:/Job Applications/2026/Bayer/2026-08-02 - Machine Learning Engineer"
+        --folder "<workspace>/2026/ExampleCo/2026-08-02 - Machine Learning Engineer"
 """
 
 from __future__ import annotations

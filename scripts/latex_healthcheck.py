@@ -35,20 +35,52 @@ PREP_TEX = _IDENT.doc_name("Interview Prep")
 PREP_PDF = _IDENT.doc_name("Interview Prep", ".pdf")
 ROOT = Path(__file__).resolve().parents[1]
 MASTER_COMMON = ROOT / "master" / "LaTeX" / "shared" / "common.tex"
+
+# Generic patterns only: these apply to anybody using this system, regardless
+# of who owns the workspace, so they are safe to keep hard-coded in a public
+# repo. Person-specific stale strings (superseded dates, claims that person
+# cannot make, tools they may not claim, former addresses/affiliations) do NOT
+# belong here — they are loaded at runtime from the git-ignored
+# rules/stale_patterns.txt via load_stale_patterns() below.
 BAD_PATTERNS = [
     r"\{\{.*?\}\}",
     r"\bTODO\b",
     r"\bTBD\b",
     r"\?\?",
-    r"23\. May, 2025",
-    r"14\. March 2025",
-    r"B2-level",
-    r"\bB2\b",
     r"visa|permit|sponsorship|relocation",
-    r"Kubernetes|\bGCP\b|Airflow|TypeScript|\bGo\b",
+    r"PERSOENLICHE|Nationalitaet|\bfuer\b|\bueber\b|Gruessen|Strasse",
     r"\b(?:Claude|ChatGPT|Anthropic|OpenAI|Ollama|Gemini|Mistral|Copilot|LangChain|MCP)\b",
-    r"PERSOENLICHE|Nationalitaet|\bfuer\b|\bueber\b|Gruessen|Strasse|Huebgen|Muelheim|Karlich|Suedwestfalen",
 ]
+
+STALE_PATTERNS_FILE = ROOT / "rules" / "stale_patterns.txt"
+
+
+def load_stale_patterns(path: Path = STALE_PATTERNS_FILE) -> list[str]:
+    """Load per-person stale-pattern regexes from a git-ignored file.
+
+    The file is optional: if it does not exist, this returns an empty list
+    and the check runs with only the generic BAD_PATTERNS. Each non-blank,
+    non-comment line is compiled defensively so a typo produces a clear error
+    naming the file and line instead of a raw traceback.
+    """
+    if not path.exists():
+        return []
+    patterns: list[str] = []
+    for lineno, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            re.compile(line)
+        except re.error as exc:
+            raise SystemExit(
+                f"invalid regex in {path} at line {lineno}: {line!r} ({exc})"
+            ) from exc
+        patterns.append(line)
+    return patterns
+
+
+BAD_PATTERNS.extend(load_stale_patterns())
 
 
 def read_text(path: Path) -> str:
@@ -205,13 +237,22 @@ def check_cv_folder(folder: Path, expect_phd: bool) -> list[str]:
             rendered_text[name] = text
 
     combined = "\n".join(rendered_text.values())
-    phd_pattern = r"Doctor of Engineering|Promotion zum Dr\.-Ing\.|Promotionskolleg NRW"
+    # Deliberately matches the doctoral-programme wording rather than a bare "Dr.",
+    # which would fire on a recipient's title in the cover-letter address block.
+    phd_pattern = r"Doctor of Engineering|Doctor of Philosophy|Promotion zum Dr\.-Ing\.|Promotionskolleg"
     if expect_phd:
         if not re.search(phd_pattern, combined, flags=re.IGNORECASE):
             errors.append("PhD variant: missing ongoing doctorate entry")
         if not re.search(r"ongoing|in progress|laufend", combined, flags=re.IGNORECASE):
             errors.append("PhD variant: doctorate is not clearly marked ongoing")
-        if re.search(r"Name:\s*(?:Dr\.|Dr\.-Ing\.)|Name:\s*(?:M\.|Mohammad)\s+(?:Dr\.|Dr\.-Ing\.)", combined, flags=re.IGNORECASE):
+        # The doctorate is ongoing, so it may appear as an education entry but never
+        # as a title on the name line -- either directly after "Name:" or after a
+        # given name on the same line.
+        given = "|".join(re.escape(p) for p in _IDENT.full_name.split() if len(p) > 1)
+        title_in_name = r"Name:\s*(?:Dr\.|Dr\.-Ing\.)"
+        if given:
+            title_in_name += rf"|Name:\s*(?:{given})\s+(?:Dr\.|Dr\.-Ing\.)"
+        if re.search(title_in_name, combined, flags=re.IGNORECASE):
             errors.append("PhD variant: doctorate title appears in the candidate name")
     elif re.search(phd_pattern, combined, flags=re.IGNORECASE):
         errors.append("Non-PhD variant: doctorate wording found")

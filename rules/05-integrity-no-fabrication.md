@@ -10,10 +10,10 @@ A document that wins an interview on a false claim is a failure, not a success.
 
 ## Specifically prohibited
 - ❌ **Invented metrics.** No "improved X by 15%/30%/40%" unless that exact figure is in
-  the master. The current master CV contains **no percentages**, so the default CV/letters
-  carry **no percentage claims**. (Older targeted CVs in `/Targeted` used numbers like
-  15%/30%/20% — these are outdated and must not be reused.)
-- ❌ **Skills/tools he doesn't have.** Only technologies listed in the canonical stack may
+  the master. If the master CV contains no percentages, the default CV and letters carry
+  **no percentage claims** either. Figures from an older, superseded CV are not a licence to
+  reuse them — check the current master, not a previous draft.
+- ❌ **Skills/tools the candidate doesn't have.** Only technologies listed in the canonical stack may
   be presented as competencies. If a posting wants something else, foreground the nearest
   real skill; optionally note willingness to learn (cover letter only, never the CV skills list).
 - ❌ **Fake titles, employers, dates, degrees, certifications, clearances.**

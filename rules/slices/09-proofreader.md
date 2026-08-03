@@ -5,7 +5,7 @@ Run only after `scripts/latex_healthcheck.py` passes.
 ## Check list
 
 - EN/DE spelling, grammar, punctuation, tone, consistency.
-- German formal register: `Sie`, capitalized nouns, correct umlauts (ä ö ü ß), no ASCII transliterations (Nationalitaet, fuer, Strasse, Gruessen, Suedwestfalen).
+- German formal register: `Sie`, capitalized nouns, correct umlauts (ä ö ü ß), no ASCII transliterations (Nationalitaet, fuer, Strasse, Gruessen, Duesseldorf).
 - No empty bullets, placeholders (`{{...}}`, `TODO`, `TBD`), stale dates, mixed company names, old role text.
 - Page limits: CV ≤2, letters ≤1.
 - Cross-document name/address/phone/email/date consistency.

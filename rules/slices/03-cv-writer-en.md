@@ -13,7 +13,7 @@ Read `rules/slices/_facts.md` first — the condensed canonical facts for this w
 - Education: preserve master structure — dated degree `entry` with indented dash bullets for institution, thesis, focus. Do not collapse into one-line bullets.
 - Skills: preserve master categories (AI, Project Management, Software Development, Technologies, Visualization and Web). Reorder/trim inside them. Do not collapse into custom rows.
 - Skill labels and values must be concise enough to render without ugly wrapped-line spacing in the fixed LaTeX expertise table. Prefer shorter phrases over long comma chains in narrow skill rows.
-- Languages: German B1+, English C1+, Bengali native.
+- Languages: preserve the candidate's real languages and levels from the canonical profile, in the candidate's own order.
 - Dates: `MM/YYYY`. English `Present`.
 - English payload text must avoid German umlauts and `ß`; use established English names where available, otherwise transliterate `ä/ö/ü/ß` as `ae/oe/ue/ss`.
 - No new personal-data fields. No invented metrics/tools/seniority.

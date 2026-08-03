@@ -11,13 +11,13 @@ Scan and remove / rewrite:
 - "ideal candidate", "unique blend", "proven track record" (used as filler), "I am
   passionate about leveraging", "synergy", "spearheaded", "tapestry", "testament to".
 - Triadic everything ("X, Y, and Z" in sentence after sentence). Vary list lengths.
-- Em-dash overuse `—`. He rarely uses them; prefer commas / "and" / full stops.
+- Em-dash overuse `—`. The candidate rarely uses them; prefer commas / "and" / full stops.
 - Uniform paragraph lengths and identical sentence cadence. Real writing varies.
 - Perfectly balanced "Not only… but also…" constructions in every letter.
 - Hedging filler: "In today's fast-paced world", "In the ever-evolving landscape of".
 - A closing that could be pasted into any application. The close should reference the role/company.
 
-## B. Sound like HIM (see rules/01-writing-style.md)
+## B. Sound like the candidate (see rules/01-writing-style.md)
 - Allow mild non-native phrasing at low density — do not native-ise it away.
 - Warm, sincere, sometimes a longer run-on joined by "and/which". Keep some.
 - Concrete project nouns and real tech stack, not abstractions.

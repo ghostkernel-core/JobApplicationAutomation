@@ -1,0 +1,28 @@
+# rules/stale_patterns.txt (this file is the committed template for it)
+#
+# scripts/latex_healthcheck.py loads extra regex patterns from the live,
+# git-ignored rules/stale_patterns.txt and checks every rendered .tex/.pdf
+# against them, on top of the generic patterns already hard-coded in the
+# script. Use it for the stale strings and claims that are yours alone and
+# must never reach a rendered document — things a public repo has no business
+# knowing and that would be wrong for anyone else's workspace to inherit:
+#
+#   - superseded dates left over from an earlier draft of a document
+#   - a language level, certification, or clearance you cannot currently claim
+#   - tools or platforms you have only touched privately, not professionally
+#   - a previous home address or institutional affiliation
+#
+# Format: one regex per line (Python `re` syntax, matched case-insensitively
+# against the rendered text). Blank lines and lines starting with # are
+# ignored. The file is entirely optional — if it does not exist, the
+# healthcheck runs fine with just the generic patterns.
+#
+# The live rules/stale_patterns.txt is git-ignored (see .gitignore), so your
+# entries never leave your machine. Copy this file to rules/stale_patterns.txt
+# and uncomment/edit the examples below for your own facts. Fictional examples:
+#
+# 1\. April, 2019
+# C1-level
+# \bC1\b
+# Kubernetes|\bRust\b|Scala
+# Lakeview|Northbridge|Fictional State University

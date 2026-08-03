@@ -177,8 +177,37 @@ def render_skills(skills: Any) -> str:
     return "\n".join([r"\xcat{Technology Stack:}", r"\begin{xpert}", rows, r"\end{xpert}"])
 
 
+def render_languages(languages: dict) -> str:
+    if not languages:
+        return ""
+    items = list(languages.items())
+    count = len(items)
+    if count == 3:
+        # Three languages is the common case, so it keeps the hand-tuned
+        # widths the templates shipped with instead of the generic 1/3 split,
+        # which would render fractionally narrower/wider and change existing
+        # PDFs for no reason.
+        widths = [0.36, 0.34, 0.30]
+    else:
+        # Generic case: split evenly, two-decimal precision, with any
+        # rounding remainder absorbed by the last row so the widths still
+        # sum to 1.00.
+        share = round(1.0 / count, 2)
+        widths = [share] * (count - 1)
+        widths.append(round(1.0 - share * (count - 1), 2))
+    rows = []
+    for index, (label, value) in enumerate(items):
+        row = (
+            rf"\makebox[{widths[index]:.2f}\textwidth][l]"
+            rf"{{\discbul\hspace{{2.2mm}}\textbf{{{latex_escape(label)}:}} {latex_escape(value)}}}"
+        )
+        if index != count - 1:
+            row += "%"
+        rows.append(row)
+    return "\n".join(rows)
+
+
 def render_cv_context(payload: dict[str, Any]) -> dict[str, str]:
-    languages = payload.get("languages", {}) or {}
     return {
         "headline": latex_escape(payload.get("headline", "")),
         "profile": latex_escape(payload.get("profile", "")),
@@ -186,9 +215,7 @@ def render_cv_context(payload: dict[str, Any]) -> dict[str, str]:
         "project_entries": render_projects(payload.get("projects", [])),
         "education_items": render_education(payload.get("education", [])),
         "skill_items": render_skills(payload.get("skills", {})),
-        "language_german": latex_escape(languages.get("German", languages.get("Deutsch", "B1+"))),
-        "language_english": latex_escape(languages.get("English", languages.get("Englisch", "C1+"))),
-        "language_bengali": latex_escape(languages.get("Bengali", languages.get("Bengalisch", "Native"))),
+        "language_items": render_languages(payload.get("languages", {}) or {}),
         # "Place, Date". The place defaults to where this workspace's owner
         # lives rather than to a literal city, which would follow a clone into
         # someone else's CV.
