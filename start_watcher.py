@@ -1,40 +1,51 @@
-"""Start the job watcher detached, so it keeps polling after the terminal closes.
+"""Control the job watcher from the repository root.
 
-    python start_watcher.py            # start it (no-op if already running)
-    python start_watcher.py --status   # report running/not-running, start nothing
+    python start_watcher.py                 # start it detached (no-op if already running)
+    python start_watcher.py status
+    python start_watcher.py stop
+    python start_watcher.py restart
+    python start_watcher.py logs -n 50 -f
+    python start_watcher.py --help          # every sub-command
 
-This is a thin wrapper kept for the shortcuts, scheduler tasks and documentation
-that already point at it. The real control surface is
-`automation/watcherctl.py`, which does the same two things plus stop, restart,
-poll, health, reset, digest and logs:
+Every sub-command of `automation/watcherctl.py` is available here verbatim --
+this file adds a default (`start`, so the bare launcher shortcuts and scheduler
+tasks keep working) and translates the historical `--status` flag into the
+`status` sub-command. It holds no logic of its own: preflighting the venv,
+`.env` token and `build_settings.json`, refusing to start a second instance, and
+finding a watcher that was started some other way all live in `watcherctl`, so
+there is one implementation rather than two that can drift.
 
-    py automation/watcherctl.py --help
-
-Everything this file used to do itself -- preflighting the venv, `.env` token and
-`build_settings.json`, refusing to start a second instance, and finding a watcher
-that was started some other way -- now lives there, so there is one
-implementation rather than two that can drift. The one behaviour that did not
-survive is the pidfile at `automation/state/watcher.launcher.pid`: it only ever
-covered instances this launcher started, and the process-table scan that had to
-back it up is strictly better on its own. A leftover pidfile from an older
-version is inert and can be deleted.
+`watcherctl` is imported rather than launched as a child process, which keeps
+exit codes and Ctrl-C behaviour (`logs -f`) intact and avoids a second
+interpreter. It imports nothing from `watcher` and needs no third-party package,
+so this works under any interpreter on the machine -- the venv is only involved
+for the sub-commands that genuinely need it.
 """
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-WATCHERCTL = ROOT / "automation" / "watcherctl.py"
+AUTOMATION_DIR = ROOT / "automation"
 
 
 def main(argv: list[str]) -> int:
-    if not WATCHERCTL.exists():
-        print(f"missing {WATCHERCTL}", file=sys.stderr)
+    if not (AUTOMATION_DIR / "watcherctl.py").exists():
+        print(f"missing {AUTOMATION_DIR / 'watcherctl.py'}", file=sys.stderr)
         return 2
-    command = "status" if "--status" in argv else "start"
-    return subprocess.run([sys.executable, str(WATCHERCTL), command]).returncode
+    sys.path.insert(0, str(AUTOMATION_DIR))
+    import watcherctl
+
+    # So the hints watcherctl prints name the command the user actually typed.
+    watcherctl.PROG = "python start_watcher.py"
+
+    # `--status` predates the sub-commands and is still in shortcuts and docs.
+    argv = ["status" if arg == "--status" else arg for arg in argv]
+    # Nothing, or options only (`--force`), still means the historical `start`.
+    if not argv or (argv[0].startswith("-") and argv[0] not in ("-h", "--help")):
+        argv = ["start", *argv]
+    return watcherctl.main(argv)
 
 
 if __name__ == "__main__":

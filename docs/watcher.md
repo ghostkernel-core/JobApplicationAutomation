@@ -134,19 +134,24 @@ directly — `automation/watcherctl.py` wraps it. It preflights the venv, `.env`
 handles everything after the start too:
 
 ```bash
-py automation/watcherctl.py status     # running? since when? how are the sources?
-py automation/watcherctl.py start
-py automation/watcherctl.py stop
-py automation/watcherctl.py restart
-py automation/watcherctl.py logs -n 50 -f
+python start_watcher.py status         # running? since when? how are the sources?
+python start_watcher.py start          # or just `python start_watcher.py`
+python start_watcher.py stop
+python start_watcher.py restart
+python start_watcher.py logs -n 50 -f
+python start_watcher.py --help         # every sub-command
 ```
+
+`start_watcher.py` in the repository root and `automation/watcherctl.py` take the same
+sub-commands and do the same thing — the root launcher forwards each one unchanged and defaults to
+`start` when given none, so you never have to remember which script owns which verb. Run whichever
+is closer to where you are; the examples here use the root one because that is where a session
+usually starts.
 
 It imports nothing from `watcher` and needs no third-party package, so it runs under any
 interpreter on the machine and hands the commands that need real dependencies to
 `automation/.venv`. Instances are found by scanning the process table for a `run_watcher`
 command line rather than by a pidfile, so it also sees a watcher that was started by hand.
-`start_watcher.py` at the repository root still works — it is a thin shim onto
-`watcherctl start` / `watcherctl status`.
 
 For unattended operation, use a scheduler task at logon running
 `py automation/watcherctl.py start` with restart-on-failure, or the same line as a shortcut in
