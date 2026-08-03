@@ -99,12 +99,13 @@ process from an earlier session, or (rarely) two installs configured to share on
 **Fix:** find and stop the other process:
 
 ```bash
-py automation/watcherctl.py status     # lists every live instance, with pid and start time
-py automation/watcherctl.py stop       # stops all of them
-py automation/watcherctl.py start      # bring one back
+python start_watcher.py status     # lists every live instance, with pid and start time
+python start_watcher.py stop       # stops all of them
+python start_watcher.py start      # bring one back
 ```
 
-`restart` does the last two in one step. If you would rather look yourself:
+`python start_watcher.py restart` does the last two in one step. (`py automation/watcherctl.py`
+takes the same sub-commands — the root script forwards to it.) If you would rather look yourself:
 
 ```powershell
 Get-CimInstance Win32_Process -Filter "Name like '%python%'" |
@@ -142,7 +143,7 @@ band, never for something the filter simply failed to read.
 
 ## Build refuses to start when `build_settings.json` is missing
 
-**Symptom:** `py automation/watcherctl.py start` (or the `start_watcher.py` shim onto it) fails
+**Symptom:** `python start_watcher.py` (or `py automation/watcherctl.py start`, which it forwards to) fails
 its preflight with `automation/build_settings.json is missing. Run: python
 scripts/init_workspace.py`; or `start_claude.py` prints the same as a warning (interactive
 sessions do not need it).

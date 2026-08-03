@@ -10,6 +10,10 @@
     python watcherctl.py digest
     python watcherctl.py logs -n 50 -f
 
+`start_watcher.py` in the repository root forwards every one of these
+sub-commands here unchanged, defaulting to `start` when given none, so either
+spelling works and there is only one implementation behind them.
+
 Unlike everything else under `automation/`, this file imports nothing from
 `watcher` and needs no third-party package, so it runs under *any* interpreter
 on the machine -- `py watcherctl.py status` works even though the global Python
@@ -42,6 +46,10 @@ STARTUP_LOG = LOG_DIR / "watcher.out"
 ENTRYPOINT = AUTOMATION_DIR / "run_watcher.py"
 
 IS_WINDOWS = os.name == "nt"
+# How to invoke this control surface, for help text and hints. The root
+# `start_watcher.py` forwards every sub-command here, so it overwrites this with
+# its own name and the advice quotes the command the user actually typed.
+PROG = "python automation/watcherctl.py"
 # The marker that identifies a watcher process in a command line. Deliberately
 # the module name without extension so it matches both `run_watcher.py` and
 # `python -m run_watcher`.
@@ -283,7 +291,8 @@ def cmd_start(args: argparse.Namespace) -> int:
         print("Already running -- not starting a second instance:")
         for proc in running:
             print(f"  pid {proc.pid}  started {proc.started}")
-        print("\nUse `restart` to replace it, or `--force` if you really mean two.")
+        print(f"\nUse `{PROG} restart` to replace it, "
+              "or add `--force` if you really mean two.")
         return 0
 
     python = venv_python(windowed=True)
@@ -395,7 +404,7 @@ def main(argv: list[str] | None = None) -> int:
             pass
 
     parser = argparse.ArgumentParser(
-        prog="watcherctl",
+        prog=PROG,
         description=__doc__.splitlines()[0],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

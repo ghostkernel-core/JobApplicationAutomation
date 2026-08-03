@@ -104,6 +104,20 @@ That is the manual path working. Paste a job URL into the session and you get an
 folder. Setting up the watcher, the Telegram bot, and the venv is another ten minutes:
 [docs/getting-started.md](./docs/getting-started.md).
 
+Once it is set up, the watcher is driven entirely from one script in the repository root:
+
+```bash
+python start_watcher.py                 # start it detached (no-op if already running)
+python start_watcher.py status          # running? since when? how are the sources?
+python start_watcher.py restart
+python start_watcher.py stop
+python start_watcher.py logs -n 50 -f   # tail the log, -f to follow
+python start_watcher.py --help          # poll, health, reset, digest, ...
+```
+
+Each sub-command is forwarded verbatim to `automation/watcherctl.py`, which is the same control
+surface from inside that folder — one implementation, two spellings.
+
 ## Why it won't embarrass you
 
 **It refuses to lie.** Every claim in a generated CV or cover letter must trace to
@@ -156,7 +170,8 @@ master/LaTeX/        locked templates (cv_en, cv_de, letter_en, letter_de,
                      interview_prep_en), shared macros, fonts, images
 automation/          the watcher — self-contained: own venv, config, sqlite state,
                      logs, one fetcher module per board; hooks/guard.py sandbox hook;
-                     watcherctl.py is the start/stop/status front door
+                     watcherctl.py is the control surface (start_watcher.py in
+                     the root forwards to it)
 .claude/agents/      the specialist subagents, 00–12
 docs/                the long-form documentation
 ```

@@ -34,6 +34,12 @@ py watcherctl.py digest          :: send the digest now
 py watcherctl.py logs -n 50 -f   :: tail watcher.log, -f to follow
 ```
 
+The repository root has `start_watcher.py`, which takes every one of these sub-commands and
+forwards it here unchanged — `python start_watcher.py restart` and `py watcherctl.py restart` are
+the same command. It defaults to `start` when given no arguments, so the launcher shortcuts and
+scheduler tasks that predate the sub-commands still work. Use whichever is closer to hand; there
+is one implementation behind both.
+
 Only one instance may run at a time — two processes long-polling the same bot token produce a
 stream of `telegram.error.Conflict: terminated by other getUpdates request`. `start` refuses when
 one is already up, and `status` finds instances by command line rather than by a pid file, so it
