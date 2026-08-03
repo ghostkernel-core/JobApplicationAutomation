@@ -1,0 +1,196 @@
+# ---------------------------------------------------------------------------
+# Job sources the watcher scrapes. This file is meant to be hand-edited.
+#
+#   [[ats]]     one company's own job board. Public JSON, no anti-bot, reliable.
+#               This is the backbone — add companies you actually want to work for.
+#   [[portal]]  a broad aggregator. Wider reach, but hiring.cafe and StepStone
+#               have no public API and sit behind Cloudflare, so they are marked
+#               fragile and disable themselves when they break.
+#
+# ADDING A COMPANY
+# The slug is not guessable from the company name, so let the resolver find it:
+#
+#     python -m watcher.discover --company "Celonis"
+#
+# It probes every supported provider and prints a ready-to-paste block. Check
+# the sample job titles it shows — slugs collide. `aleph` on Lever is an
+# advertising company, not Aleph Alpha. If nothing is found, open the careers
+# page and pass the slug from the URL with --slug.
+#
+# Workday cannot be probed: it needs three values out of the careers URL.
+#   https://<host>/<site>/job/...  and  /wday/cxs/<tenant>/<site>/
+#
+# CHECKING YOUR WORK (touches nothing):
+#     python -m watcher.poll --dry-run --source "ats:Celonis"
+#     python -m watcher.poll --dry-run --show-filtered
+# ---------------------------------------------------------------------------
+
+[defaults]
+# Superseded by [filters.location] below, kept because it still works: if
+# [filters.location] countries is empty, this list is used instead. Leave it.
+# EXAMPLE — replace with your own countries.
+countries = []
+
+# A posting must match one of these to survive the free prefilter.
+# EXAMPLE — replace with your own role keywords.
+title_allow = [
+    # "machine learning", "ml engineer",
+    # "data scientist", "data science",
+    # "software engineer",
+]
+
+# ...and match none of these.
+# EXAMPLE — replace with your own exclusions.
+title_deny = [
+    # "intern", "praktikum", "werkstudent", "working student", "trainee",
+    # "head of", "vp ", "vice president", "chief", "director",
+]
+
+# ---------------------------------------------------------------------------
+# Filters
+#
+# Every filter here is ONE-SIDED: it can only reject a posting it positively
+# resolved. A location it cannot parse, a title with no stated rank, a posting
+# with no experience bar — all pass through to the matcher, which scores them
+# and lets you see them. That is deliberate. A filter that drops what it failed
+# to read turns every new board format into silent, unauditable data loss.
+#
+# Check what any edit here actually does, against real stored postings:
+#     python -m watcher.poll --dry-run --show-filtered
+#     python -m watcher.prefilter --explain      # every rule, with its inputs
+# ---------------------------------------------------------------------------
+
+[filters.location]
+# Four ways to name the same thing; they add up rather than override.
+#   continents  EUROPE NORTH_AMERICA SOUTH_AMERICA ASIA AFRICA OCEANIA
+#   regions     EU EFTA EEA DACH BENELUX NORDICS SCANDINAVIA BALTICS
+#               IBERIA CEE UK_IE EMEA
+#   countries   ISO-3166 alpha-2, or spelled out ("Germany", "Deutschland")
+#   cities      any spelling; "Munich" also matches "München" and "Muenchen"
+#
+# See what a name expands to before committing to it:
+#     python -m watcher.geo --expand EU DACH
+#     python -m watcher.geo --resolve "Düsseldorf, Germany"
+continents        = []
+regions           = []
+countries         = []
+exclude_countries = []
+
+# Empty = anywhere inside the allowed countries. Naming cities here narrows to
+# exactly those, so it is the one setting that can shrink the feed hard.
+cities            = []
+exclude_cities    = []
+
+# remote_ok       a posting flagged remote survives a country miss
+# remote_anywhere ...even when its employer is outside the allowed countries.
+#                 Left false: a remote role at a US company is still a US
+#                 contract, a US timezone, and usually no EU work authorisation.
+remote_ok         = true
+remote_anywhere   = false
+
+[filters.seniority]
+# Every band you would actually take. All of them are listed on purpose — this
+# filter is here so it CAN be narrowed later, not because it narrows anything
+# now. Delete a line to stop seeing that band.
+#
+# `unknown` is never filtered and cannot be denied: most good ML titles state no
+# rank at all, so rejecting unknown would discard the bulk of the feed.
+allow = ["junior", "mid", "senior", "lead", "staff", "principal"]
+
+# intern covers Praktikum / Werkstudent / Working Student / Trainee, which is a
+# different thing from junior. executive covers Head of / VP / C-level.
+deny  = ["intern", "executive"]
+
+[filters.experience]
+# annotate  read the years-of-experience bar, show it in the ping, never act
+#           on it — the decision you took, and the right one: postings overstate
+#           the bar routinely, and profile_kb.md already treats being one or two
+#           years short as a minor gap.
+# filter    drop postings demanding more than max_years.
+mode      = "annotate"
+max_years = 0
+
+# ---------------------------------------------------------------------------
+# Company job boards
+#
+# Add `enabled = false` to any entry to park it without deleting it.
+#
+# EXAMPLE — replace with your own target companies. Uncomment and edit, or add
+# fresh blocks discovered with `python -m watcher.discover --company "..."`.
+# ---------------------------------------------------------------------------
+
+# [[ats]]
+# company = "Example Greenhouse Co"
+# provider = "greenhouse"
+# token = "examplegreenhouseco"
+
+# [[ats]]
+# company = "Example Ashby Co"
+# provider = "ashby"
+# token = "exampleashbyco"
+
+# [[ats]]
+# company = "Example Workday Co"
+# provider = "workday"
+# host = "https://example.wd3.myworkdayjobs.com"
+# tenant = "example"
+# site = "example-ext"
+
+# Lever is supported but no target company here uses it yet. The shape is:
+#   [[ats]]
+#   company = "Example"
+#   provider = "lever"
+#   token = "example"          # the slug in jobs.lever.co/<slug>
+
+# ---------------------------------------------------------------------------
+# Aggregators
+#
+# `name` selects the fetcher — the portals are not generic, so there is no URL
+# to set here and adding a fourth means writing watcher/fetchers/<name>.py.
+# What each one reads:
+#
+#   arbeitsagentur  public JSON API. `location` is a city and `radius_km` the
+#                   search radius around it. The only aggregator that is not
+#                   fragile.
+#   hiringcafe      Next.js data endpoint, through the shared browser context.
+#                   Worldwide, so [filters.location] does the geography.
+#   stepstone       the search page's preloaded state, through the same context.
+#                   `location` becomes /in-<slug>; "Deutschland" is all of it.
+#
+# `queries` is the search text, verbatim, per portal. Broad is fine — the title
+# allow-list in [defaults] is what decides relevance, and it is stricter than
+# any of these three.
+#
+# EXAMPLE — replace queries/location with your own search terms.
+# ---------------------------------------------------------------------------
+
+# [[portal]]
+# name = "arbeitsagentur"
+# enabled = true
+# fragile = false
+# queries = [
+#     "Machine Learning Engineer",
+#     "Data Scientist",
+# ]
+# # Bundesagentur location filter: city plus radius in km.
+# location = "Berlin"
+# radius_km = 100
+
+# [[portal]]
+# name = "hiringcafe"
+# enabled = true
+# fragile = true
+# queries = [
+#     "AI Engineer",
+#     "Machine Learning Engineer",
+# ]
+
+# [[portal]]
+# name = "stepstone"
+# enabled = true
+# fragile = true
+# domain = "stepstone.de"
+# queries = [
+#     "Machine Learning Engineer",
+# ]
+# location = "Deutschland"

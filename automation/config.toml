@@ -1,0 +1,67 @@
+# Job watcher configuration.
+# Secrets do NOT belong here — put them in automation/.env
+# Source list lives in automation/sources.toml
+
+[poll]
+interval_minutes = 30
+# Postings older than this are ignored outright.
+max_age_days = 14
+# Per-source HTTP timeout, seconds.
+timeout_seconds = 30
+# A fragile source that fails this many polls in a row disables itself
+# and sends exactly one notification instead of retry-spamming.
+failures_before_disable = 3
+
+[match]
+model = "haiku"
+batch_size = 8
+# score >= notify_threshold  -> instant Telegram ping
+# score >= digest_threshold  -> daily digest line
+# below that                 -> stored silently, visible via `--replay`
+#
+# 60, not 70. Calibrated with `python -m watcher.match --calibrate`: postings
+# already applied to in 2026/ cluster between 60 and 82, while clear misfits
+# (a support role, a US-based posting) sit at 40 or below. A 70 cut would have
+# demoted roughly half the real applications to the evening digest.
+notify_threshold = 60
+digest_threshold = 40
+# How much of the job description is handed to the matcher.
+description_chars = 4000
+timeout_seconds = 180
+
+[notify]
+# 24h local time
+digest_hour = 19
+heartbeat_hour = 9
+# Snooze duration for a "later" reply.
+snooze_days = 7
+
+[build]
+# While false, an approval reply is recorded but no headless build is spawned.
+# Builds run with bypassPermissions, guarded by build_settings.json and
+# hooks/guard.py; set this back to false to stop them at the source.
+enabled = true
+claude_bin = "claude"
+# Orchestrator model for a headless build. Sonnet per CLAUDE.md — subagents
+# pin their own models, so the two writing steps still run on Opus.
+model = "sonnet"
+timeout_minutes = 45
+# Role-title similarity at or above this counts as "already applied".
+duplicate_title_ratio = 0.8
+# Only look this far back when deciding whether a role is a duplicate.
+duplicate_lookback_days = 365
+
+[kb]
+# The weekly pass that reads recent replies and proposes condensed Prefer/Avoid
+# rules for profile_kb.md. It never writes the file on its own: the proposal
+# goes to Telegram and is applied only on an explicit "yes".
+enabled = true
+model = "sonnet"
+# 0 = Monday … 6 = Sunday, and the hour in 24h local time.
+weekday = 6
+hour = 18
+# Fewer new decisions than this since the last proposal and the run is skipped.
+min_decisions = 5
+# How many decisions.jsonl entries the proposal may look at.
+lookback = 60
+timeout_seconds = 180

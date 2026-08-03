@@ -1,0 +1,50 @@
+\documentclass[11pt,a4paper]{article}
+\input{shared/common.tex}
+
+\fancypagestyle{cv}{\fancyhf{}\fancyhead[C]{\textbf{\color{posblue}\fontsize{16}{18}\selectfont CURRICULUM VITAE}}\fancyfoot[R]{\color{body}\thepage}\renewcommand{\headrulewidth}{0pt}\renewcommand{\footrulewidth}{0pt}}
+\pagestyle{cv}
+
+\begin{document}
+
+\cvsection{PERSONAL DATA}
+\noindent
+\begin{minipage}[t]{\dimexpr\textwidth-42mm\relax}
+\vspace{0pt}
+\setlength{\tabcolsep}{0pt}\setstretch{0.92}\renewcommand{\arraystretch}{1.0}
+\begin{tabular}{@{}p{40mm}@{}p{\dimexpr\linewidth-40mm\relax}@{}}
+Name: & {{identity_name}} \\
+Address: & {{identity_address}} \\
+Email: & {{identity_email}} \\
+Telephone: & {{identity_phone}} \\
+Date of Birth: & {{identity_dob}} \\
+Nationality: & {{identity_nationality}} \\
+LinkedIn: & {{identity_linkedin}} \\
+\end{tabular}
+\end{minipage}\hfill
+\begin{minipage}[t]{37mm}
+\vspace{0pt}\includegraphics[width=37mm,height=41.2mm]{images/photo.jpg}
+\end{minipage}
+
+\cvsection{PROFESSIONAL EXPERIENCE}
+{{experience_entries}}
+
+\cvsection{INDUSTRY / PERSONAL PROJECTS}
+{{project_entries}}
+
+\cvsection{EDUCATION}
+{{education_items}}
+
+\cvsection{EXPERTISE}
+{{skill_items}}
+
+\cvsection{LANGUAGE SKILLS}
+\noindent
+\makebox[0.36\textwidth][l]{\discbul\hspace{2.2mm}\textbf{German:} {{language_german}}}%
+\makebox[0.34\textwidth][l]{\discbul\hspace{2.2mm}\textbf{English:} {{language_english}}}%
+\makebox[0.30\textwidth][l]{\discbul\hspace{2.2mm}\textbf{Bengali:} {{language_bengali}}}
+
+\vspace{4pt}
+\noindent\includegraphics[width=30mm,height=15.7mm]{images/signature.png}\par
+\noindent\textbf{Place, Date}: {{date_line}}
+
+\end{document}

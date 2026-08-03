@@ -1,0 +1,15 @@
+# Install into automation/.venv, not the global interpreter:
+#     python -m venv .venv
+#     .venv\Scripts\python.exe -m pip install -r requirements.txt
+#
+# The venv is not optional. The global interpreter on this machine also hosts
+# unrelated tools that pin python-telegram-bot <21 and httpx >=0.27 — mutually
+# unsatisfiable, which had already left a half-upgraded telegram package whose
+# Updater could not be constructed at all. Keeping the watcher separate is what
+# stops that from recurring in either direction.
+requests>=2.32
+beautifulsoup4>=4.12
+python-telegram-bot[job-queue]==22.8
+openpyxl>=3.1
+PyMuPDF>=1.24
+playwright>=1.48

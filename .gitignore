@@ -1,0 +1,49 @@
+# This repository uses a top-level whitelist. New folders at the workspace root
+# are private by default: application years, company folders, trackers, exports,
+# personal documents, recruiter CVs, scratch data, and signatures never become
+# trackable merely because they were created under a new name.
+/*
+!/.gitignore
+!/.claude/
+!/CLAUDE.md
+!/README - How to use this system.md
+!/README.md
+!/identity.toml.example
+!/scripts/
+!/rules/
+!/master/
+!/automation/
+!/.github/
+
+# Claude Code machine-local settings
+/.claude/settings.local.json
+
+# Per-person fact sources and generated rule context
+/rules/00-canonical-profile.md
+/rules/_digest.md
+/rules/slices/_facts*.md
+
+# Watcher secrets, preferences, learned state, runtime, and generated sandbox config
+/automation/.env
+/automation/.venv/
+/automation/state/
+/automation/logs/
+/automation/profile_kb.md
+/automation/decisions.jsonl
+/automation/sources.toml
+/automation/build_settings.json
+
+# Personal source and rendered documents kept under the generic master tree
+/master/*.docx
+/master/LaTeX/CV_*
+/master/LaTeX/Cover_Letter_*
+/master/LaTeX/images/photo.*
+/master/LaTeX/images/signature.*
+
+# proprietary fonts kept local only
+/master/LaTeX/fonts/HelveticaNeue-*
+
+# Generated Python/test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/

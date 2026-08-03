@@ -1,0 +1,55 @@
+\usepackage[a4paper,top=18mm,bottom=13mm,left=16mm,right=12mm,headsep=3mm,headheight=8mm,footskip=5mm]{geometry}
+\usepackage{fontspec}
+% HelveticaNeue-regular.ttf verified (via pdftotext on real compiled output) to preserve
+% both semicolons and apostrophes in extracted text. The prior Arial/LiberationSans
+% fallback silently dropped every semicolon glyph on pdftotext extraction (ATS/copy-paste
+% impact) despite fixing an apostrophe ToUnicode issue that does not reproduce with this
+% font/toolchain. Do not swap this font without re-verifying both punctuation marks with
+% pdftotext against a real compiled document (not just a small sample).
+% The Liberation fallback below exists only so a fresh clone (without the proprietary
+% Helvetica files) still compiles. Before relying on proofreading/text-extraction checks
+% with this substitute font, re-verify semicolons and apostrophes survive pdftotext; prefer
+% dropping your own verified font files into fonts/ (the renderer copies fonts/ into the
+% build dir) so the Helvetica branch below engages instead.
+\IfFileExists{fonts/HelveticaNeue-regular.ttf}{
+\setmainfont{HelveticaNeue-regular.ttf}[Path=fonts/,BoldFont=HelveticaNeue-bold.ttf,ItalicFont=HelveticaNeue-italic.ttf,BoldItalicFont=HelveticaNeue-boldItalic.ttf]
+}{
+\setmainfont{LiberationSans-Regular.ttf}[Path=fonts/,BoldFont=LiberationSans-Bold.ttf,ItalicFont=LiberationSans-Italic.ttf,BoldItalicFont=LiberationSans-BoldItalic.ttf]
+}
+\usepackage{xcolor}
+\definecolor{posblue}{HTML}{0b5394}
+\definecolor{subblue}{HTML}{1c4587}
+\definecolor{ruleblue}{HTML}{458fe9}
+\definecolor{body}{HTML}{222222}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{array}
+\usepackage{fancyhdr}
+\usepackage{tikz}
+\usepackage{setspace}
+\usepackage{needspace}
+\usepackage{ragged2e}
+\usepackage[none]{hyphenat}
+\usepackage[hidelinks]{hyperref}
+\color{body}
+\hyphenpenalty=10000
+\exhyphenpenalty=10000
+\tolerance=3500
+\emergencystretch=3em
+\raggedright
+\setstretch{1.02}
+\setlength{\parindent}{0pt}
+\newcommand{\discbul}{\raisebox{0.30ex}{\tikz{\fill[body] circle (0.46mm);}}}
+\newcommand{\cvsection}[1]{\par\addvspace{4pt}\needspace{18mm}{\bfseries #1}\par\vspace{2pt}{\color{ruleblue}\hrule height 1pt}\vspace{4.5pt}}
+\newlength{\datew}\setlength{\datew}{38mm}
+\newcommand{\entry}[3]{\par\addvspace{1.5pt}\hangindent=\datew\hangafter=1\noindent\makebox[\datew][l]{#1}#2\par\ifx\relax#3\relax\else\hspace*{\datew}\textbf{#3}\par\fi\vspace{1pt}}
+\newlist{discitems}{itemize}{1}
+\setlist[discitems]{label=\discbul,leftmargin=44mm,labelsep=5.5mm,topsep=1pt,partopsep=0pt,parsep=0pt,itemsep=0pt,after=\vspace{0pt}}
+\newlist{dashitems}{itemize}{1}
+\setlist[dashitems]{label=\textcolor{body}{-},leftmargin=44mm,labelsep=4mm,topsep=1pt,partopsep=0pt,parsep=0pt,itemsep=0pt,after=\vspace{0pt}}
+\newlist{xpert}{itemize}{1}
+\setlist[xpert]{label=\textcolor{body}{-},leftmargin=4.2mm,labelsep=2mm,rightmargin=-2.5mm,topsep=1pt,partopsep=0pt,parsep=0pt,itemsep=0pt,after=\vspace{0pt}}
+\newlength{\xlab}\setlength{\xlab}{46.8mm}
+\newlength{\xgap}\setlength{\xgap}{3mm}
+\newcommand{\xitem}[2]{\item \makebox[\xlab][l]{#1}\hspace{\xgap}\parbox[t]{\dimexpr\linewidth-\xlab-\xgap\relax}{\RaggedRight\spaceskip=\fontdimen2\font\relax #2}}
+\newcommand{\xcat}[1]{\par\addvspace{3pt}{\bfseries\color{subblue}#1}\par\vspace{1.5pt}}

@@ -1,0 +1,128 @@
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  structure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Forbid known-private tracked paths
+        run: |
+          set -euo pipefail
+          fail=0
+          check_exact() {
+            local path="$1"
+            if git ls-files | grep -Fxq -- "$path"; then
+              echo "FORBIDDEN TRACKED PATH: $path"
+              fail=1
+            fi
+          }
+          check_grep() {
+            local pattern="$1"
+            local desc="$2"
+            local matches
+            matches=$(git ls-files | grep -E -- "$pattern" || true)
+            if [ -n "$matches" ]; then
+              echo "FORBIDDEN TRACKED PATH(S) matching $desc:"
+              echo "$matches"
+              fail=1
+            fi
+          }
+
+          check_exact "identity.toml"
+          check_exact "automation/.env"
+          check_exact "automation/sources.toml"
+          check_exact "automation/build_settings.json"
+          check_exact "rules/00-canonical-profile.md"
+          check_exact "rules/_digest.md"
+
+          check_grep '^rules/slices/_facts' "rules/slices/_facts*"
+          check_grep '\.xlsx$' "*.xlsx"
+          check_grep '\.docx$' "*.docx"
+          check_grep 'HelveticaNeue' "HelveticaNeue"
+          check_grep '^master/LaTeX/images/photo\.' "master/LaTeX/images/photo.*"
+          check_grep '^master/LaTeX/images/signature\.' "master/LaTeX/images/signature.*"
+          check_grep '^2026/' "2026/**"
+          check_grep '^Documents/' "Documents/**"
+          check_grep '^Recruiter CVs/' "Recruiter CVs/**"
+
+          if [ "$fail" -ne 0 ]; then
+            echo "One or more forbidden paths are tracked. See above."
+            exit 1
+          fi
+          echo "No forbidden tracked paths found."
+
+  secrets-and-pii:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITLEAKS_LICENSE is not required for public repos / personal accounts.
+
+      - name: personal data patterns
+        # PII_PATTERNS is a newline-separated list of extended regexes (grep -E).
+        # NEVER print the matched line or the pattern itself in this step's output —
+        # this workflow's logs are public, so only file names may be reported.
+        env:
+          PII_PATTERNS: ${{ secrets.PII_PATTERNS }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PII_PATTERNS:-}" ]; then
+            echo "PII_PATTERNS secret not set; skipping personal-pattern scan"
+            exit 0
+          fi
+
+          fail=0
+          while IFS= read -r pattern; do
+            [ -z "$pattern" ] && continue
+            matches=$(grep -rIiE --exclude-dir=.git -l -- "$pattern" . || true)
+            if [ -n "$matches" ]; then
+              echo "Personal data pattern matched in the following file(s):"
+              echo "$matches"
+              fail=1
+            fi
+          done <<< "$PII_PATTERNS"
+
+          if [ "$fail" -ne 0 ]; then
+            exit 1
+          fi
+          echo "No personal data pattern matches."
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile Python sources
+        run: python -m compileall -q scripts automation/watcher automation/hooks
+
+      - name: Validate template and example config files
+        run: |
+          python - <<'EOF'
+          import json
+          import tomllib
+
+          with open("automation/build_settings.template.json", encoding="utf-8") as f:
+              raw = f.read().replace("{{WORKSPACE_ROOT}}", "/tmp/x")
+          json.loads(raw)
+
+          with open("identity.toml.example", "rb") as f:
+              tomllib.load(f)
+
+          print("build_settings.template.json and identity.toml.example are valid.")
+          EOF

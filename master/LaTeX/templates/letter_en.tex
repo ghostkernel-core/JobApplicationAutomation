@@ -1,0 +1,70 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[a4paper,top=17mm,bottom=12mm,left=17.5mm,right=20.3mm]{geometry}
+\usepackage{fontspec}
+% Use the same Unicode-mapped font family as the CV. HelveticaNeue-regular.ttf verified
+% (via pdftotext on real compiled output) to preserve both semicolons and apostrophes in
+% extracted text. Do not switch to Arial/LiberationSans as a "fix" for punctuation: that
+% fallback was tried previously and silently drops every semicolon glyph on pdftotext
+% extraction (ATS/copy-paste impact), which is worse than the apostrophe issue it aimed
+% to avoid. Re-verify with pdftotext against a real compiled document before changing this.
+\setmainfont{HelveticaNeue-regular.ttf}[Path=fonts/,BoldFont=HelveticaNeue-bold.ttf,ItalicFont=HelveticaNeue-italic.ttf,BoldItalicFont=HelveticaNeue-boldItalic.ttf]
+\usepackage{xcolor}
+\definecolor{body}{HTML}{222222}
+\definecolor{ruleblue}{HTML}{458fe9}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usepackage{setspace}
+\usepackage{ragged2e}
+\usepackage[none]{hyphenat}
+\usepackage[hidelinks]{hyperref}
+\color{body}
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{10pt}
+\setstretch{1.0}
+\hyphenpenalty=10000 \exhyphenpenalty=10000 \tolerance=4000 \emergencystretch=3.5em
+\newcommand{\discbul}{\raisebox{0.30ex}{\tikz{\fill[body] circle (0.46mm);}}}
+\newlist{discitems}{itemize}{1}
+\setlist[discitems]{label=\discbul,leftmargin=7mm,labelsep=2.4mm,topsep=1pt,partopsep=0pt,parsep=0pt,itemsep=1.5pt}
+
+\begin{document}
+\RaggedRight
+\noindent{\color{ruleblue}\rule{\textwidth}{1pt}}
+
+\vspace{5mm}
+\begin{flushright}
+{{identity_name}}\\
+{{identity_street}}\\
+{{identity_city_line}}\\
+{{identity_phone}}\\
+{{identity_email}}\\
+{{date}}
+\end{flushright}
+
+\vspace{3pt}
+{{recipient}}
+
+\vspace{4pt}
+\textbf{Subject: {{subject}}}
+
+\vspace{4pt}
+{{salutation}}
+
+\vspace{4pt}
+{{paragraphs}}
+
+\vspace{4pt}
+{{bullet_block}}
+
+\vspace{4pt}
+{{closing}}
+
+\vspace{2pt}
+\includegraphics[width=27.4mm,height=14.3mm]{images/signature.png}\\
+\textbf{{{identity_name}}}
+
+\vspace{2pt}
+{{enclosure}}
+
+\end{document}

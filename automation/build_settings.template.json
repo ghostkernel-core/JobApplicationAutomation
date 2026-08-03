@@ -1,0 +1,70 @@
+{
+  "$comment": [
+    "Settings for headless builds spawned by the watcher. Passed with --settings,",
+    "alongside --permission-mode bypassPermissions.",
+    "",
+    "Two layers, because neither is sufficient alone:",
+    "",
+    "  permissions.deny  Explicit deny rules still apply under bypassPermissions,",
+    "                    so this catches the obvious cases even if the hook is",
+    "                    misconfigured. It cannot express 'anywhere except the",
+    "                    workspace' — deny beats allow and there is no negation —",
+    "                    so it names specific targets rather than trying to be",
+    "                    exhaustive. Note that Write(...) rules are inert: only",
+    "                    Edit(path) is matched by file permission checks, and Edit",
+    "                    rules cover all file-editing tools. A single leading / is",
+    "                    relative to this file's directory, so absolute paths use //.",
+    "",
+    "  hooks.PreToolUse  automation/hooks/guard.py, which does express it: every",
+    "                    Bash command is screened, every edit must land inside the",
+    "                    workspace, and credential paths are unreadable. Exit 2",
+    "                    blocks the call and hands the reason back to the model.",
+    "",
+    "Neither reaches a subprocess. Once a permitted `python scripts/...` starts, it",
+    "can write anywhere this account can, and Claude Code's OS-level sandbox does",
+    "not run on native Windows. What actually bounds the blast radius: the pinned",
+    "working directory, the full NDJSON build log, automation/logs/builds/guard.log,",
+    "and the fact that a build only ever starts from an explicit Telegram reply."
+  ],
+
+  "permissions": {
+    "deny": [
+      "Edit(//C:/**)",
+      "Edit(~/**)",
+      "Edit(//{{WORKSPACE_ROOT}}/automation/**)",
+      "Read(~/.claude/**)",
+      "Read(//C:/Users/*/.claude/**)",
+      "Read(//C:/Users/*/.ssh/**)",
+      "Read(//C:/Users/*/.aws/**)",
+      "Read(//{{WORKSPACE_ROOT}}/automation/.env)",
+      "Bash(rm -rf *)",
+      "Bash(format *)",
+      "Bash(diskpart *)",
+      "Bash(vssadmin *)",
+      "Bash(reg *)",
+      "Bash(shutdown *)",
+      "Bash(takeown *)",
+      "Bash(schtasks *)",
+      "Bash(net user *)",
+      "Bash(git push *)"
+    ],
+    "additionalDirectories": []
+  },
+
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{WORKSPACE_ROOT}}/automation/.venv/Scripts/python.exe",
+            "args": ["{{WORKSPACE_ROOT}}/automation/hooks/guard.py"],
+            "timeout": 15,
+            "statusMessage": "build guard"
+          }
+        ]
+      }
+    ]
+  }
+}

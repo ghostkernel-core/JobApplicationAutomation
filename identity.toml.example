@@ -1,0 +1,28 @@
+# Who this workspace belongs to. Fill in every value before the first build.
+#
+# This is NOT a fact source for the documents — rules/00-canonical-profile.md is.
+# Only the printed contact block belongs here.
+
+[person]
+full_name     = "FILL IN — as it should appear on the documents"
+# The filename stem: "<file_prefix> - CV.pdf". Convention is "Surname, Firstname".
+file_prefix   = "FILL IN"
+email         = "FILL IN"
+phone         = "FILL IN"
+date_of_birth = "FILL IN — DD.MM.YYYY"
+linkedin      = "FILL IN"
+street        = "FILL IN — street and number only"
+# The "Place" half of the CV's place-and-date line, and the default place on a
+# letter. A payload may still override it.
+city          = "FILL IN — e.g. Berlin"
+
+# Country name and nationality are written in the language of the document, so
+# they cannot be a single value. The full address is composed as
+# "<street>, <city_line>" — do not repeat the street here.
+[en]
+city_line   = "FILL IN — e.g. 10115 Berlin, Germany"
+nationality = "FILL IN — e.g. German"
+
+[de]
+city_line   = "FILL IN — e.g. 10115 Berlin, Deutschland"
+nationality = "FILL IN — e.g. Deutsch"

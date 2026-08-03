@@ -1,0 +1,44 @@
+\documentclass[11pt,a4paper]{article}
+\input{shared/common.tex}
+\setlength{\parskip}{6pt}
+% dashitems in common.tex is tuned for the CV's date-column hanging indent
+% (leftmargin=44mm); this document has no date column, so re-tune it here
+% to a tight, CV-Expertise-style bullet instead of a huge blank left gutter.
+\setlist[dashitems]{label=\discbul,leftmargin=5.5mm,labelsep=3.5mm,topsep=2pt,itemsep=3pt}
+
+\fancypagestyle{prep}{\fancyhf{}\fancyhead[C]{\textbf{\color{posblue}\fontsize{12}{14}\selectfont INTERVIEW PREP -- {{role_title}}}}\fancyfoot[R]{\color{body}\thepage}\renewcommand{\headrulewidth}{0pt}\renewcommand{\footrulewidth}{0pt}}
+\pagestyle{prep}
+
+\begin{document}
+
+{\small\itshape Private prep notes for {{identity_name}} --- not for submission. {{folder_note}}}
+
+\cvsection{POSITIONING / CORE PITCH}
+{{pitch}}
+
+{{pitch_rationale_items}}
+
+\cvsection{WHY THIS TEAM, WHY NOW}
+{{context_items}}
+
+\cvsection{LIKELY INTERVIEW THEMES}
+{{theme_blocks}}
+
+\cvsection{STRONG EXAMPLES TO USE}
+{{example_blocks}}
+
+\cvsection{GAPS TO HANDLE HONESTLY}
+{{gap_items}}
+
+\cvsection{QUESTIONS TO ASK}
+\begin{enumerate}[leftmargin=6mm,itemsep=3pt,topsep=2pt]
+{{question_items}}
+\end{enumerate}
+
+\cvsection{PRACTICAL / LOGISTICS NOTES}
+{{logistics_items}}
+
+\vspace{6pt}
+\noindent{\small\textit{{{date_line}}}}
+
+\end{document}
