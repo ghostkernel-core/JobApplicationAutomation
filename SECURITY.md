@@ -8,7 +8,7 @@ its own working directory, not a web application attack surface.
 
 ## Reporting a vulnerability
 
-Please use [GitHub's private security advisories](../../security/advisories/new) for this
+Please use [GitHub's private security advisories](https://github.com/ghostkernel-core/JobApplicationAutomation/security/advisories/new) for this
 repository rather than opening a public issue, especially for anything that involves:
 
 - a real or plausible way to exfiltrate the Telegram bot token or other credentials,
