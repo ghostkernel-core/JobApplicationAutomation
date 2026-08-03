@@ -77,9 +77,10 @@ exclusive per token: two processes polling the same token fight over it and both
 
 ## The CI PII scan
 
-`.github/workflows/checks.yml` runs three checks on every push and pull request: a structural
-check that no forbidden path (see above) is tracked, `gitleaks` for generic secret patterns, and
-an optional personal-data scan driven by a repository secret named `PII_PATTERNS` — a
+`.github/workflows/checks.yml` runs on every push and pull request. Three of its checks guard
+personal data: a structural check that no forbidden path (see above) is tracked, `gitleaks` for
+generic secret patterns, and an optional personal-data scan driven by a repository secret named
+`PII_PATTERNS` — a
 newline-separated list of extended regular expressions (`grep -E` syntax) matching your own
 name, address, and phone number in whatever forms they might appear.
 
@@ -88,3 +89,6 @@ live in the secret rather than in the repository so they are never public themse
 workflow step is written to report only *which file matched*, never the matched text or the
 pattern that matched it — so even a passing CI log never becomes a second place your personal
 data could leak from.
+
+A fourth job byte-compiles every Python source and parses the committed template and example
+config files, so a syntax error or malformed TOML/JSON cannot reach `main`.
