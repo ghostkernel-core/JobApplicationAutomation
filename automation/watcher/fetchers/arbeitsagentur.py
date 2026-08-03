@@ -30,6 +30,7 @@ from .base import get_json, is_remote, session
 log = logging.getLogger("watcher.fetch.arbeitsagentur")
 
 API = "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v4"
+SITE = "https://www.arbeitsagentur.de/jobsuche/"
 
 # Published client key for the public Jobsuche app — the same value the website
 # and the mobile app send. Not a secret and not tied to an account, so it stays
@@ -62,6 +63,26 @@ def _job_url(job: dict[str, Any], ref: str) -> str:
     if external:
         return external
     return f"https://www.arbeitsagentur.de/jobsuche/jobdetail/{quote(ref)}"
+
+
+def search_urls(entry: dict[str, Any]) -> list[tuple[str, str]]:
+    """(query, human search URL) for every query this portal is polled on.
+
+    The fetcher calls the JSON API; this is the Jobbörse page carrying the same
+    search, with the same location, radius and offer-kind restrictions applied.
+    """
+    where = entry.get("location") or ""
+    radius = int(entry.get("radius_km", 0) or 0)
+    out = []
+    for query in entry.get("queries") or []:
+        params = [f"was={quote(query)}", f"angebotsart={OFFER_KIND}"]
+        if where:
+            params.append(f"wo={quote(where)}")
+            if radius:
+                params.append(f"umkreis={radius}")
+        out.append((query, "https://www.arbeitsagentur.de/jobsuche/suche?"
+                           + "&".join(params)))
+    return out
 
 
 def _location(job: dict[str, Any]) -> str:

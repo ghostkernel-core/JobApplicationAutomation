@@ -28,10 +28,14 @@ def _entry_key(entry: dict[str, Any]) -> str:
 # Greenhouse
 # --------------------------------------------------------------------------
 
+def greenhouse_feed(entry: dict[str, Any]) -> str:
+    return (f"https://boards-api.greenhouse.io/v1/boards"
+            f"/{quote(entry['token'])}/jobs?content=true")
+
+
 def fetch_greenhouse(entry: dict[str, Any], timeout: int) -> list[Posting]:
     token = entry["token"]
-    url = f"https://boards-api.greenhouse.io/v1/boards/{quote(token)}/jobs?content=true"
-    data = get_json(session(), url, timeout)
+    data = get_json(session(), greenhouse_feed(entry), timeout)
     out = []
     for job in data.get("jobs", []):
         location = (job.get("location") or {}).get("name", "")
@@ -57,10 +61,13 @@ def fetch_greenhouse(entry: dict[str, Any], timeout: int) -> list[Posting]:
 # Lever
 # --------------------------------------------------------------------------
 
+def lever_feed(entry: dict[str, Any]) -> str:
+    return f"https://api.lever.co/v0/postings/{quote(entry['token'])}?mode=json"
+
+
 def fetch_lever(entry: dict[str, Any], timeout: int) -> list[Posting]:
     token = entry["token"]
-    url = f"https://api.lever.co/v0/postings/{quote(token)}?mode=json"
-    data = get_json(session(), url, timeout)
+    data = get_json(session(), lever_feed(entry), timeout)
     if not isinstance(data, list):
         raise RuntimeError(f"Lever board {token!r} returned {type(data).__name__}, not a job list")
     out = []
@@ -96,10 +103,14 @@ def fetch_lever(entry: dict[str, Any], timeout: int) -> list[Posting]:
 # Ashby
 # --------------------------------------------------------------------------
 
+def ashby_feed(entry: dict[str, Any]) -> str:
+    return (f"https://api.ashbyhq.com/posting-api/job-board"
+            f"/{quote(entry['token'])}?includeCompensation=true")
+
+
 def fetch_ashby(entry: dict[str, Any], timeout: int) -> list[Posting]:
     token = entry["token"]
-    url = f"https://api.ashbyhq.com/posting-api/job-board/{quote(token)}?includeCompensation=true"
-    data = get_json(session(), url, timeout)
+    data = get_json(session(), ashby_feed(entry), timeout)
     out = []
     for job in data.get("jobs", []):
         if job.get("isListed") is False:
@@ -125,14 +136,18 @@ def fetch_ashby(entry: dict[str, Any], timeout: int) -> list[Posting]:
 # SmartRecruiters — list is cheap, body needs a per-posting call
 # --------------------------------------------------------------------------
 
+def smartrecruiters_feed(entry: dict[str, Any]) -> str:
+    return (f"https://api.smartrecruiters.com/v1/companies"
+            f"/{quote(entry['token'])}/postings")
+
+
 def fetch_smartrecruiters(entry: dict[str, Any], timeout: int) -> list[Posting]:
     token = entry["token"]
     sess = session()
     out: list[Posting] = []
     offset = 0
     while True:
-        url = (f"https://api.smartrecruiters.com/v1/companies/{quote(token)}"
-               f"/postings?limit=100&offset={offset}")
+        url = f"{smartrecruiters_feed(entry)}?limit=100&offset={offset}"
         data = get_json(sess, url, timeout)
         items = data.get("content", [])
         for job in items:
@@ -173,12 +188,15 @@ def hydrate_smartrecruiters(posting: Posting, timeout: int) -> str:
 # Personio — XML feed
 # --------------------------------------------------------------------------
 
+def personio_feed(entry: dict[str, Any]) -> str:
+    return f"https://{quote(entry['token'])}.jobs.personio.de/xml"
+
+
 def fetch_personio(entry: dict[str, Any], timeout: int) -> list[Posting]:
     import xml.etree.ElementTree as ET
 
     token = entry["token"]
-    url = f"https://{quote(token)}.jobs.personio.de/xml"
-    text = get_text(session(), url, timeout)
+    text = get_text(session(), personio_feed(entry), timeout)
     try:
         root = ET.fromstring(text)
     except ET.ParseError as exc:
@@ -218,10 +236,15 @@ def fetch_personio(entry: dict[str, Any], timeout: int) -> list[Posting]:
 # Workday — POST search, body behind a second call
 # --------------------------------------------------------------------------
 
+def workday_feed(entry: dict[str, Any]) -> str:
+    return (f"{entry['host'].rstrip('/')}/wday/cxs"
+            f"/{entry['tenant']}/{entry['site']}/jobs")
+
+
 def fetch_workday(entry: dict[str, Any], timeout: int) -> list[Posting]:
     host = entry["host"].rstrip("/")
     tenant, site = entry["tenant"], entry["site"]
-    api = f"{host}/wday/cxs/{tenant}/{site}/jobs"
+    api = workday_feed(entry)
     sess = session()
     sess.headers["Content-Type"] = "application/json"
     out: list[Posting] = []
@@ -274,6 +297,46 @@ HYDRATORS: dict[str, Callable[[Posting, int], str]] = {
     "smartrecruiters": hydrate_smartrecruiters,
     "workday": hydrate_workday,
 }
+
+# The endpoint each provider is actually polled on. Same functions the fetchers
+# call, so `watcherctl status` can never show a URL the poller does not use.
+FEED_URLS: dict[str, Callable[[dict[str, Any]], str]] = {
+    "greenhouse": greenhouse_feed,
+    "lever": lever_feed,
+    "ashby": ashby_feed,
+    "smartrecruiters": smartrecruiters_feed,
+    "personio": personio_feed,
+    "workday": workday_feed,
+}
+
+# ...and the page a person would open to see the same jobs. Not used for
+# fetching — these are for the human reading a status report, so they point at
+# the rendered board rather than at its JSON.
+BOARD_URLS: dict[str, Callable[[dict[str, Any]], str]] = {
+    "greenhouse": lambda e: f"https://job-boards.greenhouse.io/{e['token']}",
+    "lever": lambda e: f"https://jobs.lever.co/{e['token']}",
+    "ashby": lambda e: f"https://jobs.ashbyhq.com/{e['token']}",
+    "smartrecruiters": lambda e: f"https://jobs.smartrecruiters.com/{e['token']}",
+    "personio": lambda e: f"https://{e['token']}.jobs.personio.de",
+    "workday": lambda e: f"{e['host'].rstrip('/')}/{e['site']}",
+}
+
+
+def urls(entry: dict[str, Any]) -> tuple[str, str]:
+    """(board page, polled endpoint) for one `[[ats]]` entry.
+
+    Returns empty strings for anything it cannot build — a status report must
+    survive a half-written sources.toml entry that the poller would reject.
+    """
+    provider = entry.get("provider", "")
+    out = []
+    for table in (BOARD_URLS, FEED_URLS):
+        builder = table.get(provider)
+        try:
+            out.append(builder(entry) if builder else "")
+        except (KeyError, AttributeError, TypeError):
+            out.append("")
+    return out[0], out[1]
 
 
 def fetch(entry: dict[str, Any], timeout: int) -> list[Posting]:

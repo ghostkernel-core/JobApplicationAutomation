@@ -42,6 +42,20 @@ def _search_url(build_id: str, query: str, page: int) -> str:
     return f"{SITE}_next/data/{build_id}/index.json?searchState={state}&page={page}"
 
 
+def search_urls(entry: dict[str, Any]) -> list[tuple[str, str]]:
+    """(query, human search URL) for every query this portal is polled on.
+
+    The fetcher reads the Next.js data endpoint behind these pages, which needs
+    a build id and renders as JSON; what is shown here is the page a person can
+    open to see the same result list.
+    """
+    out = []
+    for query in entry.get("queries") or []:
+        state = urllib.parse.quote(json.dumps({"searchQuery": query}))
+        out.append((query, f"{SITE}?searchState={state}"))
+    return out
+
+
 def _posting(hit: dict[str, Any], source: str) -> Posting | None:
     data = hit.get("v5_processed_job_data") or {}
     info = hit.get("job_information") or {}
