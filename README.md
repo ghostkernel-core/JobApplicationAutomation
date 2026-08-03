@@ -164,6 +164,13 @@ Only one instance may run at a time. For unattended operation, put a shortcut to
 `pythonw run_watcher.py` in `shell:startup`, or use a scheduler task with restart-on-failure.
 A daily heartbeat message exists so that silence is distinguishable from a crash.
 
+Two launchers at the repo root wrap the steps above. `python start_watcher.py` preflights the
+venv, `.env`, and `build_settings.json`, then starts the watcher detached (a pidfile stops a
+second instance from starting by accident); `python start_watcher.py --status` reports whether
+it's running without starting anything. `python start_claude.py` preflights identity and the
+canonical profile, then opens an interactive Claude Code session in this workspace for the
+manual path below.
+
 **The manual path needs none of this.** Open Claude Code in the workspace and paste a job
 posting URL (or the posting text), optionally with a note like `apply as Data Scientist` or
 `add German`. The same 11-step pipeline runs, per `CLAUDE.md`, and the deliverable folder lands

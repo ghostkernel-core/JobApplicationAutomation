@@ -13,6 +13,8 @@
 !/rules/
 !/master/
 !/automation/
+!/start_claude.py
+!/start_watcher.py
 !/.github/
 
 # Claude Code machine-local settings
