@@ -168,12 +168,46 @@ class Config:
 
     @property
     def failures_before_disable(self) -> int:
+        """Allowance for a stable source — a public JSON API or an ATS board."""
         return self._num("poll", self.poll, "failures_before_disable", 3)
 
     @property
+    def fragile_failures_before_disable(self) -> int:
+        """Allowance for a source marked `fragile = true` in sources.toml.
+
+        Higher on purpose. The fragile tier is browser-driven scraping against
+        pages that carry anti-bot checks and change markup without notice, so an
+        isolated failure there is ordinary weather rather than evidence of a
+        broken source. Holding it to the same three strikes as a documented JSON
+        API is what makes a scraper switch itself off over a bad afternoon.
+        """
+        return self._num("poll", self.poll, "fragile_failures_before_disable", 6)
+
+    def failures_allowed(self, entry: dict[str, Any]) -> int:
+        """The disable threshold for one source, by tier."""
+        if entry.get("fragile"):
+            return self.fragile_failures_before_disable
+        return self.failures_before_disable
+
+    @property
     def retry_after_minutes(self) -> int:
-        """Cooldown before a disabled source gets one retry probe. 0 = never."""
+        """Cooldown before a disabled source gets its first retry probe.
+
+        0 = never auto-retry. Each failed probe multiplies this by
+        `retry_backoff_factor`, up to `retry_backoff_max_minutes`.
+        """
         return self._num("poll", self.poll, "retry_after_minutes", 60)
+
+    @property
+    def retry_backoff_factor(self) -> float:
+        """Growth per failed probe. 1.0 restores the old flat cooldown."""
+        return max(1.0, self._num("poll", self.poll, "retry_backoff_factor",
+                                  2.0, float))
+
+    @property
+    def retry_backoff_max_minutes(self) -> int:
+        """Ceiling on the backoff, so a dead source is still probed daily."""
+        return self._num("poll", self.poll, "retry_backoff_max_minutes", 1440)
 
     # --- match ------------------------------------------------------------
     @property

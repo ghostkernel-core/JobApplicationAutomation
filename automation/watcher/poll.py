@@ -5,10 +5,23 @@
     python -m watcher.poll                    # real run, writes to the database
 
 A poll never raises because of one bad source. Failures are recorded against
-`source_health`; a fragile source that fails `failures_before_disable` times in
-a row switches itself off and reports once, rather than retrying every cycle.
-It is not off for good: after `retry_after_minutes` it gets one quiet probe per
-cooldown, and a probe that succeeds re-enables it and says so.
+`source_health`, and what happens next depends on how the source failed:
+
+  transient (5xx, 429, timeout)   retried in-cycle by the HTTP layer, then
+                                  counted. Enough of them in a row disables the
+                                  source; it is probed again after a cooldown
+                                  that doubles each time it fails, and a probe
+                                  that succeeds re-enables it and says so.
+
+  structural (4xx, non-JSON)      the endpoint moved or the key was withdrawn.
+                                  Probing reproduces it exactly, so the source
+                                  is *parked*: no auto-retry at all, and one
+                                  escalated message naming the error. It comes
+                                  back with `watcher.health --reset` once
+                                  someone has fixed the fetcher.
+
+How much failure a source is allowed before either of those depends on its
+tier — see `failures_allowed` and `fragile` in sources.toml.
 """
 
 from __future__ import annotations
@@ -21,6 +34,7 @@ from typing import Any
 from . import store
 from .config import Config, Sources, load_config, load_sources, source_key
 from .fetchers import SourceNotImplemented, fetch_source, hydrate
+from .fetchers.base import StructuralError
 from .logsetup import setup
 from .normalize import Posting
 from .prefilter import check
@@ -38,6 +52,9 @@ class PollReport:
     filtered_out: list[tuple[Posting, str]] = field(default_factory=list)
     errors: dict[str, str] = field(default_factory=dict)
     newly_disabled: list[str] = field(default_factory=list)
+    # (source, error) — parked sources get the error in the alert, because the
+    # whole point of the escalation is that someone has to read it and act.
+    newly_parked: list[tuple[str, str]] = field(default_factory=list)
     recovered: list[str] = field(default_factory=list)
     pending: list[str] = field(default_factory=list)
 
@@ -63,13 +80,17 @@ def _collect(sources: Sources, config: Config, conn, only: str | None,
         if only and key != only:
             continue
         # A disabled source is not off for good: once its cooldown has elapsed
-        # it gets exactly one probe, and the next one only after another full
-        # cooldown, whether that probe worked or not.
+        # it gets exactly one probe, and the next one only after another,
+        # longer cooldown, whether that probe worked or not. A *parked* source
+        # is the exception — `retry_is_due` never says yes for one, because it
+        # failed in a way no probe can fix.
         retrying = False
         if store.is_source_disabled(conn, key):
             if include_disabled:
                 pass
-            elif store.retry_is_due(conn, key, config.retry_after_minutes):
+            elif store.retry_is_due(conn, key, config.retry_after_minutes,
+                                    config.retry_backoff_factor,
+                                    config.retry_backoff_max_minutes):
                 retrying = True
                 log.info("%s is disabled — retrying after cooldown", key)
             else:
@@ -83,19 +104,36 @@ def _collect(sources: Sources, config: Config, conn, only: str | None,
             continue
         except Exception as exc:  # noqa: BLE001 — one source must not end the poll
             message = f"{type(exc).__name__}: {exc}"
+            structural = isinstance(exc, StructuralError)
             report.errors[key] = message
             log.warning("%s failed: %s", key, message)
-            if store.mark_source_failed(conn, key, message,
-                                        config.failures_before_disable):
+            allowance = config.failures_allowed(entry)
+            tripped = store.mark_source_failed(conn, key, message, allowance,
+                                               structural=structural)
+            if tripped == "parked":
+                report.newly_parked.append((key, message))
+                log.error("%s parked after %d structural failures — needs a "
+                          "fetcher change, not a retry", key, allowance)
+            elif tripped == "disabled":
                 report.newly_disabled.append(key)
                 log.error("%s disabled after %d consecutive failures",
-                          key, config.failures_before_disable)
+                          key, allowance)
+            elif structural and store.park_source(conn, key, message):
+                # Already disabled when the endpoint went structural. Stop
+                # probing it and escalate now rather than at the next trip,
+                # which would never come.
+                report.newly_parked.append((key, message))
+                log.error("%s parked — %s", key, message)
             if retrying:
-                # Still broken. Restart the clock and stay quiet — the one
+                # Still broken. Widen the cooldown and stay quiet — the one
                 # notification was sent when it first switched off.
                 store.bump_source_cooldown(conn, key)
-                log.info("%s still failing — next retry in %d min",
-                         key, config.retry_after_minutes)
+                log.info("%s still failing — next retry in %d min", key,
+                         store.backoff_minutes(
+                             store.retry_attempts(conn, key),
+                             config.retry_after_minutes,
+                             config.retry_backoff_factor,
+                             config.retry_backoff_max_minutes))
             conn.commit()
             continue
         if retrying:
@@ -201,6 +239,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  skip {posting.summary()}  [{reason}]")
     for key, message in report.errors.items():
         print(f"  FAIL {key}: {message}")
+    for key, message in report.newly_parked:
+        print(f"  PARK {key}: {message}")
+        print("       needs a fetcher change — no auto-retry until --reset")
     for key in report.recovered:
         print(f"  BACK {key} recovered and is enabled again")
     for note in report.pending:

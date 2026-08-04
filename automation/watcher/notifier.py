@@ -227,6 +227,28 @@ class Notifier:
             f"<i>{tail}</i>"
         )
 
+    async def send_source_parked(
+            self, parked: Sequence[tuple[str, str]]) -> None:
+        """Escalation for a source no retry can fix.
+
+        Deliberately louder and more specific than the disable notice: this one
+        is a work item, not weather. The error is included because it is the
+        whole diagnosis — usually a status code and the URL that produced it —
+        and because nothing will send it again.
+        """
+        if not parked:
+            return
+        lines = "\n".join(
+            f"• {_escape(name)}\n  <code>{_escape(error[:180])}</code>"
+            for name, error in parked)
+        await self.send_notice(
+            f"🟠 <b>Source parked — needs a code change</b>\n{lines}\n\n"
+            "<i>The endpoint moved, was withdrawn, or stopped serving JSON. "
+            "Retrying reproduces it exactly, so this source is not being "
+            "probed. Fix the fetcher, then: "
+            "python -m watcher.health --reset &lt;source&gt;</i>"
+        )
+
     async def send_source_recovered(self, recovered: Sequence[str]) -> None:
         if not recovered:
             return

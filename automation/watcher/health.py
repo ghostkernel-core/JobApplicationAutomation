@@ -41,7 +41,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     configured = {source_key(entry) for entry in load_sources().all_enabled()}
-    cooldown = load_config().retry_after_minutes
+    config = load_config()
     with store.connect() as conn:
         rows = store.source_health(conn)
 
@@ -51,13 +51,21 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"{'source':<34} {'state':<10} {'fails':>5}  last ok")
     for row in rows:
-        state = "DISABLED" if row["disabled"] else "ok"
+        if not row["disabled"]:
+            state = "ok"
+        else:
+            state = "PARKED" if store.row_is_parked(row) else "DISABLED"
         print(f"{row['source']:<34} {state:<10} {row['consecutive_failures']:>5}  "
               f"{row['last_ok_at'] or 'never'}")
-        due = store.retry_due_at(row, cooldown)
+        due = store.retry_due_at(row, config.retry_after_minutes,
+                                 config.retry_backoff_factor,
+                                 config.retry_backoff_max_minutes)
         if due is not None:
             left = round((due - dt.datetime.now()).total_seconds() / 60)
             print("    retry due now" if left <= 0 else f"    retry in {left}m")
+        elif store.row_is_parked(row):
+            print("    parked: retrying cannot fix this — fix the fetcher, "
+                  "then --reset")
         elif row["disabled"]:
             print("    no auto-retry — use --reset")
         if row["last_error"]:

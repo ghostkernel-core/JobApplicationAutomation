@@ -50,6 +50,7 @@ async def run_cycle(notifier: Notifier) -> dict[str, int]:
         for source, error in report.errors.items():
             log.warning("source %s failed: %s", source, error)
     await notifier.send_source_alerts(report.newly_disabled)
+    await notifier.send_source_parked(report.newly_parked)
     await notifier.send_source_recovered(report.recovered)
 
     if report.stored:

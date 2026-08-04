@@ -86,26 +86,38 @@ def state_of(row: sqlite3.Row | None) -> str:
     if row is None:
         return "unpolled"
     if row["disabled"]:
-        return "DISABLED"
+        # Parked is a strictly worse state than disabled and wants a different
+        # response from the reader, so it gets its own word.
+        return "PARKED" if store.row_is_parked(row) else "DISABLED"
     if row["consecutive_failures"]:
         return f"fail x{row['consecutive_failures']}"
     return "ok"
 
 
-def retry_note(row: sqlite3.Row | None, retry_after_minutes: int) -> str:
+def retry_note(row: sqlite3.Row | None, config: Config | None = None,
+               retry_after_minutes: int = 0) -> str:
     """"retry in 24m" for a disabled source, empty for anything else."""
-    due = store.retry_due_at(row, retry_after_minutes)
+    if config is not None:
+        retry_after_minutes = config.retry_after_minutes
+        factor = config.retry_backoff_factor
+        ceiling = config.retry_backoff_max_minutes
+    else:
+        factor, ceiling = 1.0, 0
+    due = store.retry_due_at(row, retry_after_minutes, factor, ceiling)
     if due is None:
-        return "no auto-retry" if row is not None and row["disabled"] else ""
+        if row is None or not row["disabled"]:
+            return ""
+        return ("parked — fix the fetcher, then --reset"
+                if store.row_is_parked(row) else "no auto-retry")
     left = round((due - dt.datetime.now()).total_seconds() / 60)
     return "retry due now" if left <= 0 else f"retry in {left}m"
 
 
-def health_detail(row: sqlite3.Row | None, retry_after_minutes: int = 0) -> str:
+def health_detail(row: sqlite3.Row | None, config: Config | None = None) -> str:
     if row is None:
         return "no poll recorded yet"
     detail = f"last ok {row['last_ok_at'] or 'never'}"
-    note = retry_note(row, retry_after_minutes)
+    note = retry_note(row, config)
     return f"{detail}   {note}" if note else detail
 
 
@@ -114,13 +126,14 @@ def health_detail(row: sqlite3.Row | None, retry_after_minutes: int = 0) -> str:
 # --------------------------------------------------------------------------
 
 def _print_source_head(state: str, name: str, kind: str,
-                       row: sqlite3.Row | None, parked: bool,
-                       retry_after_minutes: int = 0) -> None:
-    if parked:
+                       row: sqlite3.Row | None, switched_off: bool,
+                       config: Config | None = None) -> None:
+    """One source's headline. `switched_off` is `enabled = false` in
+    sources.toml — a deliberate choice by the user, not a health state."""
+    if switched_off:
         print(f"  {'off':<10} {name:<24} {kind}   (enabled = false in sources.toml)")
         return
-    print(f"  {state:<10} {name:<24} {kind:<16} "
-          f"{health_detail(row, retry_after_minutes)}")
+    print(f"  {state:<10} {name:<24} {kind:<16} {health_detail(row, config)}")
     if row is not None and row["last_error"] and (row["disabled"]
                                                   or row["consecutive_failures"]):
         # Long enough to carry the failing URL, which is usually the whole
@@ -129,19 +142,18 @@ def _print_source_head(state: str, name: str, kind: str,
 
 
 def print_ats(sources: Sources, health: dict[str, sqlite3.Row],
-              verbose: bool, retry_after_minutes: int = 0) -> None:
+              verbose: bool, config: Config | None = None) -> None:
     entries = sources.ats
     live = sum(1 for e in entries if e.get("enabled", True))
     rule(f"COMPANY BOARDS  ({live} watched"
-         + (f", {len(entries) - live} parked" if len(entries) > live else "") + ")")
+         + (f", {len(entries) - live} off" if len(entries) > live else "") + ")")
     for entry in entries:
         tagged = {**entry, "kind": "ats"}
         key = source_key(tagged)
         row = health.get(key)
-        parked = not entry.get("enabled", True)
         _print_source_head(state_of(row), entry.get("company", "?"),
-                           entry.get("provider", "?"), row, parked,
-                           retry_after_minutes)
+                           entry.get("provider", "?"), row,
+                           not entry.get("enabled", True), config)
         urls = source_urls(tagged)
         if urls.board:
             print(f"{INDENT}{urls.board}")
@@ -150,19 +162,23 @@ def print_ats(sources: Sources, health: dict[str, sqlite3.Row],
 
 
 def print_portals(sources: Sources, health: dict[str, sqlite3.Row],
-                  verbose: bool, retry_after_minutes: int = 0) -> None:
+                  verbose: bool, config: Config | None = None) -> None:
     entries = sources.portals
     live = sum(1 for e in entries if e.get("enabled", True))
     rule(f"PORTALS  ({live} watched"
-         + (f", {len(entries) - live} parked" if len(entries) > live else "") + ")")
+         + (f", {len(entries) - live} off" if len(entries) > live else "") + ")")
     for entry in entries:
         tagged = {**entry, "kind": "portal"}
         key = source_key(tagged)
         row = health.get(key)
-        parked = not entry.get("enabled", True)
+        # The tier now decides how much failure this source is allowed before
+        # it switches itself off, so show the number rather than just the word.
+        allowance = config.failures_allowed(entry) if config else None
         kind = "fragile" if entry.get("fragile") else "stable"
+        if allowance is not None:
+            kind = f"{kind} (x{allowance})"
         _print_source_head(state_of(row), entry.get("name", "?"), kind, row,
-                           parked, retry_after_minutes)
+                           not entry.get("enabled", True), config)
 
         where = entry.get("location") or "(anywhere)"
         radius = entry.get("radius_km")
@@ -223,12 +239,21 @@ def print_behaviour(config: Config) -> None:
     field("every", f"{config.interval_minutes} min", env_note("poll", "interval_minutes"))
     field("max posting age", f"{config.max_age_days} days", env_note("poll", "max_age_days"))
     field("http timeout", f"{config.http_timeout}s", env_note("poll", "timeout_seconds"))
-    field("disable a source", f"after {config.failures_before_disable} consecutive failures",
+    field("disable a source", f"after {config.failures_before_disable} consecutive "
+          f"failures (stable) / {config.fragile_failures_before_disable} (fragile)",
           env_note("poll", "failures_before_disable"))
-    field("retry a disabled",
-          f"every {config.retry_after_minutes} min"
-          if config.retry_after_minutes > 0 else "never (manual --reset only)",
-          env_note("poll", "retry_after_minutes"))
+    if config.retry_after_minutes > 0:
+        ladder = ", ".join(
+            f"{store.backoff_minutes(n, config.retry_after_minutes, config.retry_backoff_factor, config.retry_backoff_max_minutes)}m"
+            for n in range(4))
+        field("retry a disabled", f"{ladder}, … capped at "
+              f"{config.retry_backoff_max_minutes} min",
+              env_note("poll", "retry_after_minutes"))
+    else:
+        field("retry a disabled", "never (manual --reset only)",
+              env_note("poll", "retry_after_minutes"))
+    field("parked source", "never auto-retried — a 4xx means the endpoint "
+          "moved; needs --reset")
 
     rule("MATCHING")
     field("model", config.match_model)
@@ -349,8 +374,8 @@ def main(argv: list[str] | None = None) -> int:
         health = {row["source"]: row for row in store.source_health(conn)}
 
     banner("WATCHING")
-    print_ats(sources, health, args.verbose, config.retry_after_minutes)
-    print_portals(sources, health, args.verbose, config.retry_after_minutes)
+    print_ats(sources, health, args.verbose, config)
+    print_portals(sources, health, args.verbose, config)
 
     if not args.sources_only:
         print()
