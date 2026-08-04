@@ -10,9 +10,9 @@ Claude Code / Cowork is the active agent system. It uses native subagents define
 When the user pastes a job posting URL or the posting text, with or without notes like "apply as Data Scientist" or "add German", act as the orchestrator and run the full pipeline in one go. German (Lebenslauf + Anschreiben) is opt-in: produce English only unless the user asks for German (e.g. "add German", "German too", "EN+DE").
 
 1. Use `rules/slices/<agent>.md` for per-agent rule context instead of listing individual rule files.
-2. Dispatch specialist work through the Task tool, selecting the matching subagent in `.claude/agents/` (e.g. `01-experience-matcher`, `03-cv-writer-en`).
+2. Dispatch specialist work through the Agent tool, selecting the matching subagent in `.claude/agents/` (e.g. `01-experience-matcher`, `03-cv-writer-en`).
 3. Stop to ask the user only if integrity is blocked, the URL cannot be captured with no text given, or the company name is ambiguous.
-4. Fire independent pipeline steps in parallel through the Task tool whenever dependencies allow.
+4. Fire independent pipeline steps in parallel through the Agent tool whenever dependencies allow. Parallel means **both Agent calls in a single message, as two tool_use blocks** — two messages one after the other is sequential no matter how quickly they follow.
 
 ### The same trigger arrives headlessly
 
@@ -41,23 +41,68 @@ PDF compilation requires `latexmk` or `xelatex` on PATH, or `LATEX_ENGINE` set. 
 | 03A | Verify English CV payload | `04-cv-verifier-en` | PASS/FIXED/REJECTED | 02A |
 | 03B | Verify English cover-letter payload | `06-cover-letter-verifier-en` | PASS/FIXED/REJECTED | 02B |
 | 04A | German Lebenslauf + Anschreiben payloads (only if German requested) | `07-translator-de` | `cv_payload_de`, `letter_payload_de` | 03A, 03B |
+| 05A | **Render + compile the application documents** | `scripts/render_latex_application.py` | CV + letter `.tex` + PDF (×2 if German) | 03A, 03B, 04A |
+| 06A | Healthcheck the application documents | `scripts/latex_healthcheck.py` | PASS / FAIL | 05A |
 | 04B | Interview prep payload | `08-interview-prep` | `interview_prep_payload_en` | 01B, 03A, 03B |
-| 05 | Render LaTeX from payloads | `scripts/render_latex_application.py` | up to 5 `.tex` files | 03A, 03B, 04A, 04B |
-| 06 | Compile PDFs | `scripts/render_latex_application.py` | up to 5 PDFs | 05 |
-| 07 | Local deterministic healthcheck | `scripts/latex_healthcheck.py` | PASS / FAIL | 06 |
-| 08 | Proofread final PDFs | `09-proofreader` | PASS/FIXED/ESCALATED | 07 |
+| 05B | Render + compile the interview prep | `scripts/render_latex_application.py` | Interview Prep `.tex` + PDF | 04B |
+| 06B | Healthcheck the interview prep | `scripts/latex_healthcheck.py` | PASS / FAIL | 05B |
+| 08 | Proofread final PDFs | `09-proofreader` | PASS/FIXED/ESCALATED | 06A, 06B |
 | 09 | Final QA across entire folder | `10-final-verifier` | PASS / REJECTED | 08 |
 | 10 | Log the application in the yearly tracker | `scripts/append_tracker_entry.py` | row in `<YYYY>/Job Applications Tracker <YYYY>.xlsx` | 09 |
-| 11 | Present files to user | assistant | links + 3-line summary | 10, 04B |
+| 11 | Present files to user | assistant | links + 3-line summary | 10, 05B |
 
-Before step 09 can PASS, clean the deliverable folder. Keep only the final `.tex` + PDF for each application document produced (2 for English-only runs, 4 when German was requested), plus the Interview Prep `.tex` + PDF pair (always English, on top of the application-document count), and exactly one archived posting `.html`. Remove payload JSON, raw posting text, API captures, logs, and build artifacts from the deliverable folder.
+**The application documents render first, and they do not wait for interview prep.** The
+moment 03A and 03B pass (plus 04A if German was asked for), call the renderer with
+`--only` for exactly the application payloads:
+
+```
+python scripts/render_latex_application.py <payload>.json "<folder>" \
+  --only cv_payload_en --only letter_payload_en          # add the _de keys if German
+```
+
+Then do 04B and render it in a second pass with `--only interview_prep_payload_en`.
+Interview prep is the longest single step in a run and the least load-bearing — it is a
+private study aid, not something an employer sees. Rendering everything in one call at the
+end means a prep step that overruns or is killed takes the CV and cover letter with it,
+which is exactly how one run ended with no PDFs at all despite both documents having
+already passed verification. If prep fails after 06A, the application is still complete;
+say so in the summary and move on.
+
+Before step 09 can PASS, clean the deliverable folder:
+
+```
+python scripts/clean_deliverable.py --folder "<absolute deliverable folder path>"
+```
+
+Keep only the final `.tex` + PDF for each application document produced (2 for English-only
+runs, 4 when German was requested), plus the Interview Prep `.tex` + PDF pair (always
+English, on top of the application-document count), and exactly one archived posting
+`.html`. The script keeps `.tex`/`.pdf`/`.html`, moves payload JSON and the Match Brief and
+Research Note to `_tmp/payloads/` (so a later rule change can be re-rendered rather than
+regenerated), deletes LaTeX build artifacts and page images, and reports anything it does
+not recognise. Do **not** try to do this with `rm` — the headless guard blocks every
+`rm -f`/`rm -rf` and the attempt only burns turns. Check the script's "left in place"
+list and deal with those files yourself.
 
 ## Parallel Execution
 
+Independent steps run in parallel — always, not only "when speed matters". Issue the two
+Agent calls as two tool_use blocks in **one** message; a second message is a second turn and
+runs after the first has finished.
+
 Phase A (after step 00): run 01A and 01B in parallel.
-Phase B (after 01A, 01B): run CV track (02A→03A) and letter track (02B→03B) in parallel when speed matters; otherwise sequential is fine.
-Phase C (after 03A, 03B): run 04A and 04B in parallel.
-Phase D (after 04A, 04B): render → compile → healthcheck → proofread → final QA → tracker log sequentially.
+Phase B (after 01A, 01B): run the CV track (02A→03A) and the letter track (02B→03B) in parallel. Each track is sequential within itself; the two tracks are not.
+Phase C (after 03A, 03B): two independent tracks, started in the same message.
+  - **Documents:** 04A first if German was requested (05A renders what it produces), then 05A → 06A. English-only runs go straight to 05A.
+  - **Prep:** 04B, then 05B → 06B. It shares no dependency with the documents track.
+  The model steps overlap freely. The two renderer calls (05A, 05B) must not — they write
+  into the same folder, so let one finish before starting the other. In practice 04B is long
+  enough that 05A is done well before 05B is ready.
+Phase D (after 06A and 06B): proofread → final QA → clean → tracker log, sequentially.
+
+If the prep track fails or is killed, finish Phase D on the application documents alone
+rather than abandoning the run — a complete application without the study aid is worth far
+more than neither.
 
 ## Application Tracker (step 10)
 
@@ -104,7 +149,7 @@ growing context and only does coordination and glue work, so Opus there is the s
 expensive and least useful place to spend it. Opus is reserved for the two subagents where
 prose quality originates.
 
-There is no cross-provider routing or fallback runner in Claude Code; the Task tool invokes
+There is no cross-provider routing or fallback runner in Claude Code; the Agent tool invokes
 the subagent with its pinned model directly. Do not escalate an agent to a heavier model
 without asking the user first.
 
@@ -114,6 +159,18 @@ Keep cross-agent handoffs compact. Match Brief: 600–900 words. Research Note: 
 
 Do not ask a model to debug deterministic LaTeX/PDF defects. Run `scripts/latex_healthcheck.py` first. Fix via payload/template/rendering locally before calling a verifier.
 
+Two files that are not worth a turn:
+
+- **Never `Read` the archived posting `.html` whole.** SingleFile inlines every image and
+  stylesheet, so these run to hundreds of KB — past the Read limit, which fails the call
+  outright and returns nothing (879 KB, twice, in one run). The posting has already been
+  parsed into the Match Brief by 01A; use that. If you genuinely need the raw file, `Grep`
+  it for the phrase you are after, or `Read` it with `offset`/`limit` — never bare.
+- **Do not read `.claude/settings*.json` or anything else under `.claude/`.** Headless runs
+  deny it, so every attempt is a blocked call and a wasted turn. If a tool call is being
+  denied, the fix is in `automation/build_settings.json` and belongs to the user, not to the
+  run in progress — report it and carry on with what is permitted.
+
 ## Workspace Map
 
 - `rules/00-canonical-profile.md` — full candidate facts, single source of truth.
@@ -122,7 +179,9 @@ Do not ask a model to debug deterministic LaTeX/PDF defects. Run `scripts/latex_
 - `master/LaTeX/templates/` — locked LaTeX templates (cv_en, cv_de, letter_en, letter_de, interview_prep_en).
 - `master/LaTeX/shared/` — shared LaTeX macros/style.
 - `scripts/` — scaffold, render, healthcheck, toolchain check, SingleFile capture, tracker
-  build/append, and `cleanup_application.py` to undo a failed run.
+  build/append, `clean_deliverable.py` to tidy a finished folder down to its deliverables,
+  and `cleanup_application.py` to undo a failed run entirely. The two are not
+  interchangeable: the first runs on success, the second erases the application.
 - `<YYYY>/Job Applications Tracker <YYYY>.xlsx` — application tracker, one row per application.
 - `automation/` — the job watcher (polling, matching, Telegram, headless builds). Self-contained:
   its own `.venv`, config, sqlite state, and logs. Nothing in the pipeline reads from it.

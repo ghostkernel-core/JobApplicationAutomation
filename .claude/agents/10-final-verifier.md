@@ -12,7 +12,7 @@ Final QA must run after:
 - Matching PDFs are regenerated from current `.tex` files, including the Interview Prep PDF.
 - `scripts/latex_healthcheck.py` passes.
 - Posting archive exists.
-- The deliverable folder has been cleaned of intermediate payloads, API captures, raw text extracts, logs, temporary JSON, and build artifacts.
+- The deliverable folder has been cleaned of intermediate payloads, API captures, raw text extracts, logs, temporary JSON, and build artifacts. `python scripts/clean_deliverable.py --folder "<folder>"` does this; it is the sanctioned way, and `rm` is blocked by the headless guard. If it reports files under "left in place", judge those yourself — it only touches what it recognises.
 
 Check:
 - Exactly expected deliverables: application `.tex`/`.pdf` pairs (2 or 4, EN/DE), the Interview Prep `.tex`/`.pdf` pair, 1 posting `.html`.

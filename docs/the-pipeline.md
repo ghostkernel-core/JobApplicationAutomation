@@ -27,23 +27,37 @@ German output (Lebenslauf + Anschreiben) is opt-in per run; English is produced 
 | 03A | Verify English CV payload | `04-cv-verifier-en` | PASS/FIXED/REJECTED | 02A |
 | 03B | Verify English cover-letter payload | `06-cover-letter-verifier-en` | PASS/FIXED/REJECTED | 02B |
 | 04A | German Lebenslauf + Anschreiben payloads (only if requested) | `07-translator-de` | `cv_payload_de`, `letter_payload_de` | 03A, 03B |
+| 05A | Render + compile the application documents | `scripts/render_latex_application.py` | CV + letter `.tex` + PDF (×2 if German) | 03A, 03B, 04A |
+| 06A | Healthcheck the application documents | `scripts/latex_healthcheck.py` | PASS/FAIL | 05A |
 | 04B | Interview prep payload | `08-interview-prep` | `interview_prep_payload_en` | 01B, 03A, 03B |
-| 05 | Render LaTeX from payloads | `scripts/render_latex_application.py` | up to 5 `.tex` files | 03A, 03B, 04A, 04B |
-| 06 | Compile PDFs | `scripts/render_latex_application.py` | up to 5 PDFs | 05 |
-| 07 | Local deterministic healthcheck | `scripts/latex_healthcheck.py` | PASS/FAIL | 06 |
-| 08 | Proofread final PDFs | `09-proofreader` | PASS/FIXED/ESCALATED | 07 |
+| 05B | Render + compile the interview prep | `scripts/render_latex_application.py` | Interview Prep `.tex` + PDF | 04B |
+| 06B | Healthcheck the interview prep | `scripts/latex_healthcheck.py` | PASS/FAIL | 05B |
+| 08 | Proofread final PDFs | `09-proofreader` | PASS/FIXED/ESCALATED | 06A, 06B |
 | 09 | Final QA across the whole folder | `10-final-verifier` | PASS/REJECTED | 08 |
 | 10 | Log the application in the yearly tracker | `scripts/append_tracker_entry.py` | row in the tracker workbook | 09 |
-| 11 | Present the files | the orchestrator | links + summary | 10, 04B |
+| 11 | Present the files | the orchestrator | links + summary | 10, 05B |
+
+Render and compile used to be steps 05 and 06 for the whole run at once, with a single
+healthcheck at 07. They are now split per track — the numbering of 08 onwards is unchanged
+so that references to "step 09" and "step 10" elsewhere still mean what they always did.
 
 ### Parallel execution
 
 - **Phase A** (after step 00): 01A and 01B run in parallel.
 - **Phase B** (after 01A, 01B): the CV track (02A → 03A) and the letter track (02B → 03B) run in
-  parallel when speed matters, sequentially otherwise.
-- **Phase C** (after 03A, 03B): 04A (German) and 04B (interview prep) run in parallel.
-- **Phase D** (after 04A, 04B): render → compile → healthcheck → proofread → final QA → tracker
-  log, strictly sequential.
+  parallel. Each track is sequential within itself; the two tracks are not.
+- **Phase C** (after 03A, 03B): two independent tracks run at once — the documents track
+  (04A if German, then 05A → 06A) and the prep track (04B, then 05B → 06B). The renderer
+  calls themselves do not overlap; they write into the same folder.
+- **Phase D** (after 06A and 06B): proofread → final QA → clean → tracker log, strictly
+  sequential.
+
+The application documents are deliberately rendered before the interview prep rather than
+alongside it. Prep is the longest step in a run and the least load-bearing — a private study
+aid, not something an employer sees. When everything was rendered in one call at the end, a
+prep step that overran took the CV and cover letter down with it; one run finished with no
+PDFs at all despite both documents having already passed verification. If the prep track
+fails now, the application is still complete.
 
 ## The agent roster
 
@@ -80,7 +94,7 @@ effort and token cost:
 The orchestrator itself (the top-level Claude Code session or headless `claude -p` run) is
 pinned to Sonnet, not Opus — it only coordinates the run and carries the whole run's growing
 context, so Opus there would be the single most expensive and least useful place to spend it.
-There is no cross-provider routing or fallback: the Task tool invokes each subagent with its
+There is no cross-provider routing or fallback: the Agent tool invokes each subagent with its
 pinned model directly.
 
 ## Payload-vs-prose architecture
@@ -142,6 +156,24 @@ the folder is cleaned down to exactly:
 Payload JSON, raw posting text, API captures, logs, and build artifacts are removed from the
 deliverable folder — they never belong there in the first place, only in scratch space such as
 `_tmp/`.
+
+`scripts/clean_deliverable.py` does this, and it is the only sanctioned way — the headless
+guard blocks `rm`, so a build that improvises one burns turns getting nowhere:
+
+```bash
+python scripts/clean_deliverable.py --folder "<absolute deliverable folder path>"
+```
+
+It keeps `.tex`, `.pdf` and `.html`; *moves* payload JSON, the Match Brief, the Research Note
+and extracted posting text to `_tmp/payloads/<Company> <date> <Role>/` rather than deleting
+them, so a later rule or template change can be re-rendered instead of regenerated; and
+deletes only what is regenerable by definition — LaTeX build artifacts and rasterised page
+images. Anything it has no rule for is left alone and printed under "left in place", so an
+unexpected file is a line of output rather than a loss. `--dry-run` reports without changing
+anything, and running it twice is a no-op.
+
+Do not confuse it with `cleanup_application.py` below: this one tidies a run that *succeeded*,
+that one erases a run that *failed*.
 
 ## The tracker step
 

@@ -28,6 +28,9 @@ This is private prep, not an application document. It may mention unsupported to
 model/AI-vendor name ban in `rules/07-humanlike-anti-ai.md` section F, so it may name models
 and vendors plainly, including to warn which ones must not appear on the CV or in the
 letter. Section F still applies in one respect: no authorship signatures, assistant voice
-("Certainly!", "I hope this helps"), or meta-commentary about the document itself. The orchestrator renders this
-payload to `.tex`/PDF via `scripts/render_latex_application.py` alongside the CV and cover
-letter; do not hand-write LaTeX or attempt to compile it yourself.
+("Certainly!", "I hope this helps"), or meta-commentary about the document itself. The
+orchestrator renders this payload to `.tex`/PDF via `scripts/render_latex_application.py`
+with `--only interview_prep_payload_en`, in a pass of its own *after* the CV and cover
+letter are already rendered — this step is the longest in a run and must not be able to
+take the application documents down with it. Do not hand-write LaTeX or attempt to compile
+it yourself.
