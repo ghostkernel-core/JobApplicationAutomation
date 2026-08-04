@@ -1,5 +1,10 @@
 # Slice: German Translator / Localizer
 
+Page limits, payload keys, and the locked layout constants are in
+`rules/slices/_toolchain.md`. Use those numbers rather than measuring them from
+`master/LaTeX/`, and never open another application's folder or `_tmp/payloads/` — only
+`/master` and `rules/` are sources.
+
 ## German document rules
 
 - Lebenslauf: tabellarisch, reverse-chronological, max 2 pages. Sections: PERSÖNLICHE DATEN, BERUFSERFAHRUNG, PROJEKTE, AUSBILDUNG, TECHNOLOGIE-STACKS, SPRACHKENNTNISSE.

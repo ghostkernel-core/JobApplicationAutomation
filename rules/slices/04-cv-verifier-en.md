@@ -4,6 +4,8 @@
 
 Read `rules/slices/_facts.md` first — the condensed canonical facts for this workspace (generated from rules/00-canonical-profile.md).
 
+Page limits and the locked column widths that decide whether a skills row wraps are in `rules/slices/_toolchain.md`. Use those numbers; do not measure them from `master/LaTeX/`, and never open another application's folder or `_tmp/payloads/` to compare against — only `/master` and `rules/` are sources.
+
 ## Verification criteria (PASS/FIXED/REJECTED)
 
 1. **Integrity**: every claim traces to `rules/00-canonical-profile.md` or `/master`. No invented metrics, tools, titles, dates, degrees, certifications, clearances, seniority, visa/permit/sponsorship/relocation language. No doctorate unless posting required it.

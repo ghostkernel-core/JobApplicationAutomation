@@ -80,6 +80,10 @@ class Outcome:
     documents: tuple[str, ...] = ()
     tracker_row: bool = False
     cleaned: str = ""
+    # Whether the "application ready" message already went out for this build.
+    # A later failure has to admit it is retracting something the user was told
+    # was finished, rather than silently contradicting it.
+    announced: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -389,6 +393,28 @@ def locate_output(company: str, title: str, config: Config) -> Outcome:
 
 CLEANUP_SCRIPT = REPO_ROOT / "scripts" / "cleanup_application.py"
 
+# How often to look for the finished CV and cover letter while a build runs.
+# Short enough that the ready message is not itself a delay, long enough that a
+# 40-minute build costs a couple of hundred cheap directory reads.
+READY_POLL_SECONDS = 15
+
+
+async def _settle(task: "asyncio.Task[bool]") -> bool:
+    """Stop the ready-announcer and report whether its message got out.
+
+    Never raises: the announcer is a courtesy on top of the build, and a fault
+    in it must not change the build's own outcome.
+    """
+    if not task.done():
+        task.cancel()
+    try:
+        return bool(await task)
+    except asyncio.CancelledError:
+        return False
+    except Exception:  # noqa: BLE001
+        log.exception("ready announcer failed")
+        return False
+
 
 def clean_up(folder: str, reason: str) -> str:
     """Erase what a failed run left behind. Returns a line for the reply.
@@ -453,16 +479,37 @@ def duplicate_message(label: str, existing: dedupe.ExistingApplication) -> str:
             f"<i>Nothing was built.</i>")
 
 
+def _doc_list(documents: tuple[str, ...]) -> str:
+    prefix = f"{load_identity().file_prefix} - "
+    return " · ".join(name.removeprefix(prefix).replace(".pdf", "")
+                      for name in documents)
+
+
+def ready_message(label: str, outcome: Outcome) -> str:
+    """Sent the moment the CV and cover letter exist, before the run ends.
+
+    Interview Prep is a private study aid and renders after the documents an
+    employer actually sees. Holding this message until the process exits made
+    every run look as long as its slowest optional step.
+    """
+    where = _escape(relative(outcome.folder)) if outcome.folder else ""
+    return (f"✅ <b>Application ready</b> · {label}\n"
+            f"<code>{where}</code>\n"
+            f"{_doc_list(outcome.documents)}\n"
+            f"<i>Interview prep is still rendering — it will land in the same "
+            f"folder.</i>")
+
+
 def result_message(label: str, outcome: Outcome, log_file: Path) -> str:
     where = _escape(relative(outcome.folder)) if outcome.folder else ""
-    prefix = f"{load_identity().file_prefix} - "
-    docs = " · ".join(
-        name.removeprefix(prefix).replace(".pdf", "")
-        for name in outcome.documents
-    )
+    docs = _doc_list(outcome.documents)
     tracker = "tracker row ✓" if outcome.tracker_row else "no tracker row"
 
     if outcome.status == DONE:
+        if outcome.announced:
+            # The user already has the ready message with the folder path; this
+            # only needs to close the loop on what arrived afterwards.
+            return (f"📎 <b>Run complete</b> · {label}\n{docs} · {tracker}")
         return (f"✅ <b>Built</b> · {label}\n<code>{where}</code>\n{docs} · {tracker}")
 
     # Anything short of DONE has been cleaned up by now, so the folder path and
@@ -471,6 +518,9 @@ def result_message(label: str, outcome: Outcome, log_file: Path) -> str:
     heading = ("⚠️ <b>Built with issues</b>" if outcome.status == INCOMPLETE
                else "❌ <b>Build failed</b>")
     lines = [f"{heading} · {label}"]
+    if outcome.announced:
+        lines.append("<b>This retracts the ready message above</b> — the run "
+                     "fell over after the documents appeared.")
     if outcome.detail:
         lines.append(_escape(outcome.detail))
     lines.append(f"🧹 {_escape(outcome.cleaned)}" if outcome.cleaned
@@ -655,6 +705,49 @@ class Builder:
         # for-else territory; unreachable while attempts >= 1.
         return False, "no build attempt ran", log_file
 
+    async def _announce_ready(self, job: Job, company: str, title: str,
+                              label: str) -> bool:
+        """Say the application is ready the moment its required PDFs land.
+
+        The CV and cover letter are rendered, checked, and logged several
+        minutes before Interview Prep finishes — on a measured run, 7.5 of 40
+        minutes were spent on a private study aid nobody was waiting for.
+        Reporting only when the process exits made every run look as long as
+        its slowest optional step.
+
+        `locate_output` already returns DONE on the required documents alone,
+        so this asks the same question the final check asks, just earlier.
+        """
+        sizes: dict[str, int] = {}
+        while True:
+            await asyncio.sleep(READY_POLL_SECONDS)
+            outcome = await asyncio.to_thread(
+                locate_output, company, title, self.config)
+            if outcome.status != DONE or not outcome.folder:
+                continue
+
+            # A PDF still being written grows between polls. Require one quiet
+            # interval before calling it finished, so a half-flushed file never
+            # triggers a ready message for documents that are still moving.
+            folder = Path(outcome.folder)
+            current: dict[str, int] = {}
+            for name in dedupe.required_pdfs():
+                try:
+                    current[name] = (folder / name).stat().st_size
+                except OSError:
+                    current = {}
+                    break
+            if not current or any(size == 0 for size in current.values()):
+                continue
+            if current != sizes:
+                sizes = current
+                continue
+
+            await self._reply(job, ready_message(label, outcome))
+            log.info("application ready (prep still rendering): %s — %s",
+                     company, title)
+            return True
+
     async def _handle(self, job: Job) -> None:
         with store.connect() as conn:
             row = store.get_posting(conn, job.posting_id)
@@ -682,16 +775,26 @@ class Builder:
             opener += f"\n<i>{_escape(partial)}</i>"
         await self._reply(job, opener)
 
-        ok, detail, log_file = await self._attempt(job, company, title, url, label)
+        # Runs alongside the build and reports the CV and cover letter the
+        # moment they land, rather than making the user wait out Interview Prep.
+        announcer = asyncio.create_task(
+            self._announce_ready(job, company, title, label))
+        try:
+            ok, detail, log_file = await self._attempt(
+                job, company, title, url, label)
+        finally:
+            announced = await _settle(announcer)
 
         # Look on disk either way. A failed run still leaves a folder behind,
         # and finding it is the only way to know what needs erasing.
         outcome = locate_output(company, title, self.config)
+        outcome.announced = announced
         if not ok:
             outcome = Outcome(status=FAILED, folder=outcome.folder,
                               detail=detail or "the CLI reported an error",
                               documents=outcome.documents,
-                              tracker_row=outcome.tracker_row)
+                              tracker_row=outcome.tracker_row,
+                              announced=announced)
 
         if outcome.status in (FAILED, INCOMPLETE):
             outcome.cleaned = await asyncio.to_thread(

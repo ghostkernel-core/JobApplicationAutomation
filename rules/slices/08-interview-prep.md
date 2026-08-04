@@ -4,6 +4,14 @@ No application rule context needed. Use the Match Brief, Research Note, and fina
 angle provided by the orchestrator to write a private prep payload. Output:
 `interview_prep_payload_en.json`.
 
+Work only from what the orchestrator hands you plus `/master` and `rules/`. Never open
+another application's folder or `_tmp/payloads/`. The page limit and the renderer's
+payload key are in `rules/slices/_toolchain.md` — do not read script or template source.
+
+This step is off the critical path: the CV and cover letter are rendered, checked, and
+reported before you run. Take the time to do it well, but if you fail, the application
+still ships without you.
+
 Payload fields: `role_title`, `folder_note`, `date_line`, `pitch` (string or list of
 paragraphs), `pitch_rationale` (list), `context_notes` (list), `themes` (list of
 `{name, body?, items?}`), `examples` (list of `{title, body?, use_for?}`), `gaps` (list of

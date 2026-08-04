@@ -42,10 +42,10 @@ PDF compilation requires `latexmk` or `xelatex` on PATH, or `LATEX_ENGINE` set. 
 | 03B | Verify English cover-letter payload | `06-cover-letter-verifier-en` | PASS/FIXED/REJECTED | 02B |
 | 04A | German Lebenslauf + Anschreiben payloads (only if German requested) | `07-translator-de` | `cv_payload_de`, `letter_payload_de` | 03A, 03B |
 | 05A | **Render + compile the application documents** | `scripts/render_latex_application.py` | CV + letter `.tex` + PDF (×2 if German) | 03A, 03B, 04A |
-| 06A | Healthcheck the application documents | `scripts/latex_healthcheck.py` | PASS / FAIL | 05A |
+| 06A | QA the application documents | `scripts/qa_application.py --no-images` | PASS / FAIL | 05A |
 | 04B | Interview prep payload | `08-interview-prep` | `interview_prep_payload_en` | 01B, 03A, 03B |
 | 05B | Render + compile the interview prep | `scripts/render_latex_application.py` | Interview Prep `.tex` + PDF | 04B |
-| 06B | Healthcheck the interview prep | `scripts/latex_healthcheck.py` | PASS / FAIL | 05B |
+| 06B | QA the interview prep | `scripts/qa_application.py --require-prep --no-images` | PASS / FAIL | 05B |
 | 08 | Proofread final PDFs | `09-proofreader` | PASS/FIXED/ESCALATED | 06A, 06B |
 | 09 | Final QA across entire folder | `10-final-verifier` | PASS / REJECTED | 08 |
 | 10 | Log the application in the yearly tracker | `scripts/append_tracker_entry.py` | row in `<YYYY>/Job Applications Tracker <YYYY>.xlsx` | 09 |
@@ -67,6 +67,34 @@ end means a prep step that overruns or is killed takes the CV and cover letter w
 which is exactly how one run ended with no PDFs at all despite both documents having
 already passed verification. If prep fails after 06A, the application is still complete;
 say so in the summary and move on.
+
+Headless runs take that one step further: the watcher reports the application the moment the
+required PDFs are on disk and have stopped growing, without waiting for prep. The user gets a
+"ready" message at 06A time and a short "run complete" once the process exits. So a slow prep
+step costs nobody any waiting — do not be tempted to skip it for speed.
+
+### Steps 06/08/09 are one script, run once
+
+`scripts/qa_application.py` does the whole deterministic half of QA in a single pass: the
+LaTeX healthcheck, page counts against the limits, PDF text extraction, the AI-fingerprint
+scan across every document, the folder inventory, and rasterisation of every page into
+`_tmp/pdf_pages/<stem>/`.
+
+```
+python scripts/qa_application.py "<folder>"                        # 06A, after 05A
+python scripts/qa_application.py "<folder>" --require-prep         # 06B, after 05B
+python scripts/qa_application.py "<folder>" --json                 # feeds 08 and 09
+```
+
+Pass `--no-images` on the two gate checks (06A/06B) — nobody is looking at pages yet, and
+rasterisation is the slow part. Prep is not required unless `--require-prep` is given, which
+is what lets 06A pass before prep exists.
+
+The models in steps 08 and 09 start from that report and judge only what needs a reader:
+language, tone, register, and how the rendered page actually looks. They must not re-run
+the healthcheck, re-grep PDF text, or call `pdf_to_images.py` again. Ten healthchecks and
+three rasterisations of the same unchanged PDFs was the largest single block of waste in the
+run this was written for.
 
 Before step 09 can PASS, clean the deliverable folder:
 
@@ -99,10 +127,13 @@ Phase C (after 03A, 03B): two independent tracks, started in the same message.
   into the same folder, so let one finish before starting the other. In practice 04B is long
   enough that 05A is done well before 05B is ready.
 Phase D (after 06A and 06B): proofread → final QA → clean → tracker log, sequentially.
+  Both model steps read the report from one `qa_application.py --json` run; neither repeats
+  its deterministic work.
 
 If the prep track fails or is killed, finish Phase D on the application documents alone
 rather than abandoning the run — a complete application without the study aid is worth far
-more than neither.
+more than neither. 06A is the point from which that is true: once it passes, the employer-
+facing half of the run is finished and checked, and headless runs announce it right there.
 
 ## Application Tracker (step 10)
 
@@ -157,7 +188,13 @@ without asking the user first.
 
 Keep cross-agent handoffs compact. Match Brief: 600–900 words. Research Note: 500–800 words. Pass Match Brief + Research Note + output path + relevant slice to writing agents — not full raw pages. Reference archived posting files instead of pasting their full text.
 
-Do not ask a model to debug deterministic LaTeX/PDF defects. Run `scripts/latex_healthcheck.py` first. Fix via payload/template/rendering locally before calling a verifier.
+Do not ask a model to debug deterministic LaTeX/PDF defects. Run `scripts/qa_application.py` first. Fix via payload/template/rendering locally before calling a verifier.
+
+Do not let an agent re-derive the toolchain. Script signatures, payload keys, page limits, and
+the locked layout constants are in `rules/slices/_toolchain.md`; every agent slice points at it.
+Reading `scripts/` or `master/LaTeX/` source to work out an argument costs a turn per file and
+has produced wrong guesses. Reading a past application's payload for phrasing is worse — it is
+off-spec, since only `/master` and `rules/` are fact sources.
 
 Two files that are not worth a turn:
 
@@ -175,10 +212,13 @@ Two files that are not worth a turn:
 
 - `rules/00-canonical-profile.md` — full candidate facts, single source of truth.
 - `rules/slices/` — per-agent compact rule slices.
+- `rules/slices/_toolchain.md` — script signatures, payload keys, page limits, locked layout
+  constants. Agents read this instead of `scripts/` or `master/LaTeX/` source;
+  `11-latex-workflow-engineer` owns it and updates it whenever an interface changes.
 - `.claude/agents/` — Claude Code specialist-subagent files.
 - `master/LaTeX/templates/` — locked LaTeX templates (cv_en, cv_de, letter_en, letter_de, interview_prep_en).
 - `master/LaTeX/shared/` — shared LaTeX macros/style.
-- `scripts/` — scaffold, render, healthcheck, toolchain check, SingleFile capture, tracker
+- `scripts/` — scaffold, render, healthcheck, one-pass QA, toolchain check, SingleFile capture, tracker
   build/append, `clean_deliverable.py` to tidy a finished folder down to its deliverables,
   and `cleanup_application.py` to undo a failed run entirely. The two are not
   interchangeable: the first runs on success, the second erases the application.

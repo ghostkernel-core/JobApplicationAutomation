@@ -12,7 +12,8 @@ code 2 blocks the call outright. So the allow-list lives here:
 
     Bash                     command text is screened (see evaluate_bash)
     Edit / Write / notebooks  target path must be inside the workspace
-    Read                      may read widely, but not credentials
+    Read                      may read widely, but not credentials, and not
+                              another application's folder (see below)
 
 Be clear about what this is. It stops a confused agent from running something
 destructive or from reading credentials it has no business reading. It is not a
@@ -94,6 +95,20 @@ SECRET_PATHS = [
     (r"[Cc]:[\\/]+Users[\\/]+[^\\/\s]+[\\/]+\.", "a dotfile in the user profile"),
     (r"/c/Users/[^/\s]+/\.", "a dotfile in the user profile"),
 ]
+
+# Off-spec rather than dangerous. Only `/master` and `rules/` are fact sources;
+# a past application is neither, and reading one to borrow its phrasing produces
+# a document written for a different posting. It is also the slowest way to get
+# it wrong — one run spent eleven turns opening finished applications and their
+# retired payloads before writing a line of its own.
+#
+# A deliverable folder is `<YYYY>/<Company>/<YYYY-MM-DD> - <Role>/`, so the date
+# segment is what separates this run's folder from every other one. That test
+# needs no state and no handoff from the watcher, which matters: the canonical
+# company name and role title are settled by 00-posting-archiver during the run,
+# so the exact folder is not known at spawn time and cannot be passed in.
+DELIVERABLE_SEGMENT = re.compile(r"(?:^|/)(\d{4}-\d{2}-\d{2}) - [^/]+(?:/|$)")
+PAYLOAD_ARCHIVE = re.compile(r"(?:^|/)_tmp/payloads/", re.IGNORECASE)
 
 # Anything the OS needs to keep working.
 SYSTEM_PATHS = [
@@ -247,14 +262,48 @@ def evaluate_edit(path: str) -> str | None:
     return None
 
 
+def _recent_dates(today: dt.date | None = None) -> set[str]:
+    """Folder dates that can still belong to the run doing the reading.
+
+    Yesterday counts. A build that starts at 23:50 scaffolds a folder dated
+    yesterday and is still writing into it after midnight; blocking it from its
+    own folder over a clock tick would be a maddening way to lose a run.
+    """
+    day = today or dt.date.today()
+    return {day.isoformat(), (day - dt.timedelta(days=1)).isoformat()}
+
+
+def evaluate_reference_read(path: str,
+                            today: dt.date | None = None) -> str | None:
+    """The reason a path is off-spec to read, or None.
+
+    Split out from `evaluate_read` so the self-test can pin `today` — a suite
+    with a literal date in it starts failing the day after it is written.
+    """
+    normalized = path.replace("\\", "/")
+
+    if PAYLOAD_ARCHIVE.search(normalized):
+        return ("_tmp/payloads holds retired payloads from finished "
+                "applications, kept only so a rule change can be re-rendered; "
+                "it is not a fact source or a style reference")
+
+    match = DELIVERABLE_SEGMENT.search(normalized)
+    if match and match.group(1) not in _recent_dates(today):
+        return (f"this is a past application's folder ({match.group(1)}); only "
+                f"/master and rules/ are fact sources, never another "
+                f"application")
+    return None
+
+
 def evaluate_read(path: str) -> str | None:
-    """Reads may roam â€” the profile cites work on other drives â€” except secrets."""
+    """Reads may roam â€” the profile cites work on other drives â€” except secrets
+    and the two in-workspace places that are off-spec by definition."""
     if not path:
         return None
     for pattern, label in SECRET_PATHS:
         if re.search(pattern, path):
             return f"{label} is not readable by a build"
-    return None
+    return evaluate_reference_read(path)
 
 
 def evaluate(tool: str, tool_input: dict) -> str | None:
@@ -376,6 +425,30 @@ CASES: list[tuple[str, dict, bool]] = [
 ]
 
 
+# Off-spec reads. `today` is pinned so these mean the same thing next month;
+# the cases below are relative to REF_TODAY, not to the day the suite runs.
+REF_TODAY = dt.date(2026, 8, 4)
+REF_CASES: list[tuple[str, bool]] = [
+    # (path, should_block)
+    (f"{WS}/rules/00-canonical-profile.md", False),
+    (f"{WS}/master/LaTeX/templates/cv_en.tex", False),
+    (f"{WS}/rules/slices/_toolchain.md", False),
+    # This run's own folder, and the same folder scaffolded just before midnight.
+    (f"{WS}/2026/Acme/2026-08-04 - Data Scientist/Surname, Firstname - CV.tex", False),
+    (f"{WS}/2026/Acme/2026-08-03 - Data Scientist/Match Brief.md", False),
+    # Page images live outside the deliverable folder and are read every run.
+    (f"{WS}/_tmp/pdf_pages/Surname, Firstname - CV/page-1.png", False),
+    # Somebody else's application, and its retired payloads.
+    (f"{WS}/2026/Deluxe/2026-07-11 - AI Engineer/Surname, Firstname - CV.tex", True),
+    (f"{WS}/2026/Deluxe/2026-07-11 - AI Engineer/Research Note.md", True),
+    (f"{WS}/2025/Contoso/2025-11-02 - ML Engineer/Cover Letter.pdf", True),
+    (f"{WS}/_tmp/payloads/Deluxe 2026-07-11/cv_payload_en.json", True),
+    (f"{WS}/_tmp/payloads/Acme 2026-08-04/cv_payload_en.json", True),  # even this run's
+    # Windows separators reach the hook as often as posix ones.
+    (f"{WS}\\2026\\Deluxe\\2026-07-11 - AI Engineer\\notes.md".replace("/", "\\"), True),
+]
+
+
 # The containment check has to follow whatever root the install sits at, so it
 # is exercised against a root that is deliberately neither this drive nor this
 # folder name. A regression to a literal drive letter / folder name fails here
@@ -410,7 +483,15 @@ def _self_test() -> int:
             print(f"  FAIL  alt-root want "
                   f"{'outside' if should_report else 'inside'}: {command}")
 
-    total = len(CASES) + len(ALT_CASES)
+    for path, should_block in REF_CASES:
+        blocked = evaluate_reference_read(path, REF_TODAY) is not None
+        if blocked != should_block:
+            failures += 1
+            want = "BLOCK" if should_block else "allow"
+            got = "BLOCK" if blocked else "allow"
+            print(f"  FAIL  want {want}, got {got}: read {path}")
+
+    total = len(CASES) + len(ALT_CASES) + len(REF_CASES)
     print(f"{total - failures}/{total} guard cases pass")
     return 1 if failures else 0
 

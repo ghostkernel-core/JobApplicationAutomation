@@ -2,6 +2,12 @@
 
 Use only for template/script/toolchain maintenance, never application prose.
 
+Every other agent is barred from reading script and template source; they work from
+`rules/slices/_toolchain.md` instead. You are the exception, and you own that file: if
+you change a CLI signature, a payload key, a page limit, or a locked layout constant,
+update `_toolchain.md` in the same run. A stale contract card sends every other agent
+back to guessing, which is what it exists to stop.
+
 - Templates: `master/LaTeX/templates/cv_en.tex`, `cv_de.tex`, `letter_en.tex`, `letter_de.tex`.
 - Shared macros: `master/LaTeX/shared/`.
 - Renderer: `scripts/render_latex_application.py`.

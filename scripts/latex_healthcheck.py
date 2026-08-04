@@ -108,7 +108,15 @@ def check_bad_patterns(name: str, text: str) -> list[str]:
     return errors
 
 
-def check_folder(folder: Path) -> list[str]:
+def check_folder(folder: Path, require_prep: bool = True) -> list[str]:
+    """Validate a deliverable folder.
+
+    `require_prep` is False while the application documents are being checked
+    ahead of the Interview Prep render. Prep is a private study aid that lands
+    after the CV and letter, so demanding it here would fail a folder whose
+    application is finished and correct. When prep is absent and not required
+    its checks are skipped; when it is present it is checked either way.
+    """
     errors: list[str] = []
     if not folder.is_dir():
         return [f"not a folder: {folder}"]
@@ -145,7 +153,8 @@ def check_folder(folder: Path) -> list[str]:
 
     prep_tex_path = folder / PREP_TEX
     if not prep_tex_path.exists():
-        errors.append(f"missing TEX: {PREP_TEX}")
+        if require_prep:
+            errors.append(f"missing TEX: {PREP_TEX}")
     else:
         prep_text = read_text(prep_tex_path)
         if r"\documentclass" not in prep_text or r"\end{document}" not in prep_text:
@@ -177,7 +186,8 @@ def check_folder(folder: Path) -> list[str]:
 
     prep_pdf_path = folder / PREP_PDF
     if not prep_pdf_path.exists():
-        errors.append(f"missing PDF: {PREP_PDF}")
+        if require_prep:
+            errors.append(f"missing PDF: {PREP_PDF}")
     else:
         pages, text, pdf_errors = pdf_text_and_pages(prep_pdf_path)
         errors.extend(pdf_errors)
@@ -270,8 +280,11 @@ def main() -> int:
     parser.add_argument("folder")
     parser.add_argument("--cv-only", action="store_true", help="Validate a bilingual recruiter CV folder.")
     parser.add_argument("--expect-phd", action="store_true", help="Require an ongoing doctorate entry in CV-only mode.")
+    parser.add_argument("--no-prep", action="store_true",
+                        help="Do not require Interview Prep; check the application documents alone.")
     args = parser.parse_args()
-    errors = check_cv_folder(Path(args.folder), args.expect_phd) if args.cv_only else check_folder(Path(args.folder))
+    errors = (check_cv_folder(Path(args.folder), args.expect_phd) if args.cv_only
+              else check_folder(Path(args.folder), require_prep=not args.no_prep))
     if errors:
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)

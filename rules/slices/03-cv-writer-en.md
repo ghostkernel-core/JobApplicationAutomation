@@ -4,6 +4,8 @@
 
 Read `rules/slices/_facts.md` first — the condensed canonical facts for this workspace (generated from rules/00-canonical-profile.md).
 
+Page limits and the locked column widths that decide whether a skills row wraps are in `rules/slices/_toolchain.md`. Use those numbers; do not measure them from `master/LaTeX/`, and never open another application's folder or `_tmp/payloads/` to copy phrasing — only `/master` and `rules/` are sources.
+
 ## CV payload rules
 
 - Return structured payload only (JSON or structured block), never `.tex`/PDF/DOCX.

@@ -23,4 +23,6 @@
 
 Read `rules/slices/_facts.md` first — the condensed canonical facts for this workspace (generated from rules/00-canonical-profile.md).
 
+The one-page limit and the locked layout constants are in `rules/slices/_toolchain.md`. Use those numbers; do not measure them from `master/LaTeX/`, and never open another application's folder or `_tmp/payloads/` to compare against — only `/master` and `rules/` are sources.
+
 See `rules/03-cover-letter-rules.md`, `rules/05-integrity-no-fabrication.md`, `rules/07-humanlike-anti-ai.md`.
