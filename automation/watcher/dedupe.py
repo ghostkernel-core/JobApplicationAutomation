@@ -163,15 +163,29 @@ def find_existing(company: str, title: str, lookback_days: int = 365,
 # --------------------------------------------------------------------------
 
 # The two documents every run produces, English-only or not. German and
-# Interview Prep are conditional, so they cannot be part of the test.
-REQUIRED_PDFS = tuple(
-    load_identity().doc_name(label, ".pdf") for label in ("CV", "Cover Letter")
-)
+# Interview Prep are conditional, so they cannot be part of the required set.
+#
+# These are functions rather than module-level tuples because building them
+# reads `identity.toml`, which is git-ignored and created per install. As
+# constants they made *importing this module* — and therefore `watcher.matcher`,
+# which imports it — fail outright on any checkout without one, CI included.
+# `load_identity` is `lru_cache`d, so asking each call costs nothing after the
+# first, and a workspace that genuinely lacks the file now fails where it is
+# actually used instead of at import.
+_REQUIRED_LABELS = ("CV", "Cover Letter")
+_OPTIONAL_LABELS = ("Lebenslauf", "Anschreiben", "Interview Prep")
 
-OPTIONAL_PDFS = tuple(
-    load_identity().doc_name(label, ".pdf")
-    for label in ("Lebenslauf", "Anschreiben", "Interview Prep")
-)
+
+def required_pdfs() -> tuple[str, ...]:
+    """Filenames of the documents every completed run must have produced."""
+    return tuple(load_identity().doc_name(label, ".pdf")
+                 for label in _REQUIRED_LABELS)
+
+
+def optional_pdfs() -> tuple[str, ...]:
+    """Filenames of the conditional documents — German pair, Interview Prep."""
+    return tuple(load_identity().doc_name(label, ".pdf")
+                 for label in _OPTIONAL_LABELS)
 
 
 def missing_documents(folder: str | Path) -> list[str]:
@@ -182,11 +196,12 @@ def missing_documents(folder: str | Path) -> list[str]:
     it. Treating that as "already applied" would block the role from ever being
     retried, so the duplicate check asks for the documents, not the directory.
     """
+    required = required_pdfs()
     path = Path(folder)
     if not path.is_dir():
-        return list(REQUIRED_PDFS)
+        return list(required)
     present = {entry.name for entry in path.iterdir() if entry.is_file()}
-    return [name for name in REQUIRED_PDFS if name not in present]
+    return [name for name in required if name not in present]
 
 
 def present_documents(folder: str | Path) -> list[str]:
@@ -195,7 +210,8 @@ def present_documents(folder: str | Path) -> list[str]:
     if not path.is_dir():
         return []
     present = {entry.name for entry in path.iterdir() if entry.is_file()}
-    return [name for name in REQUIRED_PDFS + OPTIONAL_PDFS if name in present]
+    return [name for name in required_pdfs() + optional_pdfs()
+            if name in present]
 
 
 def is_complete(existing: ExistingApplication) -> bool:

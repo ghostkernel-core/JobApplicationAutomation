@@ -258,6 +258,29 @@ class Notifier:
             "<i>Back in the rotation — no action needed.</i>"
         )
 
+    async def send_scoring_degraded(self, report: Any) -> None:
+        """Say so when the scorer could not judge some of this cycle's postings.
+
+        Without this, a broken scorer and a quiet job market look identical from
+        the outside: both are silence. They are not the same thing, and the one
+        time they were confused it cost 49 buried postings.
+        """
+        if not getattr(report, "failed", 0):
+            return
+        deferred, exhausted = report.deferred, report.exhausted
+        lines = [f"🟡 <b>Scoring degraded</b> — {report.failed} posting(s) could "
+                 f"not be judged this cycle."]
+        if deferred:
+            lines.append(f"• {deferred} will be re-scored automatically next cycle.")
+        if exhausted:
+            lines.append(
+                f"• {exhausted} ran out of attempts and are parked at 45/maybe — "
+                "below the notify threshold. Recover them with: "
+                "<code>python watcherctl.py rescore</code>")
+        lines.append("\n<i>Usually a transient upstream failure. Check "
+                     "watcher.log for the reason.</i>")
+        await self.send_notice("\n".join(lines))
+
     async def send_heartbeat(self, report: dict[str, Any]) -> None:
         """Daily proof of life, so silence is distinguishable from a crash."""
         with store.connect() as conn:

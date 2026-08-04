@@ -7,9 +7,18 @@ tokens, so postings are batched and the profile context is sent once per batch
 rather than once per posting.
 
 The output contract is strict JSON. A batch that comes back malformed twice is
-not dropped — every posting in it is recorded as a low-confidence `maybe`, which
+not dropped — every posting in it degrades to a low-confidence `maybe`, which
 lands in the digest band. A parsing failure should cost a nudge in the evening
 digest, never a silently missed role.
+
+That fallback is deliberately *not* written to the database on the first
+failure. `store.unscored()` selects postings with no verdict row at all, so
+persisting the fallback marks the posting scored forever: a sixty-second
+upstream blip once buried 49 postings at 45/`maybe`, below the notify threshold,
+with no path back. Instead the failure is counted in `score_attempts` and the
+posting is left unscored for the next cycle. Only once a posting has failed
+`config.max_score_attempts` times is the fallback persisted — by then it is a
+real verdict about an unparseable posting, not a transient outage.
 """
 
 from __future__ import annotations
@@ -79,6 +88,10 @@ Return exactly one result per posting, using the ids given below verbatim.
 class MatchReport:
     scored: int = 0
     failed: int = 0
+    #: Degraded postings held back for another attempt — no verdict was written.
+    deferred: int = 0
+    #: Degraded postings that ran out of attempts and had the fallback persisted.
+    exhausted: int = 0
     by_band: dict[str, int] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
@@ -148,10 +161,21 @@ _FALLBACK = {
     "score": 45,
     "verdict": "maybe",
     "why": [],
-    "gaps": ["scoring failed — judge from the posting"],
+    "gaps": [store.DEGRADED_GAP],
     "stop_and_ask": False,
     "stop_reason": None,
 }
+
+
+def _degraded(reason: str) -> dict[str, Any]:
+    """The fallback verdict, tagged with why it was needed.
+
+    `degraded` is an in-memory marker only — `store.save_verdict` writes named
+    columns and ignores it. Callers test this key rather than comparing `gaps`,
+    and it carries the failure reason into `score_attempts.last_error` so a
+    recurring failure can be told apart from a one-off.
+    """
+    return {**_FALLBACK, "degraded": reason}
 
 
 def score_batch(rows: Sequence[sqlite3.Row], digest: str, kb: str,
@@ -167,7 +191,8 @@ def score_batch(rows: Sequence[sqlite3.Row], digest: str, kb: str,
     except ClaudeError as exc:
         log.error("batch of %d failed to score (%s) — degrading to maybe",
                   len(rows), exc)
-        return {row["id"]: dict(_FALLBACK) for row in rows}
+        reason = str(exc)[:300]
+        return {row["id"]: _degraded(reason) for row in rows}
 
     by_id: dict[str, dict[str, Any]] = {}
     for item in results:
@@ -182,7 +207,7 @@ def score_batch(rows: Sequence[sqlite3.Row], digest: str, kb: str,
             # The model returned fewer results than postings, or renamed an id.
             log.warning("no result for %s (%s) — degrading to maybe",
                         row["id"], row["title"])
-            out[row["id"]] = dict(_FALLBACK)
+            out[row["id"]] = _degraded("no result returned for this posting")
     return out
 
 
@@ -208,14 +233,44 @@ def score_postings(rows: Sequence[sqlite3.Row], config: Config | None = None,
         for verdict in results.values():
             report.scored += 1
             report.by_band[verdict["verdict"]] += 1
-            if verdict["gaps"] == _FALLBACK["gaps"]:
+            if verdict.get("degraded"):
                 report.failed += 1
         if persist:
             with store.connect() as conn:
                 for posting_id, verdict in results.items():
-                    store.save_verdict(conn, posting_id, verdict, config.match_model)
+                    _persist(conn, posting_id, verdict, config, report)
 
     return verdicts, report
+
+
+def _persist(conn, posting_id: str, verdict: dict[str, Any], config: Config,
+             report: MatchReport) -> None:
+    """Write one verdict, unless holding it back buys another attempt.
+
+    A degraded verdict is not a judgement about the posting, so writing it would
+    end the posting's life at 45/`maybe` — `store.unscored()` never re-selects a
+    posting that has a verdict row. Leave the row absent and the next cycle picks
+    it up again. The attempt counter is what stops that being an infinite loop.
+    """
+    reason = verdict.get("degraded")
+    if not reason:
+        store.save_verdict(conn, posting_id, verdict, config.match_model)
+        store.clear_score_attempts(conn, posting_id)
+        return
+
+    attempts = store.bump_score_attempt(conn, posting_id, str(reason))
+    if attempts < config.max_score_attempts:
+        report.deferred += 1
+        log.info("holding %s for another attempt (%d/%d): %s",
+                 posting_id, attempts, config.max_score_attempts, reason)
+        return
+
+    # Out of attempts. The posting is not a transient failure any more, so let
+    # the fallback stand and stop re-scoring it every cycle.
+    log.warning("%s failed to score %d times — recording the fallback verdict: %s",
+                posting_id, attempts, reason)
+    store.save_verdict(conn, posting_id, verdict, config.match_model)
+    report.exhausted += 1
 
 
 def match_pending(config: Config | None = None) -> MatchReport:
@@ -228,9 +283,10 @@ def match_pending(config: Config | None = None) -> MatchReport:
         return MatchReport()
     log.info("scoring %d posting(s)", len(rows))
     _, report = score_postings(rows, config)
-    log.info("scored %d — strong %d, maybe %d, no %d (%d degraded)",
+    log.info("scored %d — strong %d, maybe %d, no %d "
+             "(%d degraded: %d retried next cycle, %d out of attempts)",
              report.scored, report.by_band["strong"], report.by_band["maybe"],
-             report.by_band["no"], report.failed)
+             report.by_band["no"], report.failed, report.deferred, report.exhausted)
     return report
 
 
@@ -314,6 +370,9 @@ def main(argv: list[str] | None = None) -> int:
                              "or above the notify threshold")
     parser.add_argument("--pending", action="store_true",
                         help="score everything not yet judged, and save")
+    parser.add_argument("--rescore-degraded", action="store_true",
+                        help="drop the verdicts the scorer could not actually "
+                             "judge, so the next cycle scores them properly")
     parser.add_argument("--refresh-digest", action="store_true",
                         help="regenerate state/profile_digest.md and exit")
     parser.add_argument("--json", action="store_true", help="print raw verdicts as JSON")
@@ -362,6 +421,25 @@ def main(argv: list[str] | None = None) -> int:
             print("Missed — tune profile_kb.md until these clear the threshold:")
             for row in missed:
                 print(f"  {verdicts[row['id']]['score']:>3}  {row['company']} — {row['title']}")
+        return 0
+
+    if args.rescore_degraded:
+        store.init_db()
+        with store.connect() as conn:
+            ids = store.degraded_verdict_ids(conn)
+            if not ids:
+                print("No degraded verdicts — nothing to re-score.")
+                return 0
+            rows = list(conn.execute(
+                f"SELECT company, title FROM postings WHERE id IN "
+                f"({','.join('?' * len(ids))}) ORDER BY company",
+                ids,
+            ))
+            cleared = store.clear_degraded_verdicts(conn)
+        for row in rows:
+            print(f"  {row['company']} — {row['title']}")
+        print(f"\nCleared {cleared} degraded verdict(s). The next poll will score "
+              f"them; run `python -m watcher.matcher --pending` to do it now.")
         return 0
 
     if args.pending:
