@@ -131,6 +131,13 @@ _MIGRATIONS: list[str] = [
     ALTER TABLE postings ADD COLUMN level TEXT DEFAULT '';
     ALTER TABLE postings ADD COLUMN years_required INTEGER;
     """,
+    # When a source switched itself off, so a poll can decide whether the retry
+    # cooldown has elapsed. NULL on rows disabled before this migration; the
+    # cooldown check reads that as "due now", so old installs recover on the
+    # next poll rather than staying stuck forever.
+    """
+    ALTER TABLE source_health ADD COLUMN disabled_at TEXT;
+    """,
 ]
 
 
@@ -427,18 +434,24 @@ def build_for_posting(conn: sqlite3.Connection, posting_id: str) -> sqlite3.Row 
 def mark_source_ok(conn: sqlite3.Connection, source: str) -> None:
     conn.execute(
         """INSERT INTO source_health
-             (source, last_ok_at, last_error, consecutive_failures, disabled, notified_disabled)
-           VALUES (?, ?, NULL, 0, 0, 0)
+             (source, last_ok_at, last_error, consecutive_failures, disabled,
+              notified_disabled, disabled_at)
+           VALUES (?, ?, NULL, 0, 0, 0, NULL)
            ON CONFLICT(source) DO UPDATE SET
              last_ok_at=excluded.last_ok_at, last_error=NULL,
-             consecutive_failures=0, disabled=0, notified_disabled=0""",
+             consecutive_failures=0, disabled=0, notified_disabled=0,
+             disabled_at=NULL""",
         (source, _now()),
     )
 
 
 def mark_source_failed(conn: sqlite3.Connection, source: str, error: str,
                        threshold: int) -> bool:
-    """Record a failure. Returns True when this failure trips the disable."""
+    """Record a failure. Returns True when this failure trips the disable.
+
+    Only the *first* trip returns True — the guard below is what keeps a source
+    that fails its hourly retry probe from re-announcing itself every hour.
+    """
     conn.execute(
         """INSERT INTO source_health (source, last_error, consecutive_failures)
            VALUES (?, ?, 1)
@@ -453,10 +466,19 @@ def mark_source_failed(conn: sqlite3.Connection, source: str, error: str,
     ).fetchone()
     if row and row["consecutive_failures"] >= threshold and not row["disabled"]:
         conn.execute(
-            "UPDATE source_health SET disabled = 1 WHERE source = ?", (source,)
+            "UPDATE source_health SET disabled = 1, disabled_at = ? WHERE source = ?",
+            (_now(), source),
         )
         return True
     return False
+
+
+def bump_source_cooldown(conn: sqlite3.Connection, source: str) -> None:
+    """Restart the retry clock after a retry probe failed again."""
+    conn.execute(
+        "UPDATE source_health SET disabled_at = ? WHERE source = ?",
+        (_now(), source),
+    )
 
 
 def is_source_disabled(conn: sqlite3.Connection, source: str) -> bool:
@@ -466,6 +488,37 @@ def is_source_disabled(conn: sqlite3.Connection, source: str) -> bool:
     return bool(row and row["disabled"])
 
 
+def retry_due_at(row: sqlite3.Row | None, retry_after_minutes: int
+                 ) -> dt.datetime | None:
+    """When a disabled source is next eligible for a retry probe.
+
+    None means "never" — either the row is not disabled, or auto-recovery is
+    switched off with `retry_after_minutes <= 0`. A disabled row with no
+    `disabled_at` (written before that column existed, or by a hand-edited db)
+    is due immediately.
+    """
+    if row is None or not row["disabled"] or retry_after_minutes <= 0:
+        return None
+    stamp = row["disabled_at"] if "disabled_at" in row.keys() else None
+    if not stamp:
+        return dt.datetime.now()
+    try:
+        return dt.datetime.fromisoformat(stamp) + dt.timedelta(
+            minutes=retry_after_minutes)
+    except ValueError:
+        return dt.datetime.now()
+
+
+def retry_is_due(conn: sqlite3.Connection, source: str,
+                 retry_after_minutes: int) -> bool:
+    """True when a disabled source has sat out its cooldown and may be probed."""
+    row = conn.execute(
+        "SELECT * FROM source_health WHERE source = ?", (source,)
+    ).fetchone()
+    due = retry_due_at(row, retry_after_minutes)
+    return due is not None and dt.datetime.now() >= due
+
+
 def source_health(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return list(conn.execute("SELECT * FROM source_health ORDER BY source"))
 
@@ -473,7 +526,8 @@ def source_health(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 def reset_source(conn: sqlite3.Connection, source: str) -> None:
     conn.execute(
         """UPDATE source_health
-           SET disabled = 0, consecutive_failures = 0, notified_disabled = 0
+           SET disabled = 0, consecutive_failures = 0, notified_disabled = 0,
+               disabled_at = NULL
            WHERE source = ?""",
         (source,),
     )

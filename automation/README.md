@@ -70,7 +70,7 @@ Underneath, the entrypoint is still directly usable, and every sub-command below
 | `-m watcher.dedupe_check --company Deluxe --role "AI Engineer"` | "have I already applied?" |
 | `-m watcher.discover --company X` | probe ATS providers for a company's board token |
 | `-m watcher.whoami` | print the chat id of whoever messages the bot next |
-| `-m watcher.health` | per-source failure counts; `--reset <source>` re-enables a disabled one |
+| `-m watcher.health` | per-source failure counts and time to the next auto-retry; `--reset <source>` re-enables a disabled one immediately |
 | `-m watcher.status` | every watched board and portal with its URL, then every setting in force |
 | `-m watcher.builder --posting <id> --dry-run` | print argv, cwd, prompt, and dedupe verdict; spawn nothing |
 | `-m watcher.kb --propose` | build this week's profile_kb.md proposal and print it; write nothing |
@@ -82,7 +82,7 @@ Telegram reply and nowhere else — that is the whole containment story (see bel
 
 | file | |
 |---|---|
-| `sources.toml` | the boards being watched **and the filters applied to them**. `[[ats]]` entries are the reliable tier (public JSON); `[[portal]]` entries are marked `fragile` and disable themselves after repeated failures. `[filters.location]`, `[filters.seniority]`, `[filters.experience]` decide what survives. |
+| `sources.toml` | the boards being watched **and the filters applied to them**. `[[ats]]` entries are the reliable tier (public JSON); `[[portal]]` entries are marked `fragile` and disable themselves after repeated failures, then retry themselves once an hour until they recover. `[filters.location]`, `[filters.seniority]`, `[filters.experience]` decide what survives. |
 | `config.toml` | intervals, score thresholds, timeouts, `[build] enabled`. No secrets. |
 | `profile_kb.md` | matching preferences that grow from your replies. **Tunes matching only** — document facts come from `rules/00-canonical-profile.md` and nowhere else. |
 | `.env` | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, plus optional numeric overrides (below). Never commit, never move the tokens into `config.toml`. |
@@ -144,8 +144,15 @@ is a lazy, soft dependency: a machine without it runs the ATS tier and Arbeitsag
 and disables those two after `failures_before_disable` — it does not fail to boot.
 
 They will break, and the contract when they do is deliberate: three consecutive failures, then
-the source disables itself and sends **exactly one** notification. No retry loop, no repeat.
-`python -m watcher.health --reset portal:stepstone` puts it back.
+the source disables itself and sends **exactly one** 🔴 notification — no retry-every-cycle,
+no repeat alert.
+
+It does not stay off, though. Every `[poll] retry_after_minutes` (default 60) a disabled
+source gets **one** quiet probe. If it works the source is enabled again and a single 🟢
+recovery ping goes out; if it fails the clock restarts and nothing is sent, so a permanently
+dead board costs one attempt an hour and stays silent. `watcher.health` and `watcher.status`
+both show the time to the next retry. `python -m watcher.health --reset portal:stepstone`
+forces it immediately, and `retry_after_minutes = 0` turns auto-recovery off entirely.
 
 ```powershell
 .\.venv\Scripts\python.exe -m playwright install chromium   # ~150 MB, once

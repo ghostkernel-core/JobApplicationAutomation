@@ -444,7 +444,9 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("health", help="per-source status table")
 
-    reset = sub.add_parser("reset", help="re-enable a source that disabled itself")
+    reset = sub.add_parser(
+        "reset",
+        help="re-enable a disabled source now, without waiting for its auto-retry")
     reset.add_argument("source", help='source key, or "all"')
 
     sub.add_parser("digest", help="send the digest to Telegram now")

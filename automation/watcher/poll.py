@@ -6,7 +6,9 @@
 
 A poll never raises because of one bad source. Failures are recorded against
 `source_health`; a fragile source that fails `failures_before_disable` times in
-a row switches itself off and reports once, rather than retrying forever.
+a row switches itself off and reports once, rather than retrying every cycle.
+It is not off for good: after `retry_after_minutes` it gets one quiet probe per
+cooldown, and a probe that succeeds re-enables it and says so.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ class PollReport:
     filtered_out: list[tuple[Posting, str]] = field(default_factory=list)
     errors: dict[str, str] = field(default_factory=dict)
     newly_disabled: list[str] = field(default_factory=list)
+    recovered: list[str] = field(default_factory=list)
     pending: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -59,9 +62,19 @@ def _collect(sources: Sources, config: Config, conn, only: str | None,
         key = source_key(entry)
         if only and key != only:
             continue
-        if not include_disabled and store.is_source_disabled(conn, key):
-            log.info("%s is disabled after repeated failures — skipping", key)
-            continue
+        # A disabled source is not off for good: once its cooldown has elapsed
+        # it gets exactly one probe, and the next one only after another full
+        # cooldown, whether that probe worked or not.
+        retrying = False
+        if store.is_source_disabled(conn, key):
+            if include_disabled:
+                pass
+            elif store.retry_is_due(conn, key, config.retry_after_minutes):
+                retrying = True
+                log.info("%s is disabled — retrying after cooldown", key)
+            else:
+                log.info("%s is disabled after repeated failures — skipping", key)
+                continue
         try:
             found = fetch_source(entry, config.http_timeout)
         except SourceNotImplemented as exc:
@@ -77,8 +90,17 @@ def _collect(sources: Sources, config: Config, conn, only: str | None,
                 report.newly_disabled.append(key)
                 log.error("%s disabled after %d consecutive failures",
                           key, config.failures_before_disable)
+            if retrying:
+                # Still broken. Restart the clock and stay quiet — the one
+                # notification was sent when it first switched off.
+                store.bump_source_cooldown(conn, key)
+                log.info("%s still failing — next retry in %d min",
+                         key, config.retry_after_minutes)
             conn.commit()
             continue
+        if retrying:
+            report.recovered.append(key)
+            log.info("%s recovered and is enabled again", key)
         store.mark_source_ok(conn, key)
         # Commit each health update immediately. Without this the first source
         # to report opens a write transaction that is not committed until the
@@ -179,6 +201,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  skip {posting.summary()}  [{reason}]")
     for key, message in report.errors.items():
         print(f"  FAIL {key}: {message}")
+    for key in report.recovered:
+        print(f"  BACK {key} recovered and is enabled again")
     for note in report.pending:
         print(f"  todo {note}")
 

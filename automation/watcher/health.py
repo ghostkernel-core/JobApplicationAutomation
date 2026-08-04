@@ -5,15 +5,18 @@
     python -m watcher.health --reset "portal:stepstone"
 
 A fragile source that fails repeatedly switches itself off rather than
-retry-spamming, and says so once in Telegram. This is the way back on.
+retry-spamming, and says so once in Telegram. It then retries itself once every
+`[poll] retry_after_minutes` and announces its own recovery, so `--reset` is
+only for forcing that retry early (or for `retry_after_minutes = 0`).
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 
 from . import store
-from .config import load_sources, source_key
+from .config import load_config, load_sources, source_key
 from .logsetup import force_utf8
 
 
@@ -38,6 +41,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     configured = {source_key(entry) for entry in load_sources().all_enabled()}
+    cooldown = load_config().retry_after_minutes
     with store.connect() as conn:
         rows = store.source_health(conn)
 
@@ -50,6 +54,12 @@ def main(argv: list[str] | None = None) -> int:
         state = "DISABLED" if row["disabled"] else "ok"
         print(f"{row['source']:<34} {state:<10} {row['consecutive_failures']:>5}  "
               f"{row['last_ok_at'] or 'never'}")
+        due = store.retry_due_at(row, cooldown)
+        if due is not None:
+            left = round((due - dt.datetime.now()).total_seconds() / 60)
+            print("    retry due now" if left <= 0 else f"    retry in {left}m")
+        elif row["disabled"]:
+            print("    no auto-retry — use --reset")
         if row["last_error"]:
             print(f"    {row['last_error'][:110]}")
 
