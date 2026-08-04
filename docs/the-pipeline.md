@@ -162,3 +162,24 @@ a guess. `--status` defaults to `Applied` and is left there; status changes afte
 you, in Excel. The script reads its columns from the sheet's header row, so you may add or
 remove columns without breaking future runs. See [Customising](./customising.md) for the two
 maintenance scripts that build and backfill the workbook.
+
+## When a run does not finish
+
+The reverse of the tracker step. A run that fails, crashes, or stops at a question you decline
+leaves a dated folder with no documents (or only some), possibly a tracker row, and payload and
+page-image scratch in `_tmp/`. All of it is erased before the failure is reported:
+
+```bash
+python scripts/cleanup_application.py \
+  --folder "<absolute deliverable folder path>" \
+  --reason "<one line: what failed>"
+```
+
+That removes the dated folder, its company folder if that leaves it empty, the matching tracker
+row, and the run's `_tmp` scratch — never the workbook itself, and never a sibling folder for
+another role or date. It refuses any path that is not shaped
+`<YYYY>/<Company>/<YYYY-MM-DD> - <Role>` inside the workspace, and running it twice is a no-op.
+`--dry-run` reports without deleting.
+
+Headless builds do this on their own: the watcher calls the same script whenever a build fails
+or comes back missing documents, and the Telegram reply lists what was removed.

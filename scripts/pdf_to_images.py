@@ -34,6 +34,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+# scripts/ is this file's own directory, so this resolves however the script
+# is invoked. Suppresses the console window each child would otherwise open
+# when the parent has none — see scripts/no_console.py.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import no_console  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTDIR = ROOT / "_tmp" / "pdf_pages"
 DEFAULT_DPI = 150
@@ -99,7 +105,7 @@ def render_with_pdftoppm(pdf: Path, outdir: Path, spec: str | None, dpi: int) ->
         args += ["-f", str(requested[0]), "-l", str(requested[-1])]
     args += [str(pdf), str(outdir / "page")]
 
-    result = subprocess.run(args, capture_output=True, text=True)
+    result = subprocess.run(args, capture_output=True, text=True, **no_console.kwargs())
     if result.returncode != 0:
         raise SystemExit(f"pdftoppm failed: {result.stderr.strip() or result.returncode}")
 

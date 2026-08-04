@@ -327,7 +327,12 @@ def main(argv: list[str] | None = None) -> int:
     load_env()
     store.init_db()
     try:
-        notifier = Notifier(load_config())
+        # No config argument on purpose: passing one pins it for the life of the
+        # process, and this process is meant to stay up for weeks across edits
+        # to config.toml. Called first anyway so a malformed file is reported
+        # here, at startup, rather than mid-cycle.
+        load_config()
+        notifier = Notifier()
     except RuntimeError as exc:
         # Missing credentials is the expected first-run state, not a crash.
         print(f"{exc}\nCopy automation/.env.example to automation/.env and fill "

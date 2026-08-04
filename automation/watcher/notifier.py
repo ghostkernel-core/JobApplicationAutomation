@@ -141,9 +141,17 @@ def format_kb_proposal(proposal: dict[str, Any]) -> str:
 
 class Notifier:
     def __init__(self, config: Config | None = None) -> None:
-        self.config = config or load_config()
+        # Held as an override rather than a snapshot: with none passed, `config`
+        # resolves live on every access, so an edit to config.toml reaches a
+        # watcher that has been up for weeks. An explicit Config still pins the
+        # value, which is what the CLI entry points and tests want.
+        self._config_override = config
         self.chat_id = require_env("TELEGRAM_CHAT_ID")
         self._bot = Bot(require_env("TELEGRAM_BOT_TOKEN"))
+
+    @property
+    def config(self) -> Config:
+        return self._config_override or load_config()
 
     @property
     def bot(self) -> Bot:

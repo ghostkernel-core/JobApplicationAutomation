@@ -26,6 +26,7 @@ from typing import Any
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import no_console  # noqa: E402
 from workspace_identity import load as load_identity  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -315,7 +316,8 @@ def compile_pdf(tex_path: Path, build_dir: Path, engine: str) -> Path:
         cmd = [engine, "-interaction=nonstopmode", "-halt-on-error", tex_path.name]
 
     for _ in range(2):
-        result = subprocess.run(cmd, cwd=build_dir, text=True, capture_output=True, check=False)
+        result = subprocess.run(cmd, cwd=build_dir, text=True, capture_output=True,
+                                check=False, **no_console.kwargs())
         if result.returncode != 0:
             log = build_dir / (tex_path.stem + ".compile-output.txt")
             log.write_text(result.stdout + "\n" + result.stderr, encoding="utf-8")

@@ -109,6 +109,29 @@ The score thresholds matter in particular: `notify_threshold` triggers an instan
 (visible via `watcher.match --replay`). `python -m watcher.match --calibrate` scores postings you
 already applied to, to sanity-check wherever you set these.
 
+## Changing settings while it runs
+
+`config.toml` and `sources.toml` are re-read whenever they change on disk. Edit a threshold, an
+interval, or a source and the next poll cycle uses the new value — no restart, and no cycle
+abandoned halfway through by one. A file that is briefly unparseable (an editor mid-save, a
+stray bracket) is logged once and the last good version stays in force until it parses again,
+so a typo cannot take down a watcher that has been up for weeks.
+
+`automation/build_settings.json` is re-rendered from its template before every build, so
+template edits and a moved clone both apply to the next run. It is a **generated** file: edit
+`build_settings.template.json`, not the `.json`, or your change is overwritten. If the deny rules
+in it would block writes inside the workspace, the build refuses to start and says which rules —
+containment outside the workspace is `hooks/guard.py`'s job, and a broad path deny standing in
+for it is only correct until the workspace moves.
+
+Two things still need `python start_watcher.py restart`: **`automation/.env`**, because swapping
+the credentials of a live long-poll connection underneath itself is not something to do between
+two poll cycles, and any change to the watcher's own **Python code**.
+
+Nothing in `CLAUDE.md`, `rules/`, or `.claude/agents/` needs a restart or is cached anywhere —
+each build is a fresh `claude -p` process that reads all of them at spawn time. Adding, editing,
+or removing a pipeline agent changes the very next run, headless and interactive alike.
+
 ## Running it
 
 Dry-run first — it fetches and normalizes, and stores nothing:

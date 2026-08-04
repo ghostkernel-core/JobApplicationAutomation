@@ -25,6 +25,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+sys.path.insert(0, str(ROOT / "scripts"))
+import build_settings  # noqa: E402  (path must be set first)
+
 # (personal file, example it is created from) — never overwritten if present.
 WRITE_IF_MISSING = (
     ("identity.toml", "identity.toml.example"),
@@ -52,41 +55,10 @@ RUNTIME_DIRS = (
 )
 
 
-def _references(line: str, token: str) -> bool:
-    """True if `line` still contains the literal `{{` template token.
-
-    Kept as a helper (rather than an inline `in` check) so the "no braces
-    survived the substitution" rule reads the same way at both call sites:
-    once right after generation, once during --verify.
-    """
-    return token in line
-
-
 def generate_build_settings() -> None:
-    template_path = ROOT / "automation" / "build_settings.template.json"
-    target_path = ROOT / "automation" / "build_settings.json"
-
-    text = template_path.read_text(encoding="utf-8")
-    generated = text.replace("{{WORKSPACE_ROOT}}", ROOT.as_posix())
-
-    remaining = [line for line in generated.splitlines() if _references(line, "{{")]
-    if remaining:
-        raise RuntimeError(
-            f"{target_path} would still contain unresolved template tokens:\n  "
-            + "\n  ".join(remaining))
-
-    if target_path.exists():
-        existing = target_path.read_text(encoding="utf-8")
-        if existing == generated:
-            print("  automation/build_settings.json — up to date")
-            return
-        target_path.write_text(generated, encoding="utf-8")
-        print("  automation/build_settings.json — overwritten (generated file; "
-              "the template is the source of truth)")
-        return
-
-    target_path.write_text(generated, encoding="utf-8")
-    print("  automation/build_settings.json — created")
+    """Render the template for this clone's location. See scripts/build_settings.py."""
+    status = build_settings.sync(ROOT)
+    print(f"  automation/build_settings.json — {status}")
 
 
 def write_if_missing(rel_target: str, rel_example: str) -> None:
@@ -186,6 +158,25 @@ def run_verify() -> int:
             hooks = json.loads(text).get("hooks", {}).get("PreToolUse", [])
             if hooks:
                 hook_python = Path(hooks[0]["hooks"][0]["command"])
+
+        # A deny rule broad enough to cover the workspace makes every build fail
+        # with nothing but "denied by your permission settings" to go on. This is
+        # exactly what a moved clone produces, so check the live file rather than
+        # trusting that it was generated for this location.
+        blocking = build_settings.conflicts(text, ROOT)
+        if blocking:
+            print("  FAIL — these deny rules block writes inside the workspace:")
+            for rule in blocking:
+                print(f"           {rule}")
+            print("         builds cannot write their own output. Fix the "
+                  "template, then re-run: python scripts/init_workspace.py")
+            ok = False
+        else:
+            print("  OK — no deny rule covers the workspace")
+
+        if text != build_settings.render(ROOT):
+            print("  WARN — differs from the template rendered for this path; "
+                  "run: python scripts/init_workspace.py")
 
     # (c) the hook's python interpreter exists on disk — warn only.
     print("[build guard interpreter]")

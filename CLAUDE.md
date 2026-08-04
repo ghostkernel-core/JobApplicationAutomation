@@ -121,7 +121,8 @@ Do not ask a model to debug deterministic LaTeX/PDF defects. Run `scripts/latex_
 - `.claude/agents/` — Claude Code specialist-subagent files.
 - `master/LaTeX/templates/` — locked LaTeX templates (cv_en, cv_de, letter_en, letter_de, interview_prep_en).
 - `master/LaTeX/shared/` — shared LaTeX macros/style.
-- `scripts/` — scaffold, render, healthcheck, toolchain check, SingleFile capture, tracker build/append.
+- `scripts/` — scaffold, render, healthcheck, toolchain check, SingleFile capture, tracker
+  build/append, and `cleanup_application.py` to undo a failed run.
 - `<YYYY>/Job Applications Tracker <YYYY>.xlsx` — application tracker, one row per application.
 - `automation/` — the job watcher (polling, matching, Telegram, headless builds). Self-contained:
   its own `.venv`, config, sqlite state, and logs. Nothing in the pipeline reads from it.
@@ -146,9 +147,51 @@ Do not ask a model to debug deterministic LaTeX/PDF defects. Run `scripts/latex_
 - URL cannot be captured and no posting text was pasted.
 - Company name is genuinely ambiguous for folder naming.
 
-## If The User Declines After A Stop-And-Ask
+## If A Run Fails Or Is Abandoned
 
-When a stop-and-ask flag (unsupported claim, skills gap, work-authorization mismatch, or similar) leads the user to decline drafting for that posting, delete the entire application folder created for it (archived posting, Match Brief, Research Note, and any other generated files) without asking for a second confirmation — it's not worth keeping as a record. Do this automatically; no need to check with the user first. Only ever delete the specific dated application folder (and its now-empty parent company folder, if the company has no other applications) — never touch sibling folders for other roles/dates under the same company.
+A run that does not finish leaves debris — a dated folder with no PDFs or only some
+of them, a tracker row if step 10 already fired, and payload/rasterisation scratch in
+`_tmp/`. None of it should survive. A folder with no documents reads as "already
+applied" to anyone scanning the tree, and a tracker row for an application that was
+never sent is simply false.
+
+So before reporting a failure, erase the run:
+
+```
+python scripts/cleanup_application.py \
+  --folder "<absolute deliverable folder path>" \
+  --reason "<one line: what failed>"
+```
+
+Rules:
+- Run it for any run that ends without a complete set of deliverables: a hard failure,
+  a crash, a stop-and-ask the user declined, or a run that produced only some of its
+  documents. Do not leave a partial folder behind "for reference".
+- This script is the only sanctioned way to delete an application. Never `rm -rf` a
+  folder and never edit the workbook by hand — the headless guard hook blocks
+  recursive deletes outright, so a manual attempt fails mid-run anyway.
+- It removes the dated folder, its company folder if that leaves it empty, the matching
+  tracker row (company + position + date, the same key `append_tracker_entry.py` writes
+  with), and that application's `_tmp` payloads and page images. The workbook itself is
+  never deleted, only the one row.
+- It refuses any path that is not `<YYYY>/<Company>/<YYYY-MM-DD> - <Role>` inside the
+  workspace, and it is idempotent: running it twice, or on a run that left nothing
+  behind, is a no-op. Add `--dry-run` to see what it would remove.
+- Then report the failure plainly — what broke, and that nothing was left behind.
+
+Headless runs get the same treatment without being asked: the watcher runs this script
+itself whenever a build fails or comes out incomplete, so a Telegram-approved build
+never leaves a half-application on disk either.
+
+### If the user declines after a stop-and-ask
+
+When a stop-and-ask flag (unsupported claim, skills gap, work-authorization mismatch, or
+similar) leads the user to decline drafting for that posting, clean up the application
+folder created for it — archived posting, Match Brief, Research Note, and everything else
+— with the command above, without asking for a second confirmation. It's not worth keeping
+as a record. Do this automatically. Only ever the specific dated folder (and its
+now-empty parent company folder); sibling folders for other roles or dates under the same
+company are never touched, which is exactly what the script's path check enforces.
 
 ## Running Multiple Applications At Once
 

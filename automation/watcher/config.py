@@ -12,6 +12,17 @@ wins over the file. The name is mechanical: `WATCHER_<SECTION>_<KEY>`, so
 tuning a running deployment without editing a tracked file; config.toml stays
 the place where a value lives with the comment explaining why it is that value.
 
+config.toml and sources.toml are re-read whenever they change on disk, so a
+threshold, an interval, or a new source applies from the next poll cycle without
+restarting a watcher that has been running for weeks. A file that is momentarily
+unparseable — an editor mid-save, a stray bracket — is logged and the last good
+version stays in force until it parses again.
+
+.env is the exception: it is read once, and existing environment variables win
+over it, so a changed bot token does need a restart. That is deliberate. Swapping
+the credentials of a live long-poll connection underneath itself is not a thing
+to do casually between two poll cycles.
+
 Paths are derived from this file's location, so the watcher works regardless of
 how the drive is mounted or which directory it was launched from.
 """
@@ -23,7 +34,6 @@ import os
 import sys
 import tomllib
 from dataclasses import dataclass, field
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
@@ -229,6 +239,25 @@ class Config:
         return self._num("build", self.build, "timeout_minutes", 45)
 
     @property
+    def build_retries(self) -> int:
+        """Extra attempts after a build dies on a transient upstream failure.
+
+        Only upstream failures qualify — a 503 from the API or the gateway in
+        front of it, a rate limit, a dropped connection. A build that timed out,
+        crashed, or produced the wrong thing is not retried, because repeating it
+        would fail the same way and cost another timeout to find out.
+
+        Default 1. Zero disables retrying; anything above about 2 mostly turns a
+        genuine outage into three quarters of lost machine time.
+        """
+        return max(0, self._num("build", self.build, "retries", 1))
+
+    @property
+    def build_retry_delay_seconds(self) -> int:
+        """Pause before a retry. Long enough for a brief outage to pass."""
+        return max(0, self._num("build", self.build, "retry_delay_seconds", 120))
+
+    @property
     def duplicate_title_ratio(self) -> float:
         return self._num("build", self.build, "duplicate_title_ratio", 0.8, float)
 
@@ -397,15 +426,72 @@ def source_key(entry: dict[str, Any]) -> str:
     return f"portal:{entry.get('name', '?')}"
 
 
-@lru_cache(maxsize=1)
-def load_config() -> Config:
+def _stamp(path: Path) -> float | None:
+    """Modification time, or None if the file is not there right now."""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
+class _Reloader:
+    """Caches a parsed config file and re-reads it when the file changes.
+
+    The watcher runs for weeks. Loading config.toml and sources.toml once at
+    startup meant every threshold, interval, and source change needed a restart
+    — and a restart mid-poll is how a half-finished cycle gets abandoned. So the
+    cache is keyed on the file's mtime instead of on the process: edit the file
+    and the next thing to ask for it gets the new value.
+
+    A broken edit does not take the watcher down with it. If the file is
+    unparseable — which it inevitably is for the moment an editor has it half
+    written — the error is logged once and the last good value is served until
+    the file parses again. Only the very first load can raise, because at that
+    point there is no good value to fall back to.
+    """
+
+    def __init__(self, path: Path, parse: Callable[[dict[str, Any]], Any],
+                 label: str) -> None:
+        self._path = path
+        self._parse = parse
+        self._label = label
+        self._value: Any = None
+        self._stamp: float | None = None
+        self._complained = False
+
+    def __call__(self) -> Any:
+        stamp = _stamp(self._path)
+        if self._value is not None and stamp == self._stamp:
+            return self._value
+        try:
+            value = self._parse(_read_toml(self._path))
+        except Exception as exc:  # noqa: BLE001 — any parse failure, same answer
+            if self._value is None:
+                raise
+            if not self._complained:
+                log.error("%s is unreadable (%s) — still using the last good "
+                          "version; fix the file and it reloads by itself",
+                          self._label, exc)
+                self._complained = True
+            # Do not adopt the bad stamp: keep retrying on every access so the
+            # fix is picked up the moment it lands.
+            return self._value
+        if self._complained:
+            log.info("%s reloaded cleanly", self._label)
+            self._complained = False
+        elif self._value is not None:
+            log.info("%s changed on disk — reloaded", self._label)
+        self._value, self._stamp = value, stamp
+        return value
+
+
+def _parse_config(raw: dict[str, Any]) -> Config:
     # Populate the environment first: the numeric knobs read os.environ on every
     # access, and the CLI entry points (`-m watcher.match --replay`, the ctl
     # subcommands) never call load_env() themselves. Without this an override in
     # .env would apply to the long-running watcher but be silently ignored by
     # the tools used to check its behaviour — the worst possible split.
     load_env()
-    raw = _read_toml(CONFIG_PATH)
     return Config(
         poll=raw.get("poll", {}),
         match=raw.get("match", {}),
@@ -413,6 +499,14 @@ def load_config() -> Config:
         build=raw.get("build", {}),
         kb=raw.get("kb", {}),
     )
+
+
+_config_reloader = _Reloader(CONFIG_PATH, _parse_config, "config.toml")
+
+
+def load_config() -> Config:
+    """The current config.toml, re-read whenever the file changes on disk."""
+    return _config_reloader()
 
 
 def _strs(section: dict[str, Any], key: str) -> tuple[str, ...]:
@@ -456,9 +550,7 @@ def _parse_filters(raw: dict[str, Any], defaults: dict[str, Any]) -> Filters:
     )
 
 
-@lru_cache(maxsize=1)
-def load_sources() -> Sources:
-    raw = _read_toml(SOURCES_PATH)
+def _parse_sources(raw: dict[str, Any]) -> Sources:
     defaults = raw.get("defaults", {})
     return Sources(
         defaults=SourceDefaults(
@@ -470,6 +562,33 @@ def load_sources() -> Sources:
         portals=tuple(raw.get("portal", [])),
         filters=_parse_filters(raw, defaults),
     )
+
+
+_sources_reloader = _Reloader(SOURCES_PATH, _parse_sources, "sources.toml")
+
+
+def load_sources() -> Sources:
+    """The current sources.toml, re-read whenever the file changes on disk.
+
+    Adding, removing, or disabling a source therefore takes effect on the next
+    poll cycle — no restart, and no cycle interrupted halfway through.
+    """
+    return _sources_reloader()
+
+
+def sync_build_settings() -> str:
+    """Re-render build_settings.json from its template for this workspace.
+
+    Called before every headless build so an edited template — or a clone that
+    has been moved since the file was generated — applies to the very next run
+    instead of waiting for someone to remember `init_workspace.py`. Raises if the
+    result would deny the build write access to the workspace, which is worth
+    refusing to start over: the alternative is a build that spends its whole
+    timeout being told "denied by your permission settings" about its own files.
+    """
+    from build_settings import sync  # scripts/ is on sys.path — see above
+
+    return sync(REPO_ROOT, BUILD_SETTINGS_PATH)
 
 
 def require_env(name: str) -> str:

@@ -14,6 +14,8 @@ Three things it does own:
   containment   cwd pinned to the workspace, guard hook armed, full NDJSON log
   reporting     what came out is read off the filesystem and the tracker, never
                 parsed from the model's own account of itself
+  cleanup       a build that failed or came out short leaves nothing behind —
+                folder, tracker row, and scratch all go
 
 Concurrency is 1. `CLAUDE.md` requires PDF rendering to stay sequential, and
 two pipelines writing LaTeX build artifacts at once is exactly the collision it
@@ -32,6 +34,7 @@ import json
 import logging
 import re
 import subprocess
+import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,7 +42,11 @@ from pathlib import Path
 from . import dedupe, store
 from .claude_cli import ClaudeError, resolve_bin
 from .config import (BUILD_LOG_DIR, BUILD_SETTINGS_PATH, REPO_ROOT, Config,
-                     ensure_dirs, load_config, load_identity)
+                     ensure_dirs, load_config, load_identity,
+                     sync_build_settings)
+
+# Imported after .config, which is what puts scripts/ on sys.path.
+import no_console  # noqa: E402
 from .logsetup import force_utf8
 
 log = logging.getLogger("watcher.build")
@@ -72,6 +79,7 @@ class Outcome:
     detail: str = ""
     documents: tuple[str, ...] = ()
     tracker_row: bool = False
+    cleaned: str = ""
 
 
 # --------------------------------------------------------------------------
@@ -97,12 +105,36 @@ def _slug(text: str, limit: int = 40) -> str:
     return (cleaned[:limit] or "build").lower()
 
 
-def log_path_for(company: str, title: str) -> Path:
+def log_path_for(company: str, title: str, attempt: int = 1) -> Path:
+    """Where one build attempt writes its NDJSON transcript.
+
+    The attempt suffix is not cosmetic: the timestamp only resolves to the
+    second, and the log is opened for writing, so two attempts that started
+    close together would otherwise have the second overwrite the first — losing
+    exactly the transcript of the failure that caused the retry.
+    """
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    return BUILD_LOG_DIR / f"{stamp}-{_slug(company, 24)}-{_slug(title)}.log"
+    suffix = "" if attempt <= 1 else f"-retry{attempt - 1}"
+    return BUILD_LOG_DIR / f"{stamp}-{_slug(company, 24)}-{_slug(title)}{suffix}.log"
 
 
 def command_for(config: Config) -> list[str]:
+    # Re-render the settings file from its template first. It is generated, and
+    # its content depends on where this clone sits, so this is what makes an
+    # edited template — or a workspace that has been moved since the file was
+    # written — apply to the next build rather than the next restart. It also
+    # refuses outright if the deny rules would lock the build out of the
+    # workspace, which is a far better failure than a 45-minute timeout spent
+    # being denied one tool call at a time.
+    try:
+        status = sync_build_settings()
+        if status != "up to date":
+            log.info("build_settings.json %s", status)
+    except FileNotFoundError:
+        pass  # no template in this clone; the exists() check below still applies
+    except Exception as exc:  # noqa: BLE001 — surfaced to Telegram as-is
+        raise ClaudeError(f"build settings are unusable: {exc}") from exc
+
     cmd = [
         resolve_bin(config.claude_bin), "-p",
         "--model", config.build_model,
@@ -130,9 +162,66 @@ def _kill_tree(pid: int) -> None:
     """
     try:
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
-                       capture_output=True, timeout=30)
+                       capture_output=True, timeout=30, **no_console.kwargs())
     except Exception:
         log.exception("could not kill build process tree %s", pid)
+
+
+def _result_detail(event: dict, limit: int = 300) -> str:
+    """Why a failing result event failed, in a form worth putting in Telegram.
+
+    Not `subtype`. That field describes how the turn *ended* — it reads
+    "success" even for a turn that returned nothing but an API error, which is
+    how two builds came to be recorded as failed with the detail "success" and
+    no trace of the 503 that actually killed them. The message is in `result`.
+
+    A build also emits more than one of these: the orchestrator ends a turn
+    whenever it hands off to background subagents, so a long run produces a
+    result event per turn and the last one is the run's real outcome.
+    """
+    text = " ".join(str(event.get("result") or "").split())
+    if not text:
+        # Nothing usable in `result` — subtype is a poor answer but it beats an
+        # empty failure, and "error_during_execution" and friends do say
+        # something.
+        return str(event.get("subtype") or "the CLI reported an error")
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+# Failures that say "the far end was briefly unwell", as opposed to "this build
+# is wrong". Deliberately a list of upstream symptoms rather than a catch-all:
+# retrying a build that timed out, crashed, or wrote the wrong files just spends
+# another 45 minutes arriving at the same answer.
+#
+# Note what is *not* here. `timed out after 45 min` is the watcher's own ceiling,
+# not the API's — "gateway time-out" is spelled out separately so the two cannot
+# be confused. 401/403 are omitted on purpose: bad credentials do not heal.
+_TRANSIENT = re.compile(
+    r"\b(?:429|500|502|503|504)\b"
+    r"|overloaded"
+    r"|rate.?limit"
+    r"|temporarily unavailable"
+    r"|service unavailable"
+    r"|internal server error"
+    r"|bad gateway"
+    r"|gateway time-?out"
+    r"|upstream"
+    r"|connection (?:error|reset|refused|closed)"
+    r"|econnreset|etimedout|enotfound"
+    r"|fetch failed",
+    re.IGNORECASE,
+)
+
+
+def is_transient(detail: str) -> bool:
+    """Whether a failure detail is worth a second attempt.
+
+    Reads the message the CLI itself reported (see `_result_detail`), which is
+    why that function had to stop reporting the word "success": a build killed by
+    `API Error: 503 All accounts are temporarily unavailable` is indistinguishable
+    from a build that produced garbage if the reason never reaches this far.
+    """
+    return bool(detail) and bool(_TRANSIENT.search(detail))
 
 
 async def _spawn(prompt: str, config: Config, log_file: Path) -> tuple[bool, str]:
@@ -142,6 +231,9 @@ async def _spawn(prompt: str, config: Config, log_file: Path) -> tuple[bool, str
     buffered, so a hung build can be inspected while it is still hung.
     """
     cmd = command_for(config)
+    # no_console: the watcher is detached under pythonw and has no console, so
+    # without this the CLI — a .CMD, hence cmd.exe — opens a window and keeps it
+    # in front of whatever you are doing for the whole build.
     process = await asyncio.create_subprocess_exec(
         *cmd,
         stdin=asyncio.subprocess.PIPE,
@@ -149,6 +241,7 @@ async def _spawn(prompt: str, config: Config, log_file: Path) -> tuple[bool, str
         stderr=asyncio.subprocess.STDOUT,
         cwd=str(REPO_ROOT),
         limit=STREAM_LIMIT,
+        **no_console.kwargs(),
     )
 
     detail = ""
@@ -167,7 +260,7 @@ async def _spawn(prompt: str, config: Config, log_file: Path) -> tuple[bool, str
                 event = _parse_event(line)
                 if event and event.get("type") == "result":
                     ok = not event.get("is_error", False)
-                    detail = str(event.get("subtype") or "")
+                    detail = "" if ok else _result_detail(event)
 
     assert process.stdin is not None
     process.stdin.write(prompt.encode("utf-8"))
@@ -187,8 +280,12 @@ async def _spawn(prompt: str, config: Config, log_file: Path) -> tuple[bool, str
         _kill_tree(process.pid)
         raise
 
-    if process.returncode != 0 and not detail:
-        detail = f"exit {process.returncode}"
+    # Append rather than fill only-if-empty: a non-zero exit after a result
+    # event that already explained itself is worth recording alongside the
+    # explanation, not instead of it and not silently dropped.
+    if process.returncode != 0:
+        note = f"exit {process.returncode}"
+        detail = f"{detail} ({note})" if detail else note
     return ok and process.returncode == 0, detail
 
 
@@ -290,6 +387,48 @@ def locate_output(company: str, title: str, config: Config) -> Outcome:
                    documents=documents, tracker_row=tracker_row)
 
 
+CLEANUP_SCRIPT = REPO_ROOT / "scripts" / "cleanup_application.py"
+
+
+def clean_up(folder: str, reason: str) -> str:
+    """Erase what a failed run left behind. Returns a line for the reply.
+
+    A half-built application is worse than none: the folder reads as "already
+    applied" to anyone scanning the tree, and a tracker row written at step 10
+    by a run that then fell over claims an application that was never sent.
+
+    The deletion lives in `scripts/cleanup_application.py` rather than here, so
+    the interactive pipeline (CLAUDE.md) and the watcher undo a bad run exactly
+    the same way. This never raises: a cleanup that fails is worth reporting,
+    not worth turning into a second failure on top of the first.
+    """
+    if not folder or not Path(folder).is_dir():
+        # Nothing on disk means nothing to key a tracker row off either — step 10
+        # only ever runs against a folder it just filled.
+        return ""
+
+    cmd = [sys.executable, str(CLEANUP_SCRIPT), "--folder", folder,
+           "--reason", reason or "build failed"]
+    try:
+        proc = subprocess.run(cmd, cwd=str(REPO_ROOT), capture_output=True,
+                              text=True, timeout=180, **no_console.kwargs())
+    except Exception:
+        log.exception("cleanup could not run for %s", folder)
+        return "cleanup could not run — see watcher.log"
+
+    report = (proc.stdout or "").strip()
+    if proc.returncode != 0:
+        log.error("cleanup failed for %s: %s", folder,
+                  (proc.stderr or report or "").strip())
+        return "cleanup failed — see watcher.log"
+
+    log.info("cleanup: %s", report.replace("\n", " · "))
+    if "Nothing to clean up" in report:
+        return ""
+    removed = [line.strip() for line in report.splitlines()[1:] if line.strip()]
+    return f"cleaned up: {'; '.join(removed)}" if removed else "cleaned up"
+
+
 def relative(folder: str) -> str:
     """`2026\\Deluxe\\2026-08-02 - AI Engineer` — the shape the user asked for."""
     try:
@@ -325,12 +464,19 @@ def result_message(label: str, outcome: Outcome, log_file: Path) -> str:
 
     if outcome.status == DONE:
         return (f"✅ <b>Built</b> · {label}\n<code>{where}</code>\n{docs} · {tracker}")
-    if outcome.status == INCOMPLETE:
-        return (f"⚠️ <b>Built with issues</b> · {label}\n<code>{where}</code>\n"
-                f"{_escape(outcome.detail)}\n{docs or 'no documents'} · {tracker}\n"
-                f"<i>log: {_escape(log_file.name)}</i>")
-    return (f"❌ <b>Build failed</b> · {label}\n{_escape(outcome.detail)}\n"
-            f"<i>log: {_escape(log_file.name)}</i>")
+
+    # Anything short of DONE has been cleaned up by now, so the folder path and
+    # the document list describe something that no longer exists — say what was
+    # missing and what was removed instead of pointing at a dead path.
+    heading = ("⚠️ <b>Built with issues</b>" if outcome.status == INCOMPLETE
+               else "❌ <b>Build failed</b>")
+    lines = [f"{heading} · {label}"]
+    if outcome.detail:
+        lines.append(_escape(outcome.detail))
+    lines.append(f"🧹 {_escape(outcome.cleaned)}" if outcome.cleaned
+                 else "<i>Nothing was left behind.</i>")
+    lines.append(f"<i>log: {_escape(log_file.name)}</i>")
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------
@@ -342,13 +488,21 @@ class Builder:
 
     def __init__(self, notifier, config: Config | None = None) -> None:
         self.notifier = notifier
-        self.config = config or notifier.config
+        # See Notifier.config: an override pins the value, otherwise every read
+        # picks up the current config.toml. A build queued before a settings
+        # change and started after it therefore runs under the new settings,
+        # which is the only reading of "on the fly" that is not a trap.
+        self._config_override = config
         self._queue: asyncio.Queue[Job] = asyncio.Queue()
         self._worker: asyncio.Task | None = None
         # A job that has left the queue but has not finished is still "ahead" of
         # anything arriving now; qsize alone would report an empty queue while a
         # build is running.
         self._busy = False
+
+    @property
+    def config(self) -> Config:
+        return self._config_override or self.notifier.config
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -446,6 +600,61 @@ class Builder:
     async def _reply(self, job: Job, text: str) -> None:
         await self.notifier.send(text, reply_to=job.reply_message_id)
 
+    async def _attempt(self, job: Job, company: str, title: str, url: str,
+                       label: str) -> tuple[bool, str, Path]:
+        """Run the build, retrying only if the far end was briefly unwell.
+
+        A 503 from the API — or from a gateway in front of it — can land on the
+        last turn of a 25-minute run, and with cleanup wired in that erases an
+        application that was all but finished. One free retry is worth more than
+        the machine time it costs. Anything that is not an upstream failure is
+        returned as-is, because repeating it would fail identically.
+
+        The folder from the previous attempt is deliberately left in place: the
+        pipeline scaffolds over it, so the archived posting survives, and the
+        tracker de-dupes on company+role+date, so a row written by an attempt that
+        later fell over is updated rather than doubled.
+
+        Each attempt gets its own log file; the returned one is the last, which
+        is the one whose failure is being reported.
+        """
+        prompt = build_prompt(url, job.note)
+        attempts = self.config.build_retries + 1
+        log_file = log_path_for(company, title)
+
+        for attempt in range(1, attempts + 1):
+            log_file = log_path_for(company, title, attempt)
+            with store.connect() as conn:
+                store.mark_build_running(conn, job.build_id, str(log_file))
+
+            log.info("build start: %s — %s (attempt %d/%d)",
+                     company, title, attempt, attempts)
+            try:
+                ok, detail = await _spawn(prompt, self.config, log_file)
+            except Exception:
+                # Route a crash into the ordinary failure path rather than up to
+                # the worker's catch-all, which knows no company and so cannot
+                # clean up.
+                log.exception("build crashed: %s — %s", company, title)
+                return False, "the build crashed, see watcher.log", log_file
+
+            if ok or attempt == attempts or not is_transient(detail):
+                return ok, detail, log_file
+
+            delay = self.config.build_retry_delay_seconds
+            log.warning("transient failure (%s) — retrying in %ds: %s — %s",
+                        detail, delay, company, title)
+            await self._reply(
+                job,
+                f"🔁 <b>Retrying</b> · {label}\n{_escape(detail)}\n"
+                f"<i>Attempt {attempt + 1} of {attempts}, in {delay}s. "
+                "Nothing has been cleaned up yet.</i>",
+            )
+            await asyncio.sleep(delay)
+
+        # for-else territory; unreachable while attempts >= 1.
+        return False, "no build attempt ran", log_file
+
     async def _handle(self, job: Job) -> None:
         with store.connect() as conn:
             row = store.get_posting(conn, job.posting_id)
@@ -468,23 +677,30 @@ class Builder:
             await self._reply(job, duplicate_message(label, existing))
             return
 
-        log_file = log_path_for(company, title)
-        with store.connect() as conn:
-            store.mark_build_running(conn, job.build_id, str(log_file))
-
         opener = f"🛠 Building {label}…"
         if partial:
             opener += f"\n<i>{_escape(partial)}</i>"
         await self._reply(job, opener)
 
-        log.info("build start: %s — %s", company, title)
-        ok, detail = await _spawn(build_prompt(url, job.note), self.config, log_file)
+        ok, detail, log_file = await self._attempt(job, company, title, url, label)
 
-        outcome = (locate_output(company, title, self.config) if ok
-                   else Outcome(status=FAILED, detail=detail or "the CLI reported an error"))
+        # Look on disk either way. A failed run still leaves a folder behind,
+        # and finding it is the only way to know what needs erasing.
+        outcome = locate_output(company, title, self.config)
+        if not ok:
+            outcome = Outcome(status=FAILED, folder=outcome.folder,
+                              detail=detail or "the CLI reported an error",
+                              documents=outcome.documents,
+                              tracker_row=outcome.tracker_row)
+
+        if outcome.status in (FAILED, INCOMPLETE):
+            outcome.cleaned = await asyncio.to_thread(
+                clean_up, outcome.folder, outcome.detail or outcome.status)
+
+        record = " · ".join(part for part in (outcome.detail, outcome.cleaned) if part)
         with store.connect() as conn:
             store.finish_build(conn, job.build_id, outcome.status,
-                               folder=outcome.folder, detail=outcome.detail)
+                               folder=outcome.folder, detail=record)
         log.info("build %s: %s — %s", outcome.status, company, title)
         await self._reply(job, result_message(label, outcome, log_file))
 

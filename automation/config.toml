@@ -51,6 +51,14 @@ claude_bin = "claude"
 # pin their own models, so the two writing steps still run on Opus.
 model = "sonnet"
 timeout_minutes = 45
+# Extra attempts after a build dies on a *transient upstream* failure — a 503, a
+# rate limit, a dropped connection. Nothing else is retried: a timeout, a crash,
+# or a build that wrote the wrong files would fail the same way again. An outage
+# can land on the last turn of a 25-minute run, and cleanup then erases an
+# application that was all but finished, so one free retry is cheap insurance.
+# 0 disables it.
+retries = 1
+retry_delay_seconds = 120
 # Role-title similarity at or above this counts as "already applied".
 duplicate_title_ratio = 0.8
 # Only look this far back when deciding whether a role is a duplicate.
