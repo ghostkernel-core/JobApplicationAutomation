@@ -238,6 +238,25 @@ or none of them carrying a reason. A bare yes/no teaches the matcher nothing.
 
 `python -m watcher.kb --propose` runs the whole thing as a dry run and prints the JSON.
 
+## Why nothing appears on screen
+
+The watcher is detached under `pythonw.exe` and has no console, so every console program it
+starts would otherwise be given a fresh, visible window — a flash per scoring call, and a cmd
+window parked in front of you for the length of a 45-minute build. Every spawn therefore passes
+`CREATE_NO_WINDOW` through `scripts/no_console.py`: the CLI, `taskkill`/`tasklist`, the cleanup
+script, and the LaTeX and rasterisation passes inside a build. The deliberate exceptions are the
+sub-commands `watcherctl.py` runs for you in your own terminal, where the output is the point.
+
+## What reloads without a restart
+
+`config.toml` and `sources.toml` are re-read when they change; a momentarily unparseable file
+keeps the last good version and logs once. `build_settings.json` is re-rendered from its
+template before every build. `.env` and the watcher's own Python code need a restart.
+
+Nothing about the pipeline itself is cached: `CLAUDE.md`, `rules/`, and `.claude/agents/` are
+read fresh by each `claude -p` process, so an agent you add, edit, or delete applies to the very
+next build — exactly as it does when you paste a URL into an interactive session.
+
 ## Builds and containment
 
 Headless builds run `claude -p --permission-mode bypassPermissions --settings
@@ -250,6 +269,15 @@ build_settings.json`, cwd pinned to the workspace root, with the URL and note on
    directory — filesystem-absolute paths need `//`. Deny beats allow and there is no negation,
    so a deny list *cannot* express "everywhere except the workspace"; that job belongs to the
    hook.
+
+   Do not approximate it here anyway. An earlier version denied `Edit(//C:/**)` and `Edit(~/**)`
+   as a stand-in, which was true only while the workspace sat on another drive; the day the
+   clone moved under the home directory those two rules denied every write *inside* the
+   workspace, and builds spent their whole timeout being refused by their own settings file with
+   nothing but a generic "denied by your permission settings" to explain it. The file is
+   generated from `build_settings.template.json` by `scripts/build_settings.py`, which now
+   refuses to produce one whose `Edit` rules match a path inside the workspace — checked again by
+   `init_workspace.py --verify` and before every build.
 2. **`hooks/guard.py`**, a blocking `PreToolUse` hook on Bash/Edit/Write/Read. Exit 2 blocks
    the call and its stderr becomes the reason the model sees. It blocks destructive commands,
    credential and system paths, and any *write* outside the workspace; reads may roam, because
@@ -283,6 +311,56 @@ A folder alone is not proof: `2026/Synergeticon/2026-07-13 - AI Engineer` holds 
 A folder hit blocks a rebuild only when both `<file_prefix> - CV.pdf` and
 `<file_prefix> - Cover Letter.pdf` (`<file_prefix>` from `identity.toml`) are present; otherwise the build proceeds and the
 message says it is rebuilding over an incomplete attempt.
+
+### Retry on a transient upstream failure
+
+An API or gateway outage can land on the *last* turn of a run that has already spent
+25 minutes producing a match brief, research note, CV, cover letter, both verifications,
+and interview prep — and with cleanup wired in, that erases all of it. So a build that
+dies on an upstream failure gets `[build] retries` more attempts (default 1) after
+`retry_delay_seconds`, and cleanup only fires once the last one is spent.
+
+Only upstream symptoms qualify: `429`/`5xx`, "overloaded", "temporarily unavailable",
+"bad gateway", a reset or refused connection, `fetch failed`. Not a timeout, not a crash,
+not a build that wrote the wrong files, and not a 401 — those fail the same way twice and
+the second 45 minutes buys nothing. `retries = 0` turns it off.
+
+Each attempt writes its own log (`…-retry1.log`), so the transcript of the failure that
+caused the retry survives. The folder from the previous attempt is left in place — the
+pipeline scaffolds over it, so the archived posting is not re-fetched, and the tracker
+de-dupes on company + role + date. Telegram says what happened rather than going quiet:
+
+```
+🔁 Retrying · Deluxe — AI Engineer
+API Error: 503 All accounts are temporarily unavailable
+Attempt 2 of 2, in 120s. Nothing has been cleaned up yet.
+```
+
+### Cleanup after a bad build
+
+A build that fails, crashes, times out, or finishes without a full set of documents is
+erased rather than left half-done — after its retries, if it had any. The builder runs `scripts/cleanup_application.py` on
+whatever folder appeared, which removes the dated folder, the company folder if that
+leaves it empty, the matching tracker row, and that application's `_tmp` scratch. The
+tracker workbook itself is never deleted — only the one row whose company + position +
+date match, keyed exactly as `append_tracker_entry.py` wrote it.
+
+The Telegram reply says what was removed:
+
+```
+❌ Build failed · Deluxe — AI Engineer
+latexmk exited 12
+🧹 cleaned up: removed folder 2026\Deluxe\2026-08-02 - AI Engineer; removed 1 tracker row(s)
+log: 20260802-143355-deluxe-ai-engineer.log
+```
+
+The NDJSON build log is kept — it is outside the deliverable folder and is the only
+remaining account of what went wrong. Cleanup never fails a build twice over: if the
+script itself errors, the reply says so and the log is still there.
+
+Interactive runs behave the same way, through the same script — `CLAUDE.md` ("If A Run
+Fails Or Is Abandoned") tells the orchestrator to call it. Nothing about the cleanup is
+watcher-specific.
 
 ## Autostart
 

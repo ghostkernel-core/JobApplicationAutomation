@@ -115,6 +115,7 @@ jobs:
         run: |
           python - <<'EOF'
           import json
+          import sys
           import tomllib
 
           with open("automation/build_settings.template.json", encoding="utf-8") as f:
@@ -123,6 +124,19 @@ jobs:
 
           with open("identity.toml.example", "rb") as f:
               tomllib.load(f)
+
+          # No deny rule may match a path inside the workspace. A rule broad
+          # enough to do that (Edit(~/**) and friends) locks every build out of
+          # its own output and reports only "denied by your permission settings".
+          # The CI checkout sits under $HOME, so a home-wide rule is caught here.
+          sys.path.insert(0, "scripts")
+          import build_settings
+
+          bad = build_settings.conflicts(build_settings.render())
+          if bad:
+              raise SystemExit(
+                  "deny rules would block writes inside the workspace: "
+                  + ", ".join(bad))
 
           print("build_settings.template.json and identity.toml.example are valid.")
           EOF

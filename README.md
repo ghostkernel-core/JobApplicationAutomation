@@ -163,7 +163,8 @@ CLAUDE.md            the pipeline definition — the runtime instruction set
 scripts/             deterministic tooling, no model tokens: init_workspace,
                      render_latex_application (payload → .tex → PDF),
                      latex_healthcheck, check_latex_toolchain, append_tracker_entry,
-                     pdf_to_images (rasterise a page for visual inspection)
+                     cleanup_application (undo a failed run — folder, tracker row,
+                     scratch), pdf_to_images (rasterise a page for inspection)
 rules/               writing style, CV/letter rules, German-market conventions,
                      integrity, naming, anti-fingerprint; slices/ = per-agent context
 master/LaTeX/        locked templates (cv_en, cv_de, letter_en, letter_de,

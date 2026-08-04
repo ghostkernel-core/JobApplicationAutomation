@@ -156,6 +156,61 @@ sessions do not need it).
 template and writes `automation/build_settings.json`. Safe to re-run any time — it always
 regenerates from the template rather than trusting a stale copy.
 
+## Every build fails, denied by its own permission settings
+
+**Symptom:** a headless build runs its full timeout and produces payload JSON and briefs but no
+`.tex` and no PDFs. The build log under `automation/logs/builds/` is full of
+`<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>`,
+and the model starts working around it — writing files with `cat > file << 'EOF'` heredocs,
+testing with throwaway `testfile.txt`, splitting a payload across `partA.json`…`partE.json`.
+`guard.log` shows nothing blocked, because the guard hook is not the one refusing.
+
+**Cause:** a deny rule in `build_settings.json` covers the workspace itself. Deny beats allow and
+permission rules have no negation, so "everywhere except the workspace" cannot be written as a
+deny — and a broad rule standing in for it (`Edit(//C:/**)`, `Edit(~/**)`) is only true while the
+workspace happens to sit outside that tree. Move the clone onto that drive or under your home
+directory and the same rule silently denies every write *inside* it.
+
+**Fix:** `python scripts/init_workspace.py` re-renders the file for wherever the clone now is,
+and refuses to write one whose `Edit` rules match a workspace path. `--verify` checks the live
+file and names any offending rule; the watcher re-checks before every build. If you added the
+rule yourself, edit `automation/build_settings.template.json` — never the generated `.json` —
+and keep it narrow enough that it can never contain a workspace. Containment outside the
+workspace belongs to `automation/hooks/guard.py`, which derives the real root and can express it.
+
+## A build fails with `API Error: 503` / `overloaded` / a gateway message
+
+**Symptom:** a Telegram reply of `❌ Build failed` whose detail is an API error — most often
+`API Error: 503 All accounts are temporarily unavailable, please check your inference gateway
+(<host>)`. Possibly preceded by `🔁 Retrying`. The folder is gone, cleaned up.
+
+**Cause:** the upstream API, or whatever gateway sits in front of it, was unavailable. Note the
+host named in the message: if it is not an Anthropic domain, the outage is your gateway's, not
+the API's, and that is where to look. This is not a fault in the pipeline — a build simply ends
+whenever a turn cannot complete, and it can end on the last turn of a run that had already done
+everything.
+
+**Fix:** reply `yes` again once the upstream is back; the build starts from scratch. The watcher
+already retries an upstream failure `[build] retries` times (default 1) after
+`retry_delay_seconds`, so a brief blip is absorbed without you seeing it; raise `retries` in
+`automation/config.toml` if your gateway is flaky, at the cost of an extra full run per failure.
+A failure that is *not* upstream — a timeout, a crash, missing documents — is never retried, so
+seeing no `🔁 Retrying` for one of those is correct.
+
+## Console windows pop up in front of whatever you are doing
+
+**Symptom:** cmd or PowerShell windows appear on screen while the watcher works — a brief flash
+each poll cycle, and during a build one that sits in the foreground for the whole run.
+
+**Cause:** the watcher runs detached under `pythonw.exe`, which has no console. Windows gives a
+console program a console, and with no parent console to inherit it allocates a new one, visible.
+
+**Fix:** already handled — every spawn in the watcher and in the build scripts passes
+`CREATE_NO_WINDOW` via `scripts/no_console.py`. If you see one again, it is from a spawn that
+does not use that helper; the exceptions are deliberate, being the commands `watcherctl.py`
+forwards to your own terminal, where the output is the point. Playwright hides its own driver
+window already and needs nothing.
+
 ## `init_workspace.py --verify` failures
 
 **Symptom:** any of the five checks under `--verify` reports `FAIL` or `WARN`.

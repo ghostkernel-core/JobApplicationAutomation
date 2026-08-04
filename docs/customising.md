@@ -114,12 +114,18 @@ string to ban.
 
 ## Tracker scripts
 
-Three scripts under `scripts/` manage the yearly application tracker workbook
+Four scripts under `scripts/` manage the yearly application tracker workbook
 (`<YYYY>/Job Applications Tracker <YYYY>.xlsx`):
 
 - **`append_tracker_entry.py`** — the one used by the pipeline itself, after final QA passes
   (step 10 in [The Pipeline](./the-pipeline.md)). Idempotent on
   company + position + date applied.
+- **`cleanup_application.py`** — the inverse, for a run that failed or was abandoned. It takes
+  the row back out (same three-field key) and deletes the deliverable folder and the run's
+  `_tmp` scratch along with it. The workbook is never deleted, and the row is removed by
+  rewriting the data region rather than shifting rows, so the pre-armed formulas, dropdowns,
+  and conditional formatting survive intact. Idempotent, and it refuses any path that is not a
+  `<YYYY>/<Company>/<YYYY-MM-DD> - <Role>` folder inside the workspace.
 - **`make_application_tracker.py`** — rebuilds a year's workbook from scratch, optionally
   prefilling rows from the folder tree. It refuses to overwrite an existing file without
   `--force`; do not pass `--force` on a workbook that already has hand-entered status data. Its

@@ -27,6 +27,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+# scripts/ is this file's own directory, so this resolves however the script
+# is invoked. Suppresses the console window each child would otherwise open
+# when the parent has none — see scripts/no_console.py.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import no_console  # noqa: E402
+
 from openpyxl import load_workbook
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -67,6 +73,7 @@ def ensure_workbook(path: Path, year: int) -> None:
         [sys.executable, str(MAKER), "--year", str(year), "--no-prefill"],
         check=True,
         cwd=str(ROOT),
+        **no_console.kwargs(),
     )
 
 

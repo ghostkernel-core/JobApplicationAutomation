@@ -7,6 +7,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+# scripts/ is this file's own directory, so this resolves however the script
+# is invoked. Suppresses the console window each child would otherwise open
+# when the parent has none — see scripts/no_console.py.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import no_console  # noqa: E402
+
 
 COMMON_WINDOWS_PATHS = [
     r"C:\Program Files\MiKTeX\miktex\bin\x64\latexmk.exe",
@@ -20,7 +26,8 @@ COMMON_WINDOWS_PATHS = [
 
 def version(cmd: str) -> str:
     try:
-        result = subprocess.run([cmd, "--version"], text=True, capture_output=True, timeout=10, check=False)
+        result = subprocess.run([cmd, "--version"], text=True, capture_output=True,
+                                timeout=10, check=False, **no_console.kwargs())
         output = (result.stdout or result.stderr).strip()
         first = output.splitlines()[0] if output else "no version output"
         status = "OK" if result.returncode == 0 else f"NOT USABLE (exit {result.returncode})"

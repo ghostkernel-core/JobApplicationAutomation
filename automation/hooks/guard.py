@@ -333,6 +333,9 @@ CASES: list[tuple[str, dict, bool]] = [
     ("Bash", {"command": "python scripts/render_latex_application.py --folder 2026/Deluxe"}, False),
     ("Bash", {"command": f"python scripts/latex_healthcheck.py \"{WS}/2026/Deluxe\""}, False),
     ("Bash", {"command": "python scripts/append_tracker_entry.py --company Deluxe --location Berlin"}, False),
+    # Undoing a failed run goes through the script, never through `rm -rf` — the
+    # blocked form below is exactly why the script exists.
+    ("Bash", {"command": f"python scripts/cleanup_application.py --folder \"{WS}/2026/Deluxe/2026-08-02 - AI Engineer\""}, False),
     ("Bash", {"command": "ls \"2026/Deluxe/2026-08-02 - AI Engineer\""}, False),
     ("Bash", {"command": "latexmk -xelatex cv.tex"}, False),
     ("Bash", {"command": "cat \"D:/Research Archive/notes.md\""}, False),   # read elsewhere: ok

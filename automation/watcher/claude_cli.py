@@ -26,6 +26,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from . import config as _config  # noqa: F401 — puts scripts/ on sys.path
+import no_console  # noqa: E402
+
 log = logging.getLogger("watcher.claude")
 
 
@@ -73,6 +76,9 @@ def run(prompt: str, model: str | None = None, timeout: int = 180,
             errors="replace",
             timeout=timeout,
             cwd=str(cwd or tempfile.gettempdir()),
+            # Scoring runs on every poll cycle; without this each one blinks a
+            # cmd window up over whatever is on screen.
+            **no_console.kwargs(),
         )
     except FileNotFoundError as exc:
         raise ClaudeError(

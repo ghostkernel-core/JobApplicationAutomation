@@ -38,6 +38,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+import no_console  # noqa: E402
+
 AUTOMATION_DIR = Path(__file__).resolve().parent
 VENV_DIR = AUTOMATION_DIR / ".venv"
 LOG_DIR = AUTOMATION_DIR / "logs"
@@ -108,7 +111,7 @@ def _windows_python_processes() -> list[Proc]:
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=30, **no_console.kwargs(),
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return []
@@ -160,7 +163,8 @@ def find_watchers() -> list[Proc]:
 def is_alive(pid: int) -> bool:
     if IS_WINDOWS:
         out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
-                             capture_output=True, text=True).stdout
+                             capture_output=True, text=True,
+                             **no_console.kwargs()).stdout
         return str(pid) in out
     try:
         os.kill(pid, 0)
@@ -173,7 +177,7 @@ def terminate(pid: int, grace: float = 8.0) -> str:
     """Ask nicely, then insist. Returns what it took."""
     if IS_WINDOWS:
         subprocess.run(["taskkill", "/PID", str(pid), "/T"],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, **no_console.kwargs())
     else:
         try:
             os.kill(pid, signal.SIGTERM)
@@ -188,7 +192,7 @@ def terminate(pid: int, grace: float = 8.0) -> str:
 
     if IS_WINDOWS:
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, **no_console.kwargs())
     else:
         try:
             os.kill(pid, signal.SIGKILL)
