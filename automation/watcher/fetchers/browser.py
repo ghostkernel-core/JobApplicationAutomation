@@ -20,8 +20,9 @@ tier and Arbeitsagentur normally and disables these two after
 this module exists instead of a module-level `from playwright... import`.
 
 These scrapers will break. That is not a defect to be designed away; it is why
-both are `fragile = true`, why the failure path is a single notification rather
-than a retry loop, and why nothing else in the pipeline depends on them.
+both are `fragile = true`, why the failure path is a single notification and an
+hourly retry rather than a retry-every-poll loop, and why nothing else in the
+pipeline depends on them.
 """
 
 from __future__ import annotations

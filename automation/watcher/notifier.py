@@ -208,9 +208,24 @@ class Notifier:
         if not disabled:
             return
         names = "\n".join(f"• {_escape(name)}" for name in disabled)
+        cooldown = self.config.retry_after_minutes
+        tail = (f"Retrying automatically in ~{cooldown} min. Sooner with: "
+                "python -m watcher.health --reset &lt;source&gt;"
+                if cooldown > 0 else
+                "Auto-recovery is off. Re-enable with: "
+                "python -m watcher.health --reset &lt;source&gt;")
         await self.send_notice(
             f"🔴 <b>Source disabled after repeated failures</b>\n{names}\n\n"
-            "<i>Re-enable with: python -m watcher.health --reset &lt;source&gt;</i>"
+            f"<i>{tail}</i>"
+        )
+
+    async def send_source_recovered(self, recovered: Sequence[str]) -> None:
+        if not recovered:
+            return
+        names = "\n".join(f"• {_escape(name)}" for name in recovered)
+        await self.send_notice(
+            f"🟢 <b>Source recovered</b>\n{names}\n\n"
+            "<i>Back in the rotation — no action needed.</i>"
         )
 
     async def send_heartbeat(self, report: dict[str, Any]) -> None:

@@ -11,6 +11,11 @@ timeout_seconds = 30
 # A fragile source that fails this many polls in a row disables itself
 # and sends exactly one notification instead of retry-spamming.
 failures_before_disable = 3
+# It does not stay off for good. After this cooldown a disabled source gets one
+# quiet retry per cycle-window; a retry that works re-enables it and sends a
+# recovery ping, a retry that fails restarts the clock in silence.
+# 0 = never auto-retry (old behaviour: manual `watcher.health --reset` only).
+retry_after_minutes = 60
 
 [match]
 model = "haiku"

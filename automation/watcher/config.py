@@ -160,6 +160,11 @@ class Config:
     def failures_before_disable(self) -> int:
         return self._num("poll", self.poll, "failures_before_disable", 3)
 
+    @property
+    def retry_after_minutes(self) -> int:
+        """Cooldown before a disabled source gets one retry probe. 0 = never."""
+        return self._num("poll", self.poll, "retry_after_minutes", 60)
+
     # --- match ------------------------------------------------------------
     @property
     def match_model(self) -> str:
