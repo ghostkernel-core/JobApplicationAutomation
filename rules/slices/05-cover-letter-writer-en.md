@@ -4,6 +4,8 @@
 
 Read `rules/slices/_facts.md` first — the condensed canonical facts for this workspace (generated from rules/00-canonical-profile.md).
 
+The one-page limit and the locked layout constants are in `rules/slices/_toolchain.md`. Use those numbers; do not measure them from `master/LaTeX/`, and never open another application's folder or `_tmp/payloads/` to copy phrasing — only `/master` and `rules/` are sources. A letter that reuses last week's sentences reads like a template.
+
 ## Letter payload structure
 
 - `date`, `recipient` (array), `subject` (exact role title), `salutation`, `paragraphs` (3-4), `bullets` (0-3 optional), `closing`, `enclosure`.
