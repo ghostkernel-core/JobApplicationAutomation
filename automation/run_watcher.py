@@ -53,8 +53,13 @@ async def run_cycle(notifier: Notifier) -> dict[str, int]:
     await notifier.send_source_parked(report.newly_parked)
     await notifier.send_source_recovered(report.recovered)
 
-    if report.stored:
-        await asyncio.to_thread(matcher.match_pending, config)
+    # Unconditional, not `if report.stored`. A posting whose scoring failed is
+    # left unscored on purpose so it can be retried, and gating this on *new*
+    # postings arriving would make that retry wait on unrelated activity.
+    # `match_pending` is one sqlite query and an early return when there is
+    # nothing pending, so the cycle pays nothing for asking.
+    match_report = await asyncio.to_thread(matcher.match_pending, config)
+    await notifier.send_scoring_degraded(match_report)
 
     notified = await notifier.send_instant()
     log.info("cycle: fetched %d, new %d, notified %d",

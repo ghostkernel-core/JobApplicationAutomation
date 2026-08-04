@@ -88,10 +88,47 @@ def run(prompt: str, model: str | None = None, timeout: int = 180,
         raise ClaudeError(f"timed out after {timeout}s") from exc
 
     if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()[:500]
-        raise ClaudeError(f"exit {completed.returncode}: {detail}")
+        raise ClaudeError(f"exit {completed.returncode}: "
+                          f"{failure_detail(completed.stdout, completed.stderr)}")
 
     return (completed.stdout or "").strip()
+
+
+# Lines the CLI writes to stderr on perfectly successful runs. Matched loosely
+# because the wording moves between releases; the point is only to stop them
+# outranking the real error.
+_BENIGN_STDERR = re.compile(
+    r"connectors are disabled|"
+    r"^\s*[⚠✓ℹ]|"
+    r"npm (WARN|notice)|"
+    r"ExperimentalWarning|"
+    r"DeprecationWarning",
+    re.IGNORECASE,
+)
+
+
+def failure_detail(stdout: str | None, stderr: str | None, limit: int = 500) -> str:
+    """Best explanation of a non-zero exit, from both streams.
+
+    This used to be `stderr or stdout`, which sounds right and is not: the CLI
+    prints a benign "claude.ai connectors are disabled" warning to stderr on
+    *successful* runs too, so stderr is never empty and always won. Every
+    failure was therefore reported as that warning — which cost a long detour
+    diagnosing an auth problem that did not exist. Drop the known-benign lines
+    first, and fall back to stdout when nothing real is left.
+    """
+    real = [line for line in (stderr or "").splitlines()
+            if line.strip() and not _BENIGN_STDERR.search(line)]
+    parts = ["stderr: " + " ".join(real)] if real else []
+    out = (stdout or "").strip()
+    if out:
+        parts.append("stdout: " + out)
+    if not parts:
+        # Both streams are empty or benign — say so rather than returning "",
+        # which reads as a bug in this function rather than a silent exit.
+        noise = (stderr or "").strip().splitlines()
+        return f"no output (stderr was only: {noise[0][:120]})" if noise else "no output"
+    return " | ".join(parts)[:limit]
 
 
 # Models sometimes wrap JSON in prose or a fenced block despite instructions.

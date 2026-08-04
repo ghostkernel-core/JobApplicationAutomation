@@ -48,6 +48,11 @@ digest_threshold = 40
 # How much of the job description is handed to the matcher.
 description_chars = 4000
 timeout_seconds = 180
+# A posting the scorer cannot judge is held back and retried on later cycles
+# rather than stored at the fallback score, which sits below notify_threshold
+# and would bury it silently. Only after this many failures is the fallback
+# treated as the real verdict — by then it is the posting, not the weather.
+max_score_attempts = 3
 
 [notify]
 # 24h local time

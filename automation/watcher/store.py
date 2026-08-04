@@ -59,6 +59,15 @@ CREATE TABLE IF NOT EXISTS verdicts (
 );
 CREATE INDEX IF NOT EXISTS idx_verdicts_score ON verdicts(score);
 
+-- How many times the scorer has failed to judge a posting. A posting only ever
+-- appears here while it is between attempts; a successful score clears the row.
+CREATE TABLE IF NOT EXISTS score_attempts (
+    posting_id  TEXT PRIMARY KEY REFERENCES postings(id),
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    last_error  TEXT,
+    updated_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS notifications (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     posting_id          TEXT NOT NULL REFERENCES postings(id),
@@ -263,6 +272,13 @@ def recent_postings(conn: sqlite3.Connection, limit: int = 50) -> list[sqlite3.R
 # verdicts
 # --------------------------------------------------------------------------
 
+# The single phrase the matcher puts in `gaps` when it could not judge a posting
+# at all. It is the only marker that survives into the database, so it is what
+# `degraded_verdict_ids` matches on and what the matcher's fallback must use
+# verbatim — a real scoring result never produces it.
+DEGRADED_GAP = "scoring failed — judge from the posting"
+
+
 def save_verdict(conn: sqlite3.Connection, posting_id: str, verdict: dict[str, Any],
                  model: str) -> None:
     conn.execute(
@@ -316,6 +332,60 @@ def unscored(conn: sqlite3.Connection) -> list[sqlite3.Row]:
            WHERE NOT EXISTS (SELECT 1 FROM verdicts v WHERE v.posting_id = postings.id)
            ORDER BY first_seen_at DESC"""
     ))
+
+
+def degraded_verdict_ids(conn: sqlite3.Connection) -> list[str]:
+    """Postings whose stored verdict is the scorer's "I could not judge this".
+
+    Matched on the gaps phrase rather than the score, because 45/`maybe` is a
+    perfectly ordinary result that a real scoring pass can also produce.
+    """
+    marker = json.dumps([DEGRADED_GAP], ensure_ascii=False)
+    return [row["posting_id"] for row in conn.execute(
+        "SELECT posting_id FROM verdicts WHERE gaps_json = ?", (marker,)
+    )]
+
+
+def clear_degraded_verdicts(conn: sqlite3.Connection) -> int:
+    """Drop those verdicts so the next cycle re-scores them. Returns the count.
+
+    The attempt counter goes with them: these rows predate the retry logic, or
+    were written after the retries ran out, and either way the posting deserves
+    a clean set of attempts rather than being re-buried on the first failure.
+    """
+    ids = degraded_verdict_ids(conn)
+    if not ids:
+        return 0
+    marks = ",".join("?" * len(ids))
+    conn.execute(f"DELETE FROM verdicts WHERE posting_id IN ({marks})", ids)
+    conn.execute(f"DELETE FROM score_attempts WHERE posting_id IN ({marks})", ids)
+    return len(ids)
+
+
+# --------------------------------------------------------------------------
+# scoring attempts
+# --------------------------------------------------------------------------
+
+def bump_score_attempt(conn: sqlite3.Connection, posting_id: str,
+                       error: str | None = None) -> int:
+    """Record one failed scoring attempt and return the new total."""
+    conn.execute(
+        """INSERT INTO score_attempts (posting_id, attempts, last_error, updated_at)
+           VALUES (?, 1, ?, ?)
+           ON CONFLICT(posting_id) DO UPDATE SET
+             attempts = score_attempts.attempts + 1,
+             last_error = excluded.last_error,
+             updated_at = excluded.updated_at""",
+        (posting_id, error, _now()),
+    )
+    row = conn.execute(
+        "SELECT attempts FROM score_attempts WHERE posting_id = ?", (posting_id,)
+    ).fetchone()
+    return int(row["attempts"]) if row else 1
+
+
+def clear_score_attempts(conn: sqlite3.Connection, posting_id: str) -> None:
+    conn.execute("DELETE FROM score_attempts WHERE posting_id = ?", (posting_id,))
 
 
 # --------------------------------------------------------------------------

@@ -3,9 +3,15 @@
 Usage:
     python scripts/render_latex_application.py payload.json "2026/Company/YYYY-MM-DD - Role"
     python scripts/render_latex_application.py payload.json "Recruiter CVs/General CV" --cv-only
+    python scripts/render_latex_application.py prep.json "2026/Company/YYYY-MM-DD - Role" \
+        --only interview_prep_payload_en
 
 The payload must contain `cv_payload_en` and `letter_payload_en` for a complete application.
 With `--cv-only`, only `cv_payload_en` is required and `cv_payload_de` is optional.
+With `--only KEY`, exactly the named keys are required and rendered — which is what
+lets the pipeline compile the CV and cover letter as soon as they pass verification
+and render the interview prep in a second pass, instead of holding every PDF hostage
+to the last document in the run.
 All other payload keys remain optional.
 
 This script renders locked templates from master/LaTeX/templates, compiles PDFs in a
@@ -379,25 +385,55 @@ def main() -> int:
         action="store_true",
         help="Render CV/Lebenslauf payloads without requiring or rendering application documents.",
     )
+    parser.add_argument(
+        "--only",
+        action="append",
+        metavar="PAYLOAD_KEY",
+        choices=sorted(DOC_LABELS),
+        help="Render exactly this payload key and require it. Repeatable. "
+             "Lets a run render its documents in stages rather than all at once.",
+    )
     args = parser.parse_args()
+
+    if args.only and args.cv_only:
+        print("ERROR: use --only or --cv-only, not both", file=sys.stderr)
+        return 2
 
     payload_path = Path(args.payload_json)
     target = Path(args.target_folder)
     data = json.loads(payload_path.read_text(encoding="utf-8"))
-    required = ("cv_payload_en",) if args.cv_only else ("cv_payload_en", "letter_payload_en")
-    missing = [key for key in required if key not in data]
+    if args.only:
+        required: tuple[str, ...] = tuple(dict.fromkeys(args.only))
+    elif args.cv_only:
+        required = ("cv_payload_en",)
+    else:
+        required = ("cv_payload_en", "letter_payload_en")
+    # `is None` as well as absent: a payload that carries the key with a null
+    # value would otherwise pass the check and then render nothing at all.
+    missing = [key for key in required if data.get(key) is None]
     if missing:
         print(f"ERROR: payload missing required keys: {', '.join(missing)}", file=sys.stderr)
         return 2
 
     target.mkdir(parents=True, exist_ok=True)
     engine = None if args.no_pdf else find_latex_engine()
-    keys = ("cv_payload_en", "cv_payload_de") if args.cv_only else DOCS
+    if args.only:
+        keys: tuple[str, ...] | dict[str, Any] = required
+    elif args.cv_only:
+        keys = ("cv_payload_en", "cv_payload_de")
+    else:
+        keys = DOCS
+    rendered = []
     for key in keys:
         if data.get(key) is None:
             continue
         render_one(key, data[key], target, engine, not args.no_pdf)
-    print(f"Rendered {'CVs' if args.cv_only else 'LaTeX application'}: {target}")
+        rendered.append(DOC_LABELS[key][1])
+    if args.only:
+        label = ", ".join(rendered)
+    else:
+        label = "CVs" if args.cv_only else "LaTeX application"
+    print(f"Rendered {label}: {target}")
     return 0
 
 

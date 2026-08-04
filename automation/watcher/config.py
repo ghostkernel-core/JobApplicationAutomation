@@ -234,6 +234,20 @@ class Config:
     def match_timeout(self) -> int:
         return self._num("match", self.match, "timeout_seconds", 180)
 
+    @property
+    def max_score_attempts(self) -> int:
+        """How often to retry a posting the scorer could not judge.
+
+        A failed batch used to be written straight to the verdicts table as a
+        low-confidence `maybe`, and `store.unscored()` only ever selects
+        postings with no verdict row at all — so a sixty-second upstream blip
+        buried every posting it touched, permanently. Below this many attempts
+        the fallback is held back and the posting is re-scored next cycle; at
+        this many it is finally persisted, so a posting the model genuinely
+        cannot parse still settles instead of being retried forever.
+        """
+        return self._num("match", self.match, "max_score_attempts", 3)
+
     # --- notify -----------------------------------------------------------
     @property
     def digest_hour(self) -> int:

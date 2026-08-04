@@ -141,6 +141,34 @@ filter in `sources.toml` is one-sided (see [The Watcher](./watcher.md)) — a po
 only for a title mismatch, a resolved location outside your allow-list, or a denied seniority
 band, never for something the filter simply failed to read.
 
+## Postings stop arriving after a scoring outage
+
+**Symptom:** polls keep finding postings — the counts in `watcher.log` look normal — but nothing
+is ever pinged, for hours or days. `python -m watcher.match --replay 40` shows a run of postings
+all sitting at exactly score **45**, verdict `maybe`, with the single gap
+`scoring failed — judge from the posting`.
+
+**Cause:** the scorer was briefly unreachable. That fallback verdict is what the matcher records
+when it cannot get a judgement, and 45 is below `notify_threshold`, so those postings pass
+silently. A cycle that degrades any batch now says so in Telegram, so this should not surprise
+you twice — but a run from before that notice existed, or one you missed, leaves the postings
+sitting there.
+
+**Fix:** drop the fallback verdicts so the next cycle judges those postings for real:
+
+```bash
+py automation/watcherctl.py rescore
+```
+
+It prints which postings it re-queued, and anything that then clears `notify_threshold` pings on
+the next cycle. The matcher no longer records a fallback verdict on the first failure — it holds
+the posting back and retries it on later cycles, and only writes the fallback after
+`[match] max_score_attempts` (default 3) genuine failures, at which point the posting really is
+one it cannot read. So this command is for recovering history, not routine maintenance.
+
+If the underlying failure is still happening, `watcher.log` now carries the real error rather
+than the benign `claude.ai connectors are disabled` warning that used to mask it.
+
 ## Build refuses to start when `build_settings.json` is missing
 
 **Symptom:** `python start_watcher.py` (or `py automation/watcherctl.py start`, which it forwards to) fails

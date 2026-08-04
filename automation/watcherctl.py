@@ -7,6 +7,7 @@
     python watcherctl.py poll            # one fetch/score/notify cycle, in the foreground
     python watcherctl.py health
     python watcherctl.py reset portal:stepstone
+    python watcherctl.py rescore        # re-queue postings the scorer couldn't judge
     python watcherctl.py digest
     python watcherctl.py logs -n 50 -f
 
@@ -376,6 +377,10 @@ def cmd_reset(args: argparse.Namespace) -> int:
     return run_in_venv(["-m", "watcher.health", "--reset", args.source])
 
 
+def cmd_rescore(_args: argparse.Namespace) -> int:
+    return run_in_venv(["-m", "watcher.matcher", "--rescore-degraded"])
+
+
 def cmd_digest(_args: argparse.Namespace) -> int:
     return run_in_venv([str(ENTRYPOINT), "--digest"])
 
@@ -453,6 +458,12 @@ def main(argv: list[str] | None = None) -> int:
         help="re-enable a disabled source now, without waiting for its auto-retry")
     reset.add_argument("source", help='source key, or "all"')
 
+    sub.add_parser(
+        "rescore",
+        help="re-queue postings the scorer could not judge (a failed batch "
+             "degrades to 45/maybe, below the notify threshold, and never "
+             "gets looked at again)")
+
     sub.add_parser("digest", help="send the digest to Telegram now")
 
     logs = sub.add_parser("logs", help="show the tail of watcher.log")
@@ -467,7 +478,8 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {
         "status": cmd_status, "start": cmd_start, "stop": cmd_stop,
         "restart": cmd_restart, "poll": cmd_poll, "health": cmd_health,
-        "reset": cmd_reset, "digest": cmd_digest, "logs": cmd_logs,
+        "reset": cmd_reset, "rescore": cmd_rescore, "digest": cmd_digest,
+        "logs": cmd_logs,
     }
     return handlers[args.command](args)
 

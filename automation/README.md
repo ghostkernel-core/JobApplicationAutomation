@@ -33,6 +33,7 @@ py watcherctl.py poll            :: one fetch/score/notify cycle in the foregrou
 py watcherctl.py poll --dry-run --source portal:stepstone
 py watcherctl.py health          :: per-source status table
 py watcherctl.py reset portal:stepstone
+py watcherctl.py rescore         :: re-queue postings whose scoring failed outright
 py watcherctl.py digest          :: send the digest now
 py watcherctl.py logs -n 50 -f   :: tail watcher.log, -f to follow
 ```
@@ -67,6 +68,7 @@ Underneath, the entrypoint is still directly usable, and every sub-command below
 | `-m watcher.match --replay 30` | re-score the last 30 stored postings and print a table |
 | `-m watcher.match --calibrate` | score postings you already applied to, to sanity-check the threshold |
 | `-m watcher.match --refresh-digest` | rebuild the cached profile digest by hand |
+| `-m watcher.matcher --rescore-degraded` | drop the fallback verdicts left by a scoring outage so the next cycle judges those postings properly |
 | `-m watcher.dedupe_check --company Deluxe --role "AI Engineer"` | "have I already applied?" |
 | `-m watcher.discover --company X` | probe ATS providers for a company's board token |
 | `-m watcher.whoami` | print the chat id of whoever messages the bot next |
