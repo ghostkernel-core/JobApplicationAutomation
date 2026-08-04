@@ -8,14 +8,29 @@ interval_minutes = 30
 max_age_days = 14
 # Per-source HTTP timeout, seconds.
 timeout_seconds = 30
-# A fragile source that fails this many polls in a row disables itself
-# and sends exactly one notification instead of retry-spamming.
+# How many consecutive failures a source is allowed before it switches itself
+# off and sends exactly one notification instead of retry-spamming.
+#
+# Two tiers, because the two kinds of source fail differently. A stable source
+# is a documented JSON API or an ATS board: when it fails three times running,
+# something is genuinely wrong. A `fragile = true` source is browser-driven
+# scraping against anti-bot pages whose markup changes without notice, where an
+# isolated failure is ordinary weather — holding it to the same three strikes is
+# how a working scraper switches itself off over one bad afternoon.
 failures_before_disable = 3
-# It does not stay off for good. After this cooldown a disabled source gets one
-# quiet retry per cycle-window; a retry that works re-enables it and sends a
-# recovery ping, a retry that fails restarts the clock in silence.
-# 0 = never auto-retry (old behaviour: manual `watcher.health --reset` only).
+fragile_failures_before_disable = 6
+# A disabled source does not stay off for good. After this cooldown it gets one
+# quiet retry; a retry that works re-enables it and sends a recovery ping, a
+# retry that fails restarts the clock in silence.
+# 0 = never auto-retry (manual `watcher.health --reset` only).
 retry_after_minutes = 60
+# Each failed retry multiplies the cooldown, capped. With these values a source
+# is probed after 1h, 2h, 4h, 8h, 16h, then daily — so a source that recovers
+# quickly is still caught within the hour, while one that has been dead for a
+# week stops spending 24 pointless requests a day to confirm it.
+# factor = 1.0 restores the old flat cooldown.
+retry_backoff_factor = 2.0
+retry_backoff_max_minutes = 1440
 
 [match]
 model = "haiku"

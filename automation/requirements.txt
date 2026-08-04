@@ -13,3 +13,7 @@ python-telegram-bot[job-queue]==22.8
 openpyxl>=3.1
 pypdf>=5.0
 playwright>=1.48
+
+# Tests. `pytest automation/tests` runs offline; `-m live` adds the checks that
+# hit the real Jobsuche API.
+pytest>=8.0

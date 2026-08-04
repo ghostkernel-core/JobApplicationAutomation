@@ -111,6 +111,16 @@ jobs:
       - name: Compile Python sources
         run: python -m compileall -q scripts automation/watcher automation/hooks
 
+      - name: Install watcher dependencies
+        run: python -m pip install --quiet -r automation/requirements.txt
+
+      - name: Watcher tests
+        # Offline only. The `live` marker covers the checks that hit the real
+        # Jobsuche API; those are for a human debugging a parked source, not for
+        # CI, which must not go red because a third party is having a bad day.
+        working-directory: automation
+        run: python -m pytest tests -q
+
       - name: Validate template and example config files
         run: |
           python - <<'EOF'

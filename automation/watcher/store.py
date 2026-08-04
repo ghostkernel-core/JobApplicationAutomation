@@ -138,6 +138,16 @@ _MIGRATIONS: list[str] = [
     """
     ALTER TABLE source_health ADD COLUMN disabled_at TEXT;
     """,
+    # Retry bookkeeping. `retry_attempts` counts failed probes since the source
+    # went down and drives the exponential backoff, so a source that has been
+    # dead for a week is probed daily rather than hourly. `parked` marks the
+    # failures that retrying cannot fix — a moved endpoint, a withdrawn key —
+    # which get no auto-retry at all and one escalated message instead.
+    """
+    ALTER TABLE source_health ADD COLUMN retry_attempts INTEGER DEFAULT 0;
+    ALTER TABLE source_health ADD COLUMN parked INTEGER DEFAULT 0;
+    ALTER TABLE source_health ADD COLUMN park_reason TEXT;
+    """,
 ]
 
 
@@ -440,17 +450,24 @@ def mark_source_ok(conn: sqlite3.Connection, source: str) -> None:
            ON CONFLICT(source) DO UPDATE SET
              last_ok_at=excluded.last_ok_at, last_error=NULL,
              consecutive_failures=0, disabled=0, notified_disabled=0,
-             disabled_at=NULL""",
+             disabled_at=NULL, retry_attempts=0, parked=0, park_reason=NULL""",
         (source, _now()),
     )
 
 
 def mark_source_failed(conn: sqlite3.Connection, source: str, error: str,
-                       threshold: int) -> bool:
-    """Record a failure. Returns True when this failure trips the disable.
+                       threshold: int, structural: bool = False) -> str | None:
+    """Record a failure. Returns what this failure tripped, or None.
 
-    Only the *first* trip returns True — the guard below is what keeps a source
-    that fails its hourly retry probe from re-announcing itself every hour.
+    Returns "parked" for a structural failure that has now exhausted the
+    threshold, "disabled" for an ordinary one, and None when the source is still
+    within its allowance or has already reported. Only the *first* trip returns
+    a value — that guard is what keeps a source failing its retry probe from
+    re-announcing itself on every cooldown.
+
+    A structural failure still has to clear the threshold rather than parking on
+    the first sighting. A single 404 can be one bad deploy on the far end; three
+    in a row is an endpoint that moved.
     """
     conn.execute(
         """INSERT INTO source_health (source, last_error, consecutive_failures)
@@ -464,21 +481,65 @@ def mark_source_failed(conn: sqlite3.Connection, source: str, error: str,
         "SELECT consecutive_failures, disabled FROM source_health WHERE source = ?",
         (source,),
     ).fetchone()
-    if row and row["consecutive_failures"] >= threshold and not row["disabled"]:
-        conn.execute(
-            "UPDATE source_health SET disabled = 1, disabled_at = ? WHERE source = ?",
-            (_now(), source),
-        )
-        return True
-    return False
+    if not row or row["consecutive_failures"] < threshold or row["disabled"]:
+        return None
+    conn.execute(
+        """UPDATE source_health
+           SET disabled = 1, disabled_at = ?, parked = ?, park_reason = ?
+           WHERE source = ?""",
+        (_now(), 1 if structural else 0, error[:500] if structural else None,
+         source),
+    )
+    return "parked" if structural else "disabled"
+
+
+def park_source(conn: sqlite3.Connection, source: str, reason: str) -> bool:
+    """Park an already-disabled source that has since failed structurally.
+
+    A source can go down transiently, get disabled, and only then have its
+    endpoint disappear — at which point continuing to probe it hourly is the
+    exact waste parking exists to stop. Returns True if this changed anything,
+    so the caller knows whether to escalate.
+    """
+    row = conn.execute(
+        "SELECT parked FROM source_health WHERE source = ?", (source,)
+    ).fetchone()
+    if not row or row["parked"]:
+        return False
+    conn.execute(
+        "UPDATE source_health SET parked = 1, park_reason = ? WHERE source = ?",
+        (reason[:500], source),
+    )
+    return True
 
 
 def bump_source_cooldown(conn: sqlite3.Connection, source: str) -> None:
-    """Restart the retry clock after a retry probe failed again."""
+    """Restart the retry clock after a retry probe failed again.
+
+    Each failed probe also advances `retry_attempts`, which widens the next
+    cooldown — see `retry_due_at`.
+    """
     conn.execute(
-        "UPDATE source_health SET disabled_at = ? WHERE source = ?",
+        """UPDATE source_health
+           SET disabled_at = ?, retry_attempts = retry_attempts + 1
+           WHERE source = ?""",
         (_now(), source),
     )
+
+
+def retry_attempts(conn: sqlite3.Connection, source: str) -> int:
+    """Failed retry probes since this source went down."""
+    row = conn.execute(
+        "SELECT retry_attempts FROM source_health WHERE source = ?", (source,)
+    ).fetchone()
+    return int(_column(row, "retry_attempts", 0) or 0) if row else 0
+
+
+def is_source_parked(conn: sqlite3.Connection, source: str) -> bool:
+    row = conn.execute(
+        "SELECT parked FROM source_health WHERE source = ?", (source,)
+    ).fetchone()
+    return bool(row and _column(row, "parked", 0))
 
 
 def is_source_disabled(conn: sqlite3.Connection, source: str) -> bool:
@@ -488,34 +549,68 @@ def is_source_disabled(conn: sqlite3.Connection, source: str) -> bool:
     return bool(row and row["disabled"])
 
 
-def retry_due_at(row: sqlite3.Row | None, retry_after_minutes: int
+def _column(row: sqlite3.Row, name: str, default: Any = None) -> Any:
+    """Read a column that may predate the migration that added it."""
+    return row[name] if name in row.keys() else default
+
+
+def row_is_parked(row: sqlite3.Row | None) -> bool:
+    """Whether a health row is parked, tolerating pre-migration rows."""
+    return bool(row is not None and _column(row, "parked", 0))
+
+
+def backoff_minutes(attempts: int, base_minutes: int, factor: float,
+                    max_minutes: int) -> int:
+    """Cooldown for the next probe after `attempts` failed ones.
+
+    Exponential and capped: with the defaults (60 min, x2, 24 h) a source is
+    probed after 1 h, 2 h, 4 h, 8 h, 16 h, then daily. A source that recovers
+    quickly is still picked up within the hour, while one that has been dead for
+    a week stops spending 24 pointless requests a day to confirm it.
+    """
+    if base_minutes <= 0:
+        return 0
+    delay = base_minutes * (max(factor, 1.0) ** max(0, attempts))
+    return int(min(delay, max(max_minutes, base_minutes)))
+
+
+def retry_due_at(row: sqlite3.Row | None, retry_after_minutes: int,
+                 backoff_factor: float = 1.0, max_minutes: int = 0,
                  ) -> dt.datetime | None:
     """When a disabled source is next eligible for a retry probe.
 
-    None means "never" — either the row is not disabled, or auto-recovery is
-    switched off with `retry_after_minutes <= 0`. A disabled row with no
-    `disabled_at` (written before that column existed, or by a hand-edited db)
-    is due immediately.
+    None means "never": the row is not disabled, auto-recovery is switched off
+    with `retry_after_minutes <= 0`, or the source is parked. A parked source
+    failed in a way retrying cannot fix, so it waits for `--reset` after a
+    person has changed the fetcher.
+
+    A disabled row with no `disabled_at` (written before that column existed, or
+    by a hand-edited db) is due immediately.
     """
     if row is None or not row["disabled"] or retry_after_minutes <= 0:
         return None
-    stamp = row["disabled_at"] if "disabled_at" in row.keys() else None
+    if _column(row, "parked", 0):
+        return None
+    stamp = _column(row, "disabled_at")
     if not stamp:
         return dt.datetime.now()
+    cooldown = backoff_minutes(
+        int(_column(row, "retry_attempts", 0) or 0),
+        retry_after_minutes, backoff_factor, max_minutes)
     try:
-        return dt.datetime.fromisoformat(stamp) + dt.timedelta(
-            minutes=retry_after_minutes)
+        return dt.datetime.fromisoformat(stamp) + dt.timedelta(minutes=cooldown)
     except ValueError:
         return dt.datetime.now()
 
 
 def retry_is_due(conn: sqlite3.Connection, source: str,
-                 retry_after_minutes: int) -> bool:
+                 retry_after_minutes: int, backoff_factor: float = 1.0,
+                 max_minutes: int = 0) -> bool:
     """True when a disabled source has sat out its cooldown and may be probed."""
     row = conn.execute(
         "SELECT * FROM source_health WHERE source = ?", (source,)
     ).fetchone()
-    due = retry_due_at(row, retry_after_minutes)
+    due = retry_due_at(row, retry_after_minutes, backoff_factor, max_minutes)
     return due is not None and dt.datetime.now() >= due
 
 
@@ -527,7 +622,8 @@ def reset_source(conn: sqlite3.Connection, source: str) -> None:
     conn.execute(
         """UPDATE source_health
            SET disabled = 0, consecutive_failures = 0, notified_disabled = 0,
-               disabled_at = NULL
+               disabled_at = NULL, retry_attempts = 0, parked = 0,
+               park_reason = NULL
            WHERE source = ?""",
         (source,),
     )
