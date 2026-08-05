@@ -84,6 +84,9 @@ class Outcome:
     # A later failure has to admit it is retracting something the user was told
     # was finished, rather than silently contradicting it.
     announced: bool = False
+    # Set when the run itself failed but the required documents were already on
+    # disk: the application survives, and this is what went wrong around it.
+    salvaged: str = ""
 
 
 # --------------------------------------------------------------------------
@@ -200,13 +203,20 @@ def _result_detail(event: dict, limit: int = 300) -> str:
 # Note what is *not* here. `timed out after 45 min` is the watcher's own ceiling,
 # not the API's — "gateway time-out" is spelled out separately so the two cannot
 # be confused. 401/403 are omitted on purpose: bad credentials do not heal.
+#
+# `server error` is deliberately bare rather than `internal server error`. The
+# CLI reports a dropped response as `API Error: Server error mid-response`, with
+# no status code and no "internal", so the narrower pattern classified the most
+# common upstream failure there is as permanent and skipped the retry it had
+# been granted. Matching the two words costs at most one extra attempt on a
+# build that used them in some other sense; missing them cost a whole run.
 _TRANSIENT = re.compile(
     r"\b(?:429|500|502|503|504)\b"
     r"|overloaded"
     r"|rate.?limit"
     r"|temporarily unavailable"
     r"|service unavailable"
-    r"|internal server error"
+    r"|server error"
     r"|bad gateway"
     r"|gateway time-?out"
     r"|upstream"
@@ -522,8 +532,19 @@ def result_message(label: str, outcome: Outcome, log_file: Path) -> str:
         if outcome.announced:
             # The user already has the ready message with the folder path; this
             # only needs to close the loop on what arrived afterwards.
-            return (f"📎 <b>Run complete</b> · {label}\n{docs} · {tracker}")
-        return (f"✅ <b>Built</b> · {label}\n<code>{where}</code>\n{docs} · {tracker}")
+            head = f"📎 <b>Run complete</b> · {label}\n{docs} · {tracker}"
+        else:
+            head = (f"✅ <b>Built</b> · {label}\n<code>{where}</code>\n"
+                    f"{docs} · {tracker}")
+        if outcome.salvaged:
+            # Everything an employer sees is finished and still on disk, so
+            # this is not a failure — but it is not a clean run either, and the
+            # missing piece is usually Interview Prep or the tracker row. Both
+            # are named above, so say what broke and let the user read them.
+            head += (f"\n⚠️ <i>The run itself did not finish cleanly: "
+                     f"{_escape(outcome.salvaged)}. The documents above are "
+                     f"complete and were kept.</i>")
+        return head
 
     # Anything short of DONE has been cleaned up by now, so the folder path and
     # the document list describe something that no longer exists — say what was
@@ -799,21 +820,42 @@ class Builder:
             announced = await _settle(announcer)
 
         # Look on disk either way. A failed run still leaves a folder behind,
-        # and finding it is the only way to know what needs erasing.
+        # and finding it is the only way to know what needs erasing — or whether
+        # there is anything there worth keeping.
         outcome = locate_output(company, title, self.config)
         outcome.announced = announced
         if not ok:
-            outcome = Outcome(status=FAILED, folder=outcome.folder,
-                              detail=detail or "the CLI reported an error",
-                              documents=outcome.documents,
-                              tracker_row=outcome.tracker_row,
-                              announced=announced)
+            failure = detail or "the CLI reported an error"
+            if outcome.status == DONE:
+                # The run died, but every required PDF is on disk. Interview
+                # Prep is where a long build spends its last ten minutes, so an
+                # upstream drop lands there more often than anywhere else — and
+                # erasing the folder for it threw away a CV and a cover letter
+                # that had already passed QA and been announced as ready. The
+                # study aid is a private extra; the application is the point.
+                #
+                # `locate_output` asks the disk for the required documents
+                # rather than asking the model how it went, so DONE here is a
+                # fact about files, which is exactly the evidence worth
+                # overruling an exit code with.
+                log.warning("build failed after the documents were complete, "
+                            "keeping the application: %s — %s (%s)",
+                            company, title, failure)
+                outcome.salvaged = failure
+            else:
+                outcome = Outcome(status=FAILED, folder=outcome.folder,
+                                  detail=failure,
+                                  documents=outcome.documents,
+                                  tracker_row=outcome.tracker_row,
+                                  announced=announced)
 
         if outcome.status in (FAILED, INCOMPLETE):
             outcome.cleaned = await asyncio.to_thread(
                 clean_up, outcome.folder, outcome.detail or outcome.status)
 
-        record = " · ".join(part for part in (outcome.detail, outcome.cleaned) if part)
+        record = " · ".join(
+            part for part in (outcome.detail, outcome.salvaged, outcome.cleaned)
+            if part)
         with store.connect() as conn:
             store.finish_build(conn, job.build_id, outcome.status,
                                folder=outcome.folder, detail=record)
