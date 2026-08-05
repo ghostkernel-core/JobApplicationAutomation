@@ -19,6 +19,8 @@ import sys
 import pytest
 
 import run_watcher
+from watcher import config
+from watcher.notifier import format_status
 
 
 def test_a_daily_time_carries_a_timezone() -> None:
@@ -87,6 +89,11 @@ class _Config:
     kb_enabled = True
     kb_hour = 10
     kb_weekday = 6  # Sunday by `date.weekday()`; run_daily counts it as 0
+    # Paired the way the real Config pairs them, not hardcoded: these stubs
+    # exist to keep `build_app` off the disk, not to restate the schedule.
+    digest_at = (digest_hour, config.DIGEST_MINUTE)
+    heartbeat_at = (heartbeat_hour, config.HEARTBEAT_MINUTE)
+    kb_at = (kb_hour, config.KB_MINUTE)
 
 
 class _Queue:
@@ -159,3 +166,34 @@ def test_the_registered_times_match_the_config(monkeypatch) -> None:
     slots = {(when.hour, when.minute) for when in app.job_queue.daily}
     assert (19, 5) in slots
     assert (9, 15) in slots
+
+
+# --------------------------------------------------------------------------
+# what the schedule says vs what it does
+# --------------------------------------------------------------------------
+
+def test_status_quotes_the_minute_the_job_actually_runs_at(monkeypatch) -> None:
+    """The second half of the same bug, and the half that survived the fix.
+
+    Moving the daily jobs into local time left both status reports formatting a
+    flat ":00" from the hour alone, so a heartbeat registered for 09:15 was
+    advertised as 09:00 and looked a quarter of an hour late every morning to
+    the one person reading it. The times shown and the times scheduled come
+    from one property now; this is what stops them separating again.
+    """
+    app = _build(monkeypatch)
+    scheduled = {f"{when.hour:02d}:{when.minute:02d}"
+                 for when in app.job_queue.daily}
+    text = format_status(config.Config(), {}, {}, None)
+
+    assert "digest 19:05" in text and "19:05" in scheduled
+    assert "heartbeat 09:15" in text and "09:15" in scheduled
+    assert ":00" not in text, "a flat :00 is the old hour-only formatting"
+
+
+@pytest.mark.parametrize("hour", [0, 7, 19, 23])
+def test_a_changed_hour_moves_both_the_job_and_the_report(hour: int) -> None:
+    """Editing `digest_hour` must not need a second edit somewhere else."""
+    cfg = config.Config(notify={"digest_hour": hour})
+    assert cfg.digest_at == (hour, config.DIGEST_MINUTE)
+    assert config.clock(cfg.digest_at) in format_status(cfg, {}, {}, None)

@@ -24,8 +24,8 @@ from typing import Any, Iterable
 from . import store
 from .config import (BUILD_SETTINGS_PATH, CONFIG_PATH, DB_PATH, ENV_PATH,
                      LOG_DIR, PROFILE_KB_PATH, PROFILE_DIGEST_PATH, REPO_ROOT,
-                     SOURCES_PATH, TOPIC_KINDS, Config, Sources, env_name,
-                     load_config, load_env, load_sources, source_key)
+                     SOURCES_PATH, TOPIC_KINDS, Config, Sources, clock,
+                     env_name, load_config, load_env, load_sources, source_key)
 from .fetchers import source_urls
 from .logsetup import force_utf8
 
@@ -268,8 +268,8 @@ def print_behaviour(config: Config) -> None:
     field("timeout", f"{config.match_timeout}s", env_note("match", "timeout_seconds"))
 
     rule("NOTIFICATIONS")
-    field("digest", f"{config.digest_hour:02d}:00 local", env_note("notify", "digest_hour"))
-    field("heartbeat", f"{config.heartbeat_hour:02d}:00 local",
+    field("digest", f"{clock(config.digest_at)} local", env_note("notify", "digest_hour"))
+    field("heartbeat", f"{clock(config.heartbeat_at)} local",
           env_note("notify", "heartbeat_hour"))
     field("snooze (\"later\")", f"{config.snooze_days} days", env_note("notify", "snooze_days"))
     if config.topics_enabled:
@@ -299,7 +299,7 @@ def print_behaviour(config: Config) -> None:
     days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
             "Saturday", "Sunday"]
     weekday = days[config.kb_weekday % 7]
-    field("runs", f"{weekday} {config.kb_hour:02d}:00 local, model {config.kb_model}",
+    field("runs", f"{weekday} {clock(config.kb_at)} local, model {config.kb_model}",
           env_note("kb", "weekday"))
     field("needs", f"≥ {config.kb_min_decisions} new decisions, "
           f"looks back over {config.kb_lookback}", env_note("kb", "min_decisions"))

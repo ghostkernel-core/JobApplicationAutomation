@@ -22,6 +22,7 @@ import json
 import pytest
 
 import run_watcher
+from watcher import config as watcher_config
 from watcher.config import Config
 from watcher.notifier import format_status
 
@@ -317,6 +318,9 @@ class _BuildConfig:
     kb_enabled = False
     kb_hour = 10
     kb_weekday = 6
+    digest_at = (digest_hour, watcher_config.DIGEST_MINUTE)
+    heartbeat_at = (heartbeat_hour, watcher_config.HEARTBEAT_MINUTE)
+    kb_at = (kb_hour, watcher_config.KB_MINUTE)
 
 
 class _BuildNotifier:
