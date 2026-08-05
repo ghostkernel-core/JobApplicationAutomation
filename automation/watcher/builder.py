@@ -35,15 +35,17 @@ import logging
 import re
 import subprocess
 import sys
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import dedupe, store
+from . import dedupe, progress, store
 from .claude_cli import ClaudeError, resolve_bin
 from .config import (BUILD_LOG_DIR, BUILD_SETTINGS_PATH, REPO_ROOT, Config,
                      ensure_dirs, load_config, load_identity,
                      sync_build_settings)
+from .notifier import TELEGRAM_MAX_CHARS
 
 # Imported after .config, which is what puts scripts/ on sys.path.
 import no_console  # noqa: E402
@@ -238,11 +240,19 @@ def is_transient(detail: str) -> bool:
     return bool(detail) and bool(_TRANSIENT.search(detail))
 
 
-async def _spawn(prompt: str, config: Config, log_file: Path) -> tuple[bool, str]:
+async def _spawn(prompt: str, config: Config, log_file: Path,
+                 on_event: Callable[[dict], None] | None = None) -> tuple[bool, str]:
     """Run one build. Returns (ok, detail).
 
     The NDJSON stream is written through to the log line by line rather than
     buffered, so a hung build can be inspected while it is still hung.
+
+    `on_event` sees every decoded event and is how the live progress checklist
+    is fed. It must be cheap and synchronous — this runs inside the loop draining
+    the CLI's stdout, and the comment further down spells out what happens to a
+    build whose stdout stops being read. Anything it raises is logged and
+    swallowed: a defect in progress reporting must not cost anyone an
+    application.
     """
     cmd = command_for(config)
     # no_console: the watcher is detached under pythonw and has no console, so
@@ -272,9 +282,16 @@ async def _spawn(prompt: str, config: Config, log_file: Path) -> tuple[bool, str
                 handle.write(line)
                 handle.flush()
                 event = _parse_event(line)
-                if event and event.get("type") == "result":
+                if not event:
+                    continue
+                if event.get("type") == "result":
                     ok = not event.get("is_error", False)
                     detail = "" if ok else _result_detail(event)
+                if on_event is not None:
+                    try:
+                        on_event(event)
+                    except Exception:
+                        log.exception("progress hook failed; build continues")
 
     assert process.stdin is not None
     process.stdin.write(prompt.encode("utf-8"))
@@ -567,6 +584,129 @@ def result_message(label: str, outcome: Outcome, log_file: Path) -> str:
 # the queue
 # --------------------------------------------------------------------------
 
+class _ProgressReporter:
+    """Keeps one Telegram message showing where a build has got to.
+
+    The opener that used to say `🛠 Building …` and then nothing for forty
+    minutes becomes this: the same message, edited in place as each pipeline step
+    starts and finishes, with what every step cost. When the build ends it is
+    edited once more and left alone, so the message stays as that build's timing
+    record.
+
+    Two rules shape the design, both learned the hard way elsewhere in this file:
+
+    * **`feed` never awaits.** It is called from inside the loop draining the
+      CLI's stdout, and anything that stalls that loop strands the CLI on a pipe
+      nobody is reading. So `feed` updates the tracker, sets an event, and
+      returns; every Telegram call happens on a separate task.
+    * **Nothing here may end a build.** Every failure path returns rather than
+      raises, and a message the user has deleted simply stops being edited.
+
+    The refresh task wakes on whichever comes first: a step transition, or the
+    tick that keeps the running step's clock moving. A floor between edits keeps
+    a burst of transitions from turning into a burst of API calls.
+    """
+
+    def __init__(self, notifier, config: Config, job: Job, label: str,
+                 message_id: int, footer: str = "") -> None:
+        self._notifier = notifier
+        self._config = config
+        self._job = job
+        self._label = label
+        self._footer = footer
+        self.message_id: int | None = message_id
+        self.tracker = progress.Tracker()
+        self.started = time.time()
+        self.attempt = 1
+        self.attempts = 1
+        self._bump = asyncio.Event()
+        self._task: asyncio.Task | None = None
+        self._sent = ""
+        self._last_edit = 0.0
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._refresh())
+
+    def begin_attempt(self, attempt: int, attempts: int) -> None:
+        """A fresh attempt starts the checklist over.
+
+        A retry re-runs the pipeline from step 00, so keeping the previous
+        attempt's ticks would show a build further along than it is.
+        """
+        self.attempt, self.attempts = attempt, attempts
+        if attempt > 1:
+            self.tracker.reset()
+            self.started = time.time()
+        self._bump.set()
+
+    def feed(self, event: dict) -> None:
+        if self.tracker.feed(event):
+            self._bump.set()
+
+    async def stop(self, status: str) -> None:
+        """Stop refreshing and leave the final checklist in place."""
+        task, self._task = self._task, None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        await self._flush(status)
+
+    # -- internals ---------------------------------------------------------
+
+    async def _refresh(self) -> None:
+        tick = max(1.0, float(self._config.build_progress_refresh_seconds))
+        floor = max(0.0, float(self._config.build_progress_min_interval_seconds))
+        while True:
+            try:
+                await asyncio.wait_for(self._bump.wait(), timeout=tick)
+            except asyncio.TimeoutError:
+                pass
+            self._bump.clear()
+            waited = time.monotonic() - self._last_edit
+            if waited < floor:
+                await asyncio.sleep(floor - waited)
+            await self._flush()
+
+    async def _flush(self, status: str = "") -> None:
+        if self.message_id is None:
+            return
+        text = self.render(status)
+        # Re-sending identical text would only earn a "message is not modified"
+        # from Telegram, so the comparison is what keeps the idle case free.
+        if text == self._sent:
+            return
+        self._last_edit = time.monotonic()
+        self._sent = text
+        try:
+            alive = await self._notifier.edit(self.message_id, text)
+        except Exception:  # noqa: BLE001 — belt and braces; edit swallows its own
+            log.exception("progress edit failed; build continues")
+            return
+        if not alive:
+            self.message_id = None
+
+    def render(self, status: str = "") -> str:
+        now = time.time()
+        done, total = self.tracker.counts()
+        if not status:
+            status = "Building" if done < total else "Finishing"
+        bits = [status, progress.format_duration(now - self.started),
+                f"{done}/{total} steps"]
+        if self.attempts > 1:
+            bits.append(f"attempt {self.attempt}/{self.attempts}")
+        text = self.tracker.render(f"🛠 {self._label}", " · ".join(bits), now)
+        if self._footer:
+            text += f"\n<i>{_escape(self._footer)}</i>"
+        # A checklist this size runs to well under a thousand characters, but the
+        # label comes from a job board and its length is nobody's to promise.
+        return text[:TELEGRAM_MAX_CHARS]
+
+
 class Builder:
     """One worker, one build at a time, for the lifetime of the process."""
 
@@ -631,12 +771,48 @@ class Builder:
                                    detail="watcher restarted mid-build")
         if not stale:
             return
+        for row in stale:
+            await self._close_progress(row)
         names = "\n".join(f"• {_escape(r['company'])} — {_escape(r['title'])}"
                           for r in stale)
         await self.notifier.send_notice(
             f"↩️ <b>{len(stale)} build(s) interrupted by a restart</b>\n{names}\n\n"
             "<i>Reply “yes” again to any of them to retry.</i>"
         )
+
+    async def _close_progress(self, row) -> None:
+        """Settle the checklist of a build the last process was killed during.
+
+        The reporter lives in memory with the queue, so a kill leaves its message
+        reading `Building · 18m 20s` for good — the one state this feature exists
+        to distinguish from a build that is actually working. The log on disk is
+        the same stream the tracker was reading, so replaying it rebuilds exactly
+        the checklist that was on screen, and the message ends up saying where the
+        run had got to when it died.
+
+        Best effort throughout: a build from before the column existed, a log that
+        was rotated away, a message the user deleted. None of that is worth
+        holding up boot for.
+        """
+        message_id = row["progress_message_id"]
+        log_path = row["log_path"]
+        if not message_id or not log_path:
+            return
+        try:
+            path = Path(log_path)
+            if not path.exists():
+                return
+            tracker = progress.replay(path)
+            done, total = tracker.counts()
+            status = " · ".join(["Interrupted by a restart",
+                                 progress.format_duration(tracker.total_elapsed(
+                                     tracker.last_event or tracker.started_at or 0.0)),
+                                 f"{done}/{total} steps"])
+            label = f"<b>{_escape(row['company'])}</b> — {_escape(row['title'])}"
+            text = tracker.render(f"🛠 {label}", status, tracker.last_event or 0.0)
+            await self.notifier.edit(message_id, text[:TELEGRAM_MAX_CHARS])
+        except Exception:  # noqa: BLE001 — a stale message must not block boot
+            log.exception("could not settle progress message %s", message_id)
 
     # -- api ---------------------------------------------------------------
 
@@ -683,19 +859,24 @@ class Builder:
                 self._queue.task_done()
 
     async def _reply(self, job: Job, text: str,
-                     topic: str = "processing_build") -> None:
+                     topic: str = "processing_build") -> int | None:
         """Report on a build, in the topic that stage of it belongs to.
 
         `processing_build` is the default because most of what a build says is
         progress — building, retrying, queued behind something, declined as a
         duplicate. Only the two ends of the run route elsewhere. With no topics
         configured every one of these is an ordinary reply, exactly as before.
+
+        Returns the message id, which only the opener has any use for: it is the
+        message the live checklist then edits for the rest of the build.
         """
-        await self.notifier.send(text, reply_to=job.reply_message_id,
-                                 topic=topic)
+        return await self.notifier.send(text, reply_to=job.reply_message_id,
+                                        topic=topic)
 
     async def _attempt(self, job: Job, company: str, title: str, url: str,
-                       label: str) -> tuple[bool, str, Path]:
+                       label: str,
+                       reporter: "_ProgressReporter | None" = None,
+                       ) -> tuple[bool, str, Path]:
         """Run the build, retrying only if the far end was briefly unwell.
 
         A 503 from the API — or from a gateway in front of it — can land on the
@@ -723,8 +904,12 @@ class Builder:
 
             log.info("build start: %s — %s (attempt %d/%d)",
                      company, title, attempt, attempts)
+            if reporter is not None:
+                reporter.begin_attempt(attempt, attempts)
             try:
-                ok, detail = await _spawn(prompt, self.config, log_file)
+                ok, detail = await _spawn(
+                    prompt, self.config, log_file,
+                    on_event=reporter.feed if reporter is not None else None)
             except Exception:
                 # Route a crash into the ordinary failure path rather than up to
                 # the worker's catch-all, which knows no company and so cannot
@@ -822,17 +1007,50 @@ class Builder:
         opener = f"🛠 Building {label}…"
         if partial:
             opener += f"\n<i>{_escape(partial)}</i>"
-        await self._reply(job, opener)
+        message_id = await self._reply(job, opener)
+
+        # That opener becomes the live checklist, edited in place for the rest of
+        # the build. It is stored so a restart can find it: the queue lives in
+        # memory, so a build interrupted by one would otherwise leave its
+        # checklist frozen mid-run and reading as still in progress for good.
+        reporter = None
+        if message_id is not None and self.config.build_progress_updates:
+            reporter = _ProgressReporter(self.notifier, self.config, job, label,
+                                         message_id, footer=partial)
+            reporter.start()
+            with store.connect() as conn:
+                store.set_build_progress_message(conn, job.build_id, message_id)
 
         # Runs alongside the build and reports the CV and cover letter the
         # moment they land, rather than making the user wait out Interview Prep.
         announcer = asyncio.create_task(
             self._announce_ready(job, company, title, label))
+        # Set once the outcome is known. The default covers the paths that never
+        # get that far — a crash on the way, or a cancellation — and stopping the
+        # reporter in a `finally` is what stops it editing a message about a
+        # build that no longer exists.
+        verdict = "Interrupted"
         try:
-            ok, detail, log_file = await self._attempt(
-                job, company, title, url, label)
+            try:
+                ok, detail, log_file = await self._attempt(
+                    job, company, title, url, label, reporter)
+            finally:
+                announced = await _settle(announcer)
+            verdict = await self._finish(job, company, title, label, ok, detail,
+                                         log_file, announced)
         finally:
-            announced = await _settle(announcer)
+            if reporter is not None:
+                await reporter.stop(verdict)
+
+    async def _finish(self, job: Job, company: str, title: str, label: str,
+                      ok: bool, detail: str, log_file: Path,
+                      announced: bool) -> str:
+        """Settle a finished run: salvage, clean up, record, report.
+
+        Split out of `_handle` so the live checklist can be stopped in a
+        `finally` around the whole of it, with the verdict this returns as its
+        closing line.
+        """
 
         # Look on disk either way. A failed run still leaves a folder behind,
         # and finding it is the only way to know what needs erasing — or whether
@@ -883,6 +1101,10 @@ class Builder:
         await self._reply(
             job, result_message(label, outcome, log_file),
             topic="completed_build" if outcome.status == DONE else "failed_build")
+
+        if outcome.status == DONE:
+            return "Complete" if not outcome.salvaged else "Complete (salvaged)"
+        return "Failed" if outcome.status == FAILED else outcome.status.title()
 
 
 # --------------------------------------------------------------------------

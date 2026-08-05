@@ -439,6 +439,55 @@ there.
 `[build] enabled = false` in `config.toml` stops builds at the source: a reply is still
 recorded, nothing is spawned.
 
+### Live progress
+
+A build takes 25–45 minutes. The `🛠 Building …` message in `processing_build` is edited in
+place for that whole time, so there is one message per build that shows where the run is and
+what each step cost:
+
+```
+🛠 Building · suena GmbH — Senior Data Scientist
+Running · 12m 40s · 8/13 steps
+
+  ✅ Archive posting   4m 15s
+  ✅ Match brief       2m 47s
+  ✅ Company research  5m 05s
+  ⏳ CV draft          1m 12s
+  ⏳ Cover letter      0m 58s
+  ⬜ Verify CV
+  …
+```
+
+Nothing in the pipeline reports this. The whole checklist is reconstructed from the build's own
+NDJSON stdout, which `_spawn` already decodes: an orchestrator step is a `tool_use` block whose
+`parent_tool_use_id` is null — the filter that matters, since one real log carried 5 of those
+against 71 nested calls from inside subagents. Agent steps are keyed on `subagent_type`, the
+deterministic ones on the script name in the Bash command, with `--require-prep` and
+`--only interview_prep_payload_en` telling the two render/QA passes apart.
+
+Two traps are worth knowing, because both showed up as `0m 00s` rows before they were handled.
+A backgrounded agent's `tool_result` returns in milliseconds saying only "Async agent launched";
+the real completion arrives later as a `task_notification` carrying the same `tool_use_id`, timed
+by the `duration_ms` the run reports for itself. And that notification has no timestamp of its
+own, so a step that *does* get a stamped result later has its finish time corrected rather than
+left on the stale stream clock.
+
+The message never blocks the build. The stdout pump only flips a dirty flag; a separate task owns
+every edit, and a progress failure is logged and swallowed. On a retry the checklist resets and
+the header gains `attempt 2/2` — same message, not a second one. When the run ends the message
+stops updating and stands as that build's timing record.
+
+`progress_refresh_seconds` is only how often the *running* step's clock is redrawn; a step
+starting or finishing redraws immediately. `progress_min_interval_seconds` collapses the parallel
+phases, where three or four steps land within a second of each other.
+`progress_updates = false` sends the opener once and leaves it alone, exactly as before.
+
+To see the checklist for a build that already ran:
+
+```
+python -m watcher.progress --replay "logs/builds/20260805-135256-suena-*.log"
+```
+
 ### Duplicates
 
 Three layers. A posting fingerprint (never re-notify), a cross-source collapse (the same role

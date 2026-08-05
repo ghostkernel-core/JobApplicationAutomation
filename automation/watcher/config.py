@@ -430,6 +430,35 @@ class Config:
         return max(0, self._num("build", self.build, "retry_delay_seconds", 120))
 
     @property
+    def build_progress_updates(self) -> bool:
+        """Whether a build's opener is kept up to date as a step checklist.
+
+        Off, the message says `🛠 Building …` once and nothing more until the run
+        ends — which is exactly how it behaved before this existed.
+        """
+        return bool(self.build.get("progress_updates", True))
+
+    @property
+    def build_progress_refresh_seconds(self) -> int:
+        """How often the checklist is redrawn while nothing has changed.
+
+        This is the clock on the step currently running, not the step list — a
+        transition redraws immediately. So it trades how live that one number
+        looks against how many edits a long build spends.
+        """
+        return max(1, self._num("build", self.build, "progress_refresh_seconds", 30))
+
+    @property
+    def build_progress_min_interval_seconds(self) -> int:
+        """Floor between two edits, whatever the stream does.
+
+        Parallel phases finish several steps within a second or two of each
+        other, and each one on its own would be an API call. This collects them.
+        """
+        return max(0, self._num("build", self.build,
+                                "progress_min_interval_seconds", 5))
+
+    @property
     def duplicate_title_ratio(self) -> float:
         return self._num("build", self.build, "duplicate_title_ratio", 0.8, float)
 
