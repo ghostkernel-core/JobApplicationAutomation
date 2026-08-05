@@ -211,11 +211,13 @@ class _Notifier:
         self.config = config
         self.chat_id = "chat"
         self.sent: list[str] = []
+        self.topics: list[str | None] = []
         self._fail_on = set(fail_on)
 
-    async def send(self, text: str, reply_to=None) -> int:
+    async def send(self, text: str, reply_to=None, topic=None) -> int:
         number = len(self.sent) + 1
         self.sent.append(text)
+        self.topics.append(topic)
         if number in self._fail_on:
             raise RuntimeError(f"telegram rejected part {number}")
         return 1000 + number
@@ -273,3 +275,15 @@ def test_an_empty_band_sends_nothing(monkeypatch) -> None:
     assert sent == 0
     assert instance.sent == []
     assert store.recorded == []
+
+
+def test_every_part_goes_to_the_postings_topic(monkeypatch) -> None:
+    """A digest line is a posting the user has not seen, only a quieter one.
+
+    Splitting one digest across parts must not scatter them across topics — and
+    with no topics configured the kind resolves to None, so this costs the
+    chat-id-only setup nothing.
+    """
+    sent, store, instance = _run_digest(monkeypatch, _rows(94))
+    assert len(instance.sent) > 1
+    assert set(instance.topics) == {"new_posting"}

@@ -73,6 +73,27 @@ BUILD_SETTINGS_PATH = AUTOMATION_DIR / "build_settings.json"
 
 CANONICAL_PROFILE_PATH = REPO_ROOT / "rules" / "00-canonical-profile.md"
 
+# A restart asked for from Telegram, so the process that comes back knows who
+# to report to. On disk because the request and the answer are on opposite
+# sides of an `execv` — nothing in memory survives it.
+RESTART_MARKER_PATH = STATE_DIR / "restart.json"
+
+# The message kinds that can be routed to their own forum topic, and the
+# `[notify.topics]` key each one reads. Order is the order they appear in the
+# config file and in `watcherctl status`.
+#
+# Only these five. Heartbeats, source alerts, the weekly kb proposal and the
+# interrupted-build notice deliberately have no topic: they are operational
+# rather than about any one posting, and they belong beside `/status` and
+# `/restart` in General where a reply reaches the watcher.
+TOPIC_KINDS: tuple[str, ...] = (
+    "new_posting",       # instant pings and the evening digest
+    "targeted_build",    # an approved posting, kept as a record
+    "processing_build",  # queued, building, or declined as a duplicate
+    "failed_build",      # a build that failed, and any retraction
+    "completed_build",   # the application is ready, and the run is complete
+)
+
 
 def ensure_dirs() -> None:
     """Create the runtime directories. Safe to call repeatedly."""
@@ -260,6 +281,52 @@ class Config:
     @property
     def snooze_days(self) -> int:
         return self._num("notify", self.notify, "snooze_days", 7)
+
+    # --- notify: forum topics ---------------------------------------------
+    @property
+    def topics(self) -> dict[str, int]:
+        """Configured `[notify.topics]` thread ids, by message kind.
+
+        Absent, blank, or zero means "no topic for this kind", and the entry is
+        left out rather than stored as 0 — so `topics` being empty is exactly
+        the chat-id-only case, and every routing decision downstream is a
+        dictionary lookup that misses.
+
+        A junk value warns and is dropped rather than raising. Getting one topic
+        id wrong should cost that one topic, not the watcher's ability to send
+        anything at all.
+        """
+        raw = self.notify.get("topics", {}) or {}
+        out: dict[str, int] = {}
+        for kind in TOPIC_KINDS:
+            value: Any = _from_env("notify_topics", kind, int)
+            if value is None:
+                value = raw.get(kind, 0)
+            try:
+                thread = int(value or 0)
+            except (TypeError, ValueError):
+                log.warning("ignoring [notify.topics] %s = %r — not a thread id; "
+                            "messages of that kind go to General", kind, value)
+                continue
+            if thread > 0:
+                out[kind] = thread
+        return out
+
+    def topic_for(self, kind: str | None) -> int | None:
+        """The thread id a message of this kind belongs in, or None for General.
+
+        None is the answer for an unconfigured kind, an unknown kind, and a
+        chat with no topics at all — which is what keeps the chat-id-only setup
+        behaving exactly as it did before topics existed.
+        """
+        if not kind:
+            return None
+        return self.topics.get(kind)
+
+    @property
+    def topics_enabled(self) -> bool:
+        """True once at least one topic id is set."""
+        return bool(self.topics)
 
     # --- build ------------------------------------------------------------
     @property
