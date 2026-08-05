@@ -839,7 +839,18 @@ def snapshot(conn: sqlite3.Connection, notify_threshold: int,
         "pending": count(
             """SELECT COUNT(*) FROM postings p
                WHERE NOT EXISTS (SELECT 1 FROM verdicts v WHERE v.posting_id = p.id)"""),
-        "retrying": count("SELECT COUNT(*) FROM score_attempts"),
+        # Only the postings that will genuinely be tried again. An attempt row
+        # outlives the retry loop: `_persist` stops deleting it once the
+        # attempts run out, so a raw count of the table keeps calling postings
+        # "retrying" long after the matcher gave up on them. The verdict row is
+        # what settles it — a posting still in the loop has none, which is
+        # exactly why `unscored()` will re-select it. Twenty-five postings sat
+        # at "25 retrying · 25 unjudged" after one outage, the two halves of
+        # that line contradicting each other about the same postings.
+        "retrying": count(
+            """SELECT COUNT(*) FROM score_attempts a
+               WHERE NOT EXISTS (SELECT 1 FROM verdicts v
+                                 WHERE v.posting_id = a.posting_id)"""),
         "seen_today": count(
             "SELECT COUNT(*) FROM postings WHERE substr(first_seen_at, 1, 10) = ?",
             today),

@@ -513,6 +513,14 @@ def format_status(config: Config, cycle: dict[str, Any],
             f"    Last score: {_when(snap['last_scored_at'], now)}",
             f"    Last ping: {_when(snap['last_notified_at'], now)}",
         ]
+        if snap["unjudged"]:
+            # "Unjudged" reads like a queue, and it is the opposite: these
+            # postings are finished, parked at the fallback score because
+            # scoring kept failing until the attempts ran out. Nothing picks
+            # them up again on its own, however healthy the API is now, so the
+            # count is only useful next to the one command that moves it.
+            lines.append(f"    <i>{snap['unjudged']} unjudged — scoring failed "
+                         f"and the retries ran out; /rescore re-queues them</i>")
         if snap.get("top_recent"):
             lines.append(f"    Latest verdict: {_escape(snap['top_recent'])}")
         lines += [

@@ -355,7 +355,7 @@ def test_the_commands_are_registered(monkeypatch) -> None:
     commands = {name for handler in app.handlers
                 if isinstance(handler, CommandHandler)
                 for name in handler.commands}
-    assert commands == {"status", "threshold", "recheck", "restart"}
+    assert commands == {"status", "threshold", "recheck", "rescore", "restart"}
 
 
 def test_every_registered_command_is_offered_in_telegrams_menu(monkeypatch) -> None:
