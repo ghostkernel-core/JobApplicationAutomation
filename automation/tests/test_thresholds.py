@@ -21,6 +21,7 @@ two-thirds comments explaining how the current numbers were calibrated.
 from __future__ import annotations
 
 import asyncio
+import re
 import shutil
 
 import pytest
@@ -127,9 +128,41 @@ def _scored(db, *scores: int) -> None:
                                {"score": score, "verdict": "yes"}, "haiku")
 
 
+# The numbers every assertion below is written against.
+#
+# The fixture copies the real config.toml on purpose: `set_number` is a line
+# editor, not a TOML round-tripper, so it has to face the real file's sections,
+# subsections, comment blocks and spacing. But the *values* in that file are
+# live — `/threshold` rewrites them from chat — and asserting on them coupled
+# this suite to whatever the cut happened to be that afternoon. Lowering the
+# ping cut to 65 from Telegram turned eight tests red without a line of watcher
+# code changing.
+#
+# So the copy keeps the real structure and gets known digits. Pinning is a plain
+# substitution rather than a call to `set_number`, which is the function under
+# test and cannot be its own fixture.
+BASELINE = {
+    "notify_threshold": 70,
+    "digest_threshold": 40,
+    "digest_hour": 19,
+}
+
+
+def _pin(path) -> None:
+    text = path.read_text(encoding="utf-8")
+    for key, value in BASELINE.items():
+        text, hits = re.subn(rf"(?m)^{key} = \d+$", f"{key} = {value}", text)
+        # A renamed or duplicated key must fail loudly here. Left to itself it
+        # would leave that knob reading the live file again, and the coupling
+        # this exists to remove would creep back one key at a time.
+        assert hits == 1, f"expected one `{key}` line in config.toml, found {hits}"
+    path.write_text(text, encoding="utf-8")
+
+
 @pytest.fixture
 def config_file(tmp_path, monkeypatch):
-    """A copy of the real config.toml, so the writer is tested on the real thing.
+    """A copy of the real config.toml, pinned to BASELINE, so the writer is
+    tested on the real file's shape without inheriting its live numbers.
 
     The reloader captured the path at import, so it is redirected too — and its
     cache is dropped either side, or the tests that use the real file would be
@@ -137,6 +170,7 @@ def config_file(tmp_path, monkeypatch):
     """
     path = tmp_path / "config.toml"
     shutil.copy(watcher_config.CONFIG_PATH, path)
+    _pin(path)
     monkeypatch.setattr(watcher_config, "CONFIG_PATH", path)
     monkeypatch.setattr(watcher_config._config_reloader, "_path", path)
     monkeypatch.delenv("WATCHER_MATCH_NOTIFY_THRESHOLD", raising=False)
@@ -164,12 +198,17 @@ def test_the_calibration_comments_survive_the_edit(config_file) -> None:
 
     Round-tripping the file through a TOML writer would drop every one of these
     lines to save the parsing this does by hand, and the next person to wonder
-    why 70 would have nothing to read.
+    why that number would have nothing to read.
+
+    Asserted on phrases rather than digits: the paragraph deliberately does not
+    quote the live cut, because the setter rewrites the value line and never the
+    prose above it.
     """
     watcher_config.set_number("match", "notify_threshold", 55)
     text = config_file.read_text(encoding="utf-8")
     assert "Calibrated with" in text
-    assert "70 is the cut" in text
+    assert "not one quoted" in text, "the paragraph above the key was eaten"
+    assert "How much of the job description" in text, "prose below it was eaten"
 
 
 def test_a_key_is_only_matched_inside_its_own_section(config_file) -> None:
@@ -219,7 +258,7 @@ def test_the_new_value_is_visible_immediately(config_file) -> None:
 # /threshold
 # --------------------------------------------------------------------------
 
-def test_bare_threshold_reports_the_cuts_and_what_is_waiting(db) -> None:
+def test_bare_threshold_reports_the_cuts_and_what_is_waiting(db, config_file) -> None:
     _scored(db, 90, 75, 55, 20)
     replies = _run(run_watcher.on_threshold, _App(_Notifier()))
     text = replies[0]
