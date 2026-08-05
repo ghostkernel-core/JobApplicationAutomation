@@ -385,6 +385,25 @@ def cmd_digest(_args: argparse.Namespace) -> int:
     return run_in_venv([str(ENTRYPOINT), "--digest"])
 
 
+def cmd_resend(args: argparse.Namespace) -> int:
+    argv = ["-m", "watcher.notifier", "--forget-vanished",
+            "--min-score", str(args.min_score)]
+    if args.apply:
+        argv.append("--apply")
+    return run_in_venv(argv)
+
+
+def cmd_rehydrate(args: argparse.Namespace) -> int:
+    argv = ["-m", "watcher.rehydrate"]
+    if args.dry_run:
+        argv.append("--dry-run")
+    if args.limit:
+        argv += ["--limit", str(args.limit)]
+    if args.retry_failed:
+        argv.append("--retry-failed")
+    return run_in_venv(argv)
+
+
 def tail(path: Path, lines: int) -> str:
     if not path.exists():
         return f"(no such file: {path})"
@@ -466,6 +485,27 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("digest", help="send the digest to Telegram now")
 
+    resend = sub.add_parser(
+        "resend",
+        help="re-enable pings whose Telegram message is gone (a cleared chat "
+             "deletes the messages but not the record of them, so the postings "
+             "count as notified forever and never resurface)")
+    resend.add_argument("--min-score", type=int, default=75,
+                        help="only pings at or above this score (default 75)")
+    resend.add_argument("--apply", action="store_true",
+                        help="without this it only reports what it would do")
+
+    rehydrate = sub.add_parser(
+        "rehydrate",
+        help="re-fetch postings stored as one-line teasers (stepstone and "
+             "hiring.cafe bodies were never fetched, so seniority, the years "
+             "bar and the language line were read off the opening sentence)")
+    rehydrate.add_argument("--dry-run", action="store_true",
+                           help="list what would be fetched, touch nothing")
+    rehydrate.add_argument("--limit", type=int, help="stop after this many")
+    rehydrate.add_argument("--retry-failed", action="store_true",
+                           help="try the ones that failed on an earlier run again")
+
     logs = sub.add_parser("logs", help="show the tail of watcher.log")
     logs.add_argument("-n", "--number", type=int, default=40)
     logs.add_argument("-f", "--follow", action="store_true")
@@ -479,7 +519,7 @@ def main(argv: list[str] | None = None) -> int:
         "status": cmd_status, "start": cmd_start, "stop": cmd_stop,
         "restart": cmd_restart, "poll": cmd_poll, "health": cmd_health,
         "reset": cmd_reset, "rescore": cmd_rescore, "digest": cmd_digest,
-        "logs": cmd_logs,
+        "logs": cmd_logs, "resend": cmd_resend, "rehydrate": cmd_rehydrate,
     }
     return handlers[args.command](args)
 

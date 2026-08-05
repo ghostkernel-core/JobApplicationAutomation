@@ -319,6 +319,28 @@ class Posting:
 
         return roles.years_required(self.description)
 
+    @property
+    def languages(self) -> list[str]:
+        """Stated language bar, e.g. `["German C1", "English fluent"]`."""
+        from . import terms
+
+        return terms.languages(self.title, self.description)
+
+    @property
+    def contract(self) -> str:
+        """Contract type and hours, e.g. `permanent · full-time`, or ""."""
+        from . import terms
+
+        return terms.contract(self.title, self.description)
+
+    @property
+    def arrangement(self) -> str:
+        """`remote`, `hybrid`, `onsite`, or "" when the posting does not say."""
+        from . import terms
+
+        return terms.arrangement(self.title, self.description,
+                                 remote_flag=self.remote)
+
     def summary(self) -> str:
         where = self.location or ("Remote" if self.remote else "?")
         age = f"{self.age_days}d" if self.age_days is not None else "?"

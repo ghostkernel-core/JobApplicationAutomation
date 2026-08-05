@@ -160,6 +160,15 @@ _MIGRATIONS: list[str] = [
     ALTER TABLE source_health ADD COLUMN parked INTEGER DEFAULT 0;
     ALTER TABLE source_health ADD COLUMN park_reason TEXT;
     """,
+    # Language bar, contract type, and work arrangement, read out of the body by
+    # `terms`. Stored rather than recomputed so the ping, the digest, and a later
+    # `--replay` all show the same reading, and so a posting whose description is
+    # later trimmed does not silently lose the facts that were shown about it.
+    """
+    ALTER TABLE postings ADD COLUMN languages TEXT DEFAULT '';
+    ALTER TABLE postings ADD COLUMN contract TEXT DEFAULT '';
+    ALTER TABLE postings ADD COLUMN arrangement TEXT DEFAULT '';
+    """,
 ]
 
 
@@ -242,13 +251,16 @@ def insert_posting(conn: sqlite3.Connection, posting: Posting) -> bool:
         """INSERT OR IGNORE INTO postings
            (id, loose_key, source, provider, source_job_id, url, canonical_url,
             company, title, location, country, city, level, years_required,
+            languages, contract, arrangement,
             remote, posted_at, first_seen_at, description, raw_json)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             posting.fingerprint, posting.loose_key, posting.source, posting.provider,
             posting.source_job_id, posting.url, posting.canonical_url,
             posting.company, posting.title, posting.location, posting.country,
-            posting.city, posting.level, posting.years_required, int(posting.remote),
+            posting.city, posting.level, posting.years_required,
+            ", ".join(posting.languages), posting.contract, posting.arrangement,
+            int(posting.remote),
             posting.posted_at.isoformat() if posting.posted_at else None,
             _now(), posting.description,
             json.dumps(posting.raw, ensure_ascii=False, default=str)[:200_000],
@@ -403,6 +415,34 @@ def record_notification(conn: sqlite3.Connection, posting_id: str, chat_id: str,
            VALUES (?,?,?,?,?)""",
         (posting_id, str(chat_id), int(message_id), kind, _now()),
     )
+
+
+def sent_notifications(conn: sqlite3.Connection, kind: str = "instant",
+                       min_score: int = 0) -> list[sqlite3.Row]:
+    """Recorded notifications, newest first, with the posting they announced."""
+    return list(conn.execute(
+        """SELECT n.rowid AS rowid, n.posting_id, n.chat_id,
+                  n.telegram_message_id, n.sent_at,
+                  p.company, p.title, v.score
+           FROM notifications n
+           JOIN postings p ON p.id = n.posting_id
+           LEFT JOIN verdicts v ON v.posting_id = n.posting_id
+           WHERE n.kind = ? AND COALESCE(v.score, 0) >= ?
+           ORDER BY n.telegram_message_id DESC""",
+        (kind, min_score),
+    ))
+
+
+def forget_notification(conn: sqlite3.Connection, rowid: int) -> None:
+    """Drop one notification record, making its posting sendable again.
+
+    `unnotified_in_band` excludes anything with a notifications row, so a ping
+    whose Telegram message no longer exists is otherwise unreachable forever —
+    the record says it was delivered and the chat says it was not. Deleting the
+    record is the only way back, and it is deliberately not something the poll
+    loop can do on its own.
+    """
+    conn.execute("DELETE FROM notifications WHERE rowid = ?", (rowid,))
 
 
 def posting_for_message(conn: sqlite3.Connection, chat_id: str,

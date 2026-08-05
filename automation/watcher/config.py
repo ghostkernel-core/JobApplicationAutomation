@@ -63,6 +63,7 @@ ENV_PATH = AUTOMATION_DIR / ".env"
 DB_PATH = STATE_DIR / "watch.db"
 PROFILE_DIGEST_PATH = STATE_DIR / "profile_digest.md"
 BROWSER_PROFILE_DIR = STATE_DIR / "browser"
+BROWSER_PROFILE_ENV = "WATCHER_BROWSER_PROFILE"
 # A consolidation proposal waiting for a yes/no in Telegram. On disk rather
 # than in memory so a restart between "sent" and "answered" does not turn the
 # reply into an orphan the handler cannot resolve.
@@ -109,6 +110,24 @@ TOPIC_KINDS: tuple[str, ...] = (
 DIGEST_MINUTE = 5
 HEARTBEAT_MINUTE = 15
 KB_MINUTE = 25
+
+
+def browser_profile_dir() -> Path:
+    """Where the shared Chromium context keeps its profile.
+
+    Read at launch rather than at import because it can be overridden, and the
+    override is set by a CLI that has not parsed its arguments yet when this
+    module is first imported.
+
+    Chromium locks a persistent profile directory to a single process. The
+    watcher opens the context on its first browser-backed poll and holds it for
+    as long as it runs, so a *second* process that needs the browser — the
+    one-off re-hydration sweep — cannot use `state/browser/` at all while the
+    watcher is up. Pointing it at a seeded copy is the only way to run the two
+    concurrently, which beats taking the watcher offline for an hour.
+    """
+    override = os.environ.get(BROWSER_PROFILE_ENV, "").strip()
+    return Path(override) if override else BROWSER_PROFILE_DIR
 
 
 def clock(at: tuple[int, int]) -> str:

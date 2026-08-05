@@ -35,8 +35,30 @@ py watcherctl.py health          :: per-source status table
 py watcherctl.py reset portal:stepstone
 py watcherctl.py rescore         :: re-queue postings whose scoring failed outright
 py watcherctl.py digest          :: send the digest now
+py watcherctl.py resend          :: re-enable pings whose Telegram message is gone
+py watcherctl.py resend --min-score 65 --apply
+py watcherctl.py rehydrate       :: re-fetch postings stored as one-line teasers
+py watcherctl.py rehydrate --dry-run
 py watcherctl.py logs -n 50 -f   :: tail watcher.log, -f to follow
 ```
+
+`resend` exists because deleting a message in Telegram does not delete the watcher's record of
+having sent it, and `unnotified_in_band` skips anything with such a record. Clearing the chat —
+which is what reorganising a group into forum topics invites you to do — therefore removes every
+ping *and* guarantees none of them can ever come back. `resend` probes each recorded ping against
+the Bot API and forgets only the records Telegram positively reports as missing, so the postings
+become eligible again on the next cycle. It reports without changing anything until `--apply`,
+and defaults to `--min-score 75` so recovering one lost ping does not replay a month of them.
+
+`rehydrate` is a one-off repair, and should find nothing to do once it has run. A poll used to
+fetch the full ad only when a source sent no description at all; StepStone and hiring.cafe both
+send the search tile's opening sentence, which is non-empty, so their bodies were never fetched
+and 198 of the first 226 stored postings were filtered, scored and reported on ~300 characters.
+`poll.TEASER_CHARS` fixes new postings; this fixes the ones already stored, re-reading the
+seniority, years-of-experience, language, contract and work-arrangement columns from the real
+body. It is resumable — a posting that gets a body stops matching the query that selects work —
+and it runs while the watcher is up, on a copy of the browser profile, because Chromium locks a
+profile directory to one process.
 
 The repository root has `start_watcher.py`, which takes every one of these sub-commands and
 forwards it here unchanged — `python start_watcher.py restart` and `py watcherctl.py restart` are
