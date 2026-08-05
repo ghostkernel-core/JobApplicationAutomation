@@ -59,6 +59,24 @@ DUPLICATE = "duplicate"
 FAILED = "failed"
 INCOMPLETE = "incomplete"
 INTERRUPTED = "interrupted"
+# The run ended cleanly without producing documents. Almost always `CLAUDE.md`'s
+# stop-and-ask: an unsupported claim, a skills gap, an ambiguous company name.
+# That is a question, not a failure, and reporting it as one lost the question —
+# one build stopped to ask whether to claim agent-framework experience the
+# canonical profile does not carry, and all the user was told is that two PDFs
+# were missing.
+NEEDS_DECISION = "needs_decision"
+
+#: How many turn-ending messages are kept as a build's closing words. The
+#: orchestrator ends a turn every time it hands off to background subagents, so
+#: a run emits one of these per handoff and the last is rarely the interesting
+#: one: the build above asked its question a turn before the end, and signed off
+#: with "still holding on your decision from above".
+CLOSING_TURNS = 3
+
+#: Ceiling on those closing words, leaving room for the heading and the folder
+#: line inside `TELEGRAM_MAX_CHARS`.
+CLOSING_CHARS = 2000
 
 # Per-line ceiling for the CLI's NDJSON stream, 64 MB. asyncio defaults to
 # 64 KiB, which a single tool result blows past routinely — an image Read comes
@@ -176,6 +194,29 @@ def _kill_tree(pid: int) -> None:
         log.exception("could not kill build process tree %s", pid)
 
 
+def _tidy(text: object) -> str:
+    """Squeeze a model message down without flattening it into one line.
+
+    Runs of spaces and blank lines go; the paragraph breaks stay, because a
+    stop-and-ask is a question with options under it and reads as noise once
+    those are gone.
+    """
+    lines = [" ".join(line.split()) for line in str(text or "").splitlines()]
+    kept: list[str] = []
+    for line in lines:
+        if line or (kept and kept[-1]):
+            kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def _closing_words(turns: list[str]) -> str:
+    """The last few things a build said, for a run that has to explain itself."""
+    text = "\n\n".join(turns[-CLOSING_TURNS:])
+    if len(text) <= CLOSING_CHARS:
+        return text
+    return text[:CLOSING_CHARS - 1].rstrip() + "…"
+
+
 def _result_detail(event: dict, limit: int = 300) -> str:
     """Why a failing result event failed, in a form worth putting in Telegram.
 
@@ -188,7 +229,7 @@ def _result_detail(event: dict, limit: int = 300) -> str:
     whenever it hands off to background subagents, so a long run produces a
     result event per turn and the last one is the run's real outcome.
     """
-    text = " ".join(str(event.get("result") or "").split())
+    text = " ".join(_tidy(event.get("result")).split())
     if not text:
         # Nothing usable in `result` — subtype is a poor answer but it beats an
         # empty failure, and "error_during_execution" and friends do say
@@ -241,8 +282,14 @@ def is_transient(detail: str) -> bool:
 
 
 async def _spawn(prompt: str, config: Config, log_file: Path,
-                 on_event: Callable[[dict], None] | None = None) -> tuple[bool, str]:
-    """Run one build. Returns (ok, detail).
+                 on_event: Callable[[dict], None] | None = None,
+                 ) -> tuple[bool, str, str]:
+    """Run one build. Returns (ok, detail, closing).
+
+    `closing` is the last few things the run said before it stopped, and is
+    only of interest when it stopped without writing an application — see
+    `NEEDS_DECISION`. It is read from the same result events as `detail`, so it
+    costs nothing to collect and is discarded on every ordinary run.
 
     The NDJSON stream is written through to the log line by line rather than
     buffered, so a hung build can be inspected while it is still hung.
@@ -270,6 +317,7 @@ async def _spawn(prompt: str, config: Config, log_file: Path,
 
     detail = ""
     ok = False
+    turns: list[str] = []
 
     async def pump() -> None:
         nonlocal detail, ok
@@ -287,6 +335,9 @@ async def _spawn(prompt: str, config: Config, log_file: Path,
                 if event.get("type") == "result":
                     ok = not event.get("is_error", False)
                     detail = "" if ok else _result_detail(event)
+                    said = _tidy(event.get("result"))
+                    if said and (not turns or turns[-1] != said):
+                        turns.append(said)
                 if on_event is not None:
                     try:
                         on_event(event)
@@ -303,7 +354,8 @@ async def _spawn(prompt: str, config: Config, log_file: Path,
         await asyncio.wait_for(asyncio.gather(pump(), process.wait()), timeout)
     except asyncio.TimeoutError:
         _kill_tree(process.pid)
-        return False, f"timed out after {config.build_timeout_minutes} min"
+        return (False, f"timed out after {config.build_timeout_minutes} min",
+                _closing_words(turns))
     except (Exception, asyncio.CancelledError):
         # Anything that stops us reading stdout strands the CLI: it blocks on a
         # pipe nobody drains and sits there until the machine reboots. Kill the
@@ -317,7 +369,7 @@ async def _spawn(prompt: str, config: Config, log_file: Path,
     if process.returncode != 0:
         note = f"exit {process.returncode}"
         detail = f"{detail} ({note})" if detail else note
-    return ok and process.returncode == 0, detail
+    return ok and process.returncode == 0, detail, _closing_words(turns)
 
 
 async def _lines(stream: asyncio.StreamReader, handle) -> AsyncIterator[bytes]:
@@ -498,6 +550,24 @@ def _escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _fit(text: str, log_file: Path) -> str:
+    """Add the log line and keep the whole message inside Telegram's ceiling.
+
+    Only the stop-and-ask message can approach it — everything else here is a
+    handful of lines. Cutting escaped HTML risks landing inside an entity, which
+    Telegram rejects outright, so a trailing `&…` fragment is dropped with it.
+    """
+    tail = f"\n<i>log: {_escape(log_file.name)}</i>"
+    room = TELEGRAM_MAX_CHARS - len(tail)
+    if len(text) > room:
+        text = text[:room - 1]
+        head, sep, last = text.rpartition("&")
+        if sep and ";" not in last:
+            text = head
+        text = text.rstrip() + "…"
+    return text + tail
+
+
 def duplicate_message(label: str, existing: dedupe.ExistingApplication) -> str:
     when = existing.applied_on.isoformat() if existing.applied_on else "an unknown date"
     where = relative(existing.folder) if existing.folder else "logged in the tracker"
@@ -562,6 +632,18 @@ def result_message(label: str, outcome: Outcome, log_file: Path) -> str:
                      f"{_escape(outcome.salvaged)}. The documents above are "
                      f"complete and were kept.</i>")
         return head
+
+    if outcome.status == NEEDS_DECISION:
+        # The whole point of this branch is the quoted text, so it goes in
+        # whole rather than as a one-line "detail" — it is a question, and half
+        # a question is no use. `_spawn` has already capped it.
+        lines = [f"⏸ <b>Stopped to ask</b> · {label}"]
+        if outcome.detail:
+            lines.append(_escape(outcome.detail))
+        lines.append("<i>Nothing was drafted. Reply here with what you want "
+                     "done, or approve the posting again once the profile "
+                     "covers it.</i>")
+        return _fit("\n\n".join(lines), log_file)
 
     # Anything short of DONE has been cleaned up by now, so the folder path and
     # the document list describe something that no longer exists — say what was
@@ -876,7 +958,7 @@ class Builder:
     async def _attempt(self, job: Job, company: str, title: str, url: str,
                        label: str,
                        reporter: "_ProgressReporter | None" = None,
-                       ) -> tuple[bool, str, Path]:
+                       ) -> tuple[bool, str, str, Path]:
         """Run the build, retrying only if the far end was briefly unwell.
 
         A 503 from the API — or from a gateway in front of it — can land on the
@@ -885,10 +967,24 @@ class Builder:
         the machine time it costs. Anything that is not an upstream failure is
         returned as-is, because repeating it would fail identically.
 
-        The folder from the previous attempt is deliberately left in place: the
-        pipeline scaffolds over it, so the archived posting survives, and the
-        tracker de-dupes on company+role+date, so a row written by an attempt that
-        later fell over is updated rather than doubled.
+        Two conditions on that retry, both of them learned from one run:
+
+        **Nothing is retried once the documents exist.** `CLAUDE.md` renders the
+        CV and cover letter the moment they pass QA and treats Interview Prep as
+        optional after that, and the ready message has already gone out. A drop
+        on the prep step is therefore a finished application with a loose end,
+        not a build to run again — one such retry rebuilt an announced
+        application from step 00 and spent twenty-six minutes arriving back where
+        it started. Returning the failure unretried hands it to `_finish`, which
+        looks on disk, finds the documents, and salvages the run.
+
+        **A partial folder is erased before the next attempt.** The previous
+        design left it for the retry to scaffold over, which holds only while
+        both attempts name the folder identically — and the archiver names it
+        from the role title, so `AWS AI & Data Engineer` on one attempt and
+        `AWS AI Data Engineer` on the next left two folders for one application,
+        the abandoned one reading as an application already sent. Re-capturing
+        the posting costs a minute; a phantom application costs a real one.
 
         Each attempt gets its own log file; the returned one is the last, which
         is the one whose failure is being reported.
@@ -907,7 +1003,7 @@ class Builder:
             if reporter is not None:
                 reporter.begin_attempt(attempt, attempts)
             try:
-                ok, detail = await _spawn(
+                ok, detail, closing = await _spawn(
                     prompt, self.config, log_file,
                     on_event=reporter.feed if reporter is not None else None)
             except Exception:
@@ -915,10 +1011,27 @@ class Builder:
                 # the worker's catch-all, which knows no company and so cannot
                 # clean up.
                 log.exception("build crashed: %s — %s", company, title)
-                return False, "the build crashed, see watcher.log", log_file
+                return False, "the build crashed, see watcher.log", "", log_file
 
             if ok or attempt == attempts or not is_transient(detail):
-                return ok, detail, log_file
+                return ok, detail, closing, log_file
+
+            # Ask the disk before spending another half hour. `_finish` runs the
+            # same check and salvages what it finds, so this only decides whether
+            # there is anything left to do — and if the documents are there, the
+            # answer is no.
+            done = await asyncio.to_thread(
+                locate_output, company, title, self.config)
+            if done.status == DONE:
+                log.info("documents already complete — not retrying %s: %s — %s",
+                         detail, company, title)
+                return ok, detail, closing, log_file
+
+            if done.folder:
+                # Erase the half-application before the next attempt, so the two
+                # cannot end up side by side under slightly different names.
+                await asyncio.to_thread(clean_up, done.folder,
+                                        f"retrying after {detail}")
 
             delay = self.config.build_retry_delay_seconds
             log.warning("transient failure (%s) — retrying in %ds: %s — %s",
@@ -927,12 +1040,12 @@ class Builder:
                 job,
                 f"🔁 <b>Retrying</b> · {label}\n{_escape(detail)}\n"
                 f"<i>Attempt {attempt + 1} of {attempts}, in {delay}s. "
-                "Nothing has been cleaned up yet.</i>",
+                "The partial folder was removed first.</i>",
             )
             await asyncio.sleep(delay)
 
         # for-else territory; unreachable while attempts >= 1.
-        return False, "no build attempt ran", log_file
+        return False, "no build attempt ran", "", log_file
 
     async def _announce_ready(self, job: Job, company: str, title: str,
                               label: str) -> bool:
@@ -1032,18 +1145,18 @@ class Builder:
         verdict = "Interrupted"
         try:
             try:
-                ok, detail, log_file = await self._attempt(
+                ok, detail, closing, log_file = await self._attempt(
                     job, company, title, url, label, reporter)
             finally:
                 announced = await _settle(announcer)
             verdict = await self._finish(job, company, title, label, ok, detail,
-                                         log_file, announced)
+                                         closing, log_file, announced)
         finally:
             if reporter is not None:
                 await reporter.stop(verdict)
 
     async def _finish(self, job: Job, company: str, title: str, label: str,
-                      ok: bool, detail: str, log_file: Path,
+                      ok: bool, detail: str, closing: str, log_file: Path,
                       announced: bool) -> str:
         """Settle a finished run: salvage, clean up, record, report.
 
@@ -1081,10 +1194,34 @@ class Builder:
                                   documents=outcome.documents,
                                   tracker_row=outcome.tracker_row,
                                   announced=announced)
+        elif outcome.status != DONE:
+            # A clean exit with no application. `CLAUDE.md` gives the pipeline
+            # three reasons to stop and ask — a claim the canonical profile does
+            # not support, a posting that cannot be captured, an ambiguous
+            # company name — and tells it to stop rather than invent an answer.
+            # It did exactly that; what failed was this end, which called it
+            # "incomplete: missing CV.pdf, Cover Letter.pdf" and threw the
+            # question away. Whatever the run's last words were, they explain
+            # this better than a list of absent files.
+            #
+            # No attempt is made to tell a stop-and-ask from a run that quietly
+            # produced nothing: both end the same way, both are cleaned up the
+            # same way, and quoting what the build said is the more useful
+            # report either way.
+            log.info("build stopped without documents: %s — %s", company, title)
+            outcome = Outcome(status=NEEDS_DECISION, folder=outcome.folder,
+                              detail=closing or outcome.detail,
+                              documents=outcome.documents,
+                              tracker_row=outcome.tracker_row,
+                              announced=announced)
 
-        if outcome.status in (FAILED, INCOMPLETE):
+        if outcome.status in (FAILED, INCOMPLETE, NEEDS_DECISION):
+            # The reason is a one-line note in the cleanup log, so a stop-and-ask
+            # passes its label rather than the paragraphs it stopped to say.
+            reason = ("the build stopped to ask" if outcome.status == NEEDS_DECISION
+                      else outcome.detail or outcome.status)
             outcome.cleaned = await asyncio.to_thread(
-                clean_up, outcome.folder, outcome.detail or outcome.status)
+                clean_up, outcome.folder, reason)
 
         record = " · ".join(
             part for part in (outcome.detail, outcome.salvaged, outcome.cleaned)
@@ -1098,12 +1235,21 @@ class Builder:
         # of. The caveat about the run not finishing cleanly rides along in the
         # message rather than moving it to Failed, where it would sit next to
         # applications that do not exist.
-        await self._reply(
-            job, result_message(label, outcome, log_file),
-            topic="completed_build" if outcome.status == DONE else "failed_build")
+        # A question belongs where the approval conversation is, not in Failed
+        # among applications that broke — the user answered "yes" in that topic
+        # and this is the pipeline answering back.
+        topic = "failed_build"
+        if outcome.status == DONE:
+            topic = "completed_build"
+        elif outcome.status == NEEDS_DECISION:
+            topic = "targeted_build"
+        await self._reply(job, result_message(label, outcome, log_file),
+                          topic=topic)
 
         if outcome.status == DONE:
             return "Complete" if not outcome.salvaged else "Complete (salvaged)"
+        if outcome.status == NEEDS_DECISION:
+            return "Waiting on you"
         return "Failed" if outcome.status == FAILED else outcome.status.title()
 
 
