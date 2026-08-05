@@ -286,8 +286,36 @@ def evaluate(url: str, script: str, timeout: int = 30) -> Any:
     return _submit(job)
 
 
+#: How long to let a page settle after DOMContentLoaded before reading it, and
+#: the interval between re-reads for one that was not ready by then.
+SETTLE_MS = 800
+#: Below this a page counts as an unrendered shell rather than a short posting.
+#: The shortest real ad body seen is around 2900 characters, and the longest
+#: search-tile teaser 476, so anything under a few hundred is markup and chrome.
+SHELL_CHARS = 200
+#: Longest total wait for a single-page app to fill itself in. Measured against
+#: the pages that were failing: the slowest needed 3.2s, so this is roughly
+#: double the worst observed case and still bounded well inside `timeout`.
+RENDER_BUDGET_MS = 8000
+
+
 def page_text(url: str, wait_selector: str | None = None, timeout: int = 30) -> str:
-    """Rendered visible text of a page. Used for hydrating a posting body."""
+    """Rendered visible text of a page. Used for hydrating a posting body.
+
+    Workday, BambooHR and HiBob serve an empty shell and fill it from an XHR
+    well after DOMContentLoaded, so a single fixed settle lands on a blank page
+    and returns *nothing at all* — 15 of the first 85 hiring.cafe postings were
+    scored on the search-tile teaser for exactly this reason, and their scores
+    came in below the notify cut as a result. hiring.cafe surfaces employers'
+    own ATS pages, so it is the source that meets these worst.
+
+    Re-reading until the text stops growing is what fixes them, rather than a
+    longer fixed wait: a page that is already rendered returns on the first
+    read and pays nothing, and one still assembling itself is not cut off
+    mid-render. That second part matters — one page read 906 characters partway
+    through and 12106 a second later, so "non-empty" is not the same question
+    as "finished".
+    """
     def job(context):
         page = context.new_page()
         try:
@@ -297,8 +325,23 @@ def page_text(url: str, wait_selector: str | None = None, timeout: int = 30) -> 
                     page.wait_for_selector(wait_selector, timeout=timeout * 1000)
                 except Exception:  # noqa: BLE001 - selector drift is expected
                     pass
-            page.wait_for_timeout(800)
-            return page.inner_text("body")
+            page.wait_for_timeout(SETTLE_MS)
+            text = page.inner_text("body")
+            if len(text.strip()) >= SHELL_CHARS:
+                return text
+
+            waited = 0
+            while waited < RENDER_BUDGET_MS:
+                page.wait_for_timeout(SETTLE_MS)
+                waited += SETTLE_MS
+                previous, text = text, page.inner_text("body")
+                # Two equal reads mean the XHR has landed and the page is done.
+                # A page that never gets there — a login wall, a posting taken
+                # down — runs out the budget and returns whatever it had, which
+                # leaves the caller exactly where it is today.
+                if len(text.strip()) >= SHELL_CHARS and text == previous:
+                    break
+            return text
         finally:
             try:
                 page.close()

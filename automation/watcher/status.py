@@ -28,6 +28,7 @@ from .config import (BUILD_SETTINGS_PATH, CONFIG_PATH, DB_PATH, ENV_PATH,
                      env_name, load_config, load_env, load_sources, source_key)
 from .fetchers import source_urls
 from .logsetup import force_utf8
+from .notifier import funnel_rows
 
 WIDTH = 78
 # Lines under a source line up with its name, which starts after the state
@@ -399,6 +400,22 @@ def print_state(config: Config) -> None:
                   f"{cycle.get('notified', 0)} pinged")
     if cycle.get("sources_failed"):
         field("sources failed", ", ".join(str(s) for s in cycle["sources_failed"]))
+
+    sources = cycle.get("sources")
+    if isinstance(sources, dict) and sources:
+        # Uncapped here, unlike `/status`: this report is already 78 columns of
+        # every source and every URL, and the whole reason to run it instead of
+        # asking the bot is to see the lot.
+        rows = funnel_rows(sources)
+        width = max([len(name) for name, *_ in rows] + [6])
+        print()
+        print(f"  {'source'.ljust(width)}     fetch    seen    filt     new")
+        for name, fetched, known, filtered, stored, error in rows:
+            if error:
+                print(f"  {name.ljust(width)}     failed — {error[:44]}")
+            else:
+                print(f"  {name.ljust(width)}  {fetched:8d}{known:8d}"
+                      f"{filtered:8d}{stored:8d}")
 
 
 # --------------------------------------------------------------------------

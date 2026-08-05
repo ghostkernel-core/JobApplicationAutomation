@@ -52,6 +52,15 @@ The second prefilter pass matters more than it looks: StepStone and hiring.cafe 
 search tile's opening sentence, which is *not* empty, so the 800-char floor is what tells a
 teaser from an ad. See `rehydrate` under **Run it** for the back catalogue that predates it.
 
+Fetching the real ad means rendering the employer's own page, and Workday, BambooHR and HiBob
+serve an empty shell that fills from an XHR a second or three after the page reports itself
+loaded. Reading it once on a fixed delay returned *nothing at all* for those, and the teaser was
+kept without anything raising or being logged; hiring.cafe surfaces employers' own ATS pages
+rather than its own, so it met them most often, and 15 of its first 85 postings were scored on a
+teaser. `page_text` now re-reads until the text stops growing, bounded by a budget. A page that
+was already rendered returns on the first read and pays nothing extra, and one that is genuinely
+short — a login wall, a posting taken down — is believed rather than waited out.
+
 ### 2 · Score — same cycle, everything unscored
 
 ```
@@ -537,6 +546,32 @@ counts and today's activity, the timestamps of the newest posting, the last scor
 ping, the unsent bands, source health with any ailing source named, the build queue, the daily
 schedule, and the database size. The cycle is written to sqlite, not just held in memory, so a
 watcher that came back up thirty seconds ago still reports the poll it did before the restart.
+
+Then the same funnel again, split by source:
+
+```
+Per source:
+source             fetch   seen   filt    new
+ats:Broken         failed — HTTPError: 503
+portal:stepstone     277     90    185      2
+ats:Delivery Hero   1062      0   1062      0
+portal:hiringcafe    931    180    751      0
+```
+
+Those totals cannot answer the question anyone actually asks of them, which is never "how many
+listings were dropped" but "why is nothing coming from *that* board". One number covering
+eighteen sources hides the difference between a board returning its whole catalogue and having
+all of it filtered, and a board returning nothing at all: both read `0 new`. A source that
+contributed nothing still gets a row, because the empty ones are the interesting ones, and a
+source that could not be fetched says so rather than reporting a truthful but misleading four
+zeros. Failures sort first, then whatever is producing, then by volume.
+
+The list is capped, with a `+N more` line for the tail, and the block is the first thing dropped
+if the report would otherwise exceed Telegram's message limit — an over-length message is
+rejected outright rather than trimmed, and the funnel is worth less than the rest of the report.
+`watcherctl.py status` prints the same table uncapped. Cycles recorded before this existed have
+no per-source data and show no table, rather than an empty one that would read as "no sources
+configured".
 
 ### /threshold and /recheck
 
