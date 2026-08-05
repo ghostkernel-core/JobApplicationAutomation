@@ -39,11 +39,18 @@ batch_size = 8
 # score >= digest_threshold  -> daily digest line
 # below that                 -> stored silently, visible via `--replay`
 #
-# 60, not 70. Calibrated with `python -m watcher.match --calibrate`: postings
-# already applied to in 2026/ cluster between 60 and 82, while clear misfits
-# (a support role, a US-based posting) sit at 40 or below. A 70 cut would have
-# demoted roughly half the real applications to the evening digest.
-notify_threshold = 75
+# Calibrated with `python -m watcher.match --calibrate`: postings already
+# applied to in 2026/ cluster between 60 and 82, while clear misfits (a support
+# role, a US-based posting) sit at 40 or below. So the honest floor for "worth
+# interrupting someone about" is somewhere in the 60s, and everything from 40 up
+# is worth seeing eventually.
+#
+# 70 is the cut, matching the default in watcher/config.py. It is deliberately
+# above the bottom of that cluster: the 60-70 slice is real but not urgent, and
+# it now reaches the evening digest intact rather than being lost — which was
+# not true while the digest was silently failing on its own length. Lower this
+# toward 60 to trade quiet for immediacy.
+notify_threshold = 70
 digest_threshold = 40
 # How much of the job description is handed to the matcher.
 description_chars = 4000
