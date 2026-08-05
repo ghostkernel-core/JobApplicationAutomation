@@ -73,9 +73,9 @@ snooze_days = 7
 # Leave them all at 0 (or delete the section) and every message goes to the chat
 # exactly as it always has — this is purely additive.
 #
-# To find an id: open the topic in Telegram Web and read the number after the
-# chat id in the URL, or forward a message from it to @RawDataBot and take
-# `message_thread_id`. Any topic you leave at 0 falls back to General.
+# To find the ids: run `python -m watcher.whoami` and post a message in each
+# topic you want to use — it prints a thread id for every topic it hears from.
+# Any topic you leave at 0 falls back to General.
 #
 #   new_posting      instant pings and the evening digest
 #   targeted_build   a posting you replied "yes" to, filed as a record of the

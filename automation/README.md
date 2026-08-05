@@ -71,7 +71,7 @@ Underneath, the entrypoint is still directly usable, and every sub-command below
 | `-m watcher.matcher --rescore-degraded` | drop the fallback verdicts left by a scoring outage so the next cycle judges those postings properly |
 | `-m watcher.dedupe_check --company Deluxe --role "AI Engineer"` | "have I already applied?" |
 | `-m watcher.discover --company X` | probe ATS providers for a company's board token |
-| `-m watcher.whoami` | print the chat id of whoever messages the bot next |
+| `-m watcher.whoami` | print the chat id of whoever messages the bot next, and a thread id for every forum topic it hears from |
 | `-m watcher.health` | per-source failure counts and time to the next auto-retry; `--reset <source>` re-enables a disabled one immediately |
 | `-m watcher.status` | every watched board and portal with its URL, then every setting in force |
 | `-m watcher.builder --posting <id> --dry-run` | print argv, cwd, prompt, and dedupe verdict; spawn nothing |
@@ -233,9 +233,17 @@ failed_build    = 0    # a build that failed, and any retraction
 completed_build = 0    # the application is ready, and the run is complete
 ```
 
-To find a thread id, open the topic in Telegram Web — the last number in the URL
-(`.../#-1001234567890_25` → `25`) — or forward one of its messages to `@RawDataBot` and read
-`message_thread_id`.
+To find the ids, run the same tool that finds the chat id and post a message in each topic you
+want to use:
+
+```powershell
+python -m watcher.whoami
+```
+
+It prints the chat id on the first message, then a thread id for every topic it hears from —
+one pass fills in the whole section. General reports as having no thread id, which is correct:
+that is the fallback, and where the commands below are answered. (Telegram Web's URL also ends
+in the thread id, `.../#-1001234567890_25` → `25`, if you would rather read it off there.)
 
 Everything here is optional and independent:
 
