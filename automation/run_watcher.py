@@ -502,14 +502,17 @@ def build_app(notifier: Notifier) -> Application:
     # first=10 so a restart proves itself quickly instead of going quiet for
     # the whole interval.
     queue.run_repeating(poll_job, interval=config.interval_minutes * 60, first=10)
-    queue.run_daily(digest_job, time=local_time(config.digest_hour, 5))
-    queue.run_daily(heartbeat_job, time=local_time(config.heartbeat_hour, 15))
+    # The minutes come from config with the hour attached — see `digest_at`.
+    # Registering one here and reporting another in `/status` is a bug the chat
+    # reads as a late job.
+    queue.run_daily(digest_job, time=local_time(*config.digest_at))
+    queue.run_daily(heartbeat_job, time=local_time(*config.heartbeat_at))
     if config.kb_enabled:
         # `[kb] weekday` follows `date.weekday()` (0 = Monday), because that is
         # what Python means by a weekday everywhere else in this codebase.
         # JobQueue.run_daily counts 0 = Sunday, so it is shifted here rather
         # than leaving the config off by one day.
-        queue.run_daily(kb_job, time=local_time(config.kb_hour, 25),
+        queue.run_daily(kb_job, time=local_time(*config.kb_at),
                         days=((config.kb_weekday + 1) % 7,))
     return app
 

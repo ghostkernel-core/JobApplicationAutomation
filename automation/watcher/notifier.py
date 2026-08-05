@@ -21,7 +21,7 @@ from telegram import Bot
 from telegram.constants import ParseMode
 
 from . import roles, store
-from .config import TOPIC_KINDS, Config, load_config, require_env
+from .config import TOPIC_KINDS, Config, clock, load_config, require_env
 
 log = logging.getLogger("watcher.notify")
 
@@ -312,7 +312,7 @@ def format_status(config: Config, cycle: dict[str, int],
         f"Sources: {' · '.join(health)}",
         f"Builds: {build_line}",
         f"Every {config.interval_minutes} min · digest "
-        f"{config.digest_hour:02d}:00 · heartbeat {config.heartbeat_hour:02d}:00",
+        f"{clock(config.digest_at)} · heartbeat {clock(config.heartbeat_at)}",
         f"Ping at ≥{config.notify_threshold}, digest at "
         f"≥{config.digest_threshold}",
     ]

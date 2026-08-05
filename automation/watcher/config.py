@@ -94,6 +94,27 @@ TOPIC_KINDS: tuple[str, ...] = (
     "completed_build",   # the application is ready, and the run is complete
 )
 
+# The minute each daily job runs at, past its configured hour. Staggered so that
+# three of them can never land on the same tick, and off the hour because the
+# poll cycle starts ten seconds after boot and repeats from there — a digest
+# sharing an instant with a sweep of four thousand postings makes one wait on
+# the other.
+#
+# Config gives out (hour, minute) pairs built from these rather than exposing
+# the hour alone, because the scheduler is not the only reader: `/status` and
+# `watcherctl status` both quote these times back. When the minutes lived at the
+# `run_daily` call sites, both reports advertised a flat ":00" and the morning
+# heartbeat looked fifteen minutes late against a status line promising 09:00.
+DIGEST_MINUTE = 5
+HEARTBEAT_MINUTE = 15
+KB_MINUTE = 25
+
+
+def clock(at: tuple[int, int]) -> str:
+    """One of those (hour, minute) pairs as "HH:MM", for display."""
+    hour, minute = at
+    return f"{hour:02d}:{minute:02d}"
+
 
 def ensure_dirs() -> None:
     """Create the runtime directories. Safe to call repeatedly."""
@@ -279,6 +300,22 @@ class Config:
         return self._num("notify", self.notify, "heartbeat_hour", 9)
 
     @property
+    def digest_at(self) -> tuple[int, int]:
+        """(hour, minute) the evening digest runs at, local time.
+
+        The pairing happens here so no caller can do it differently: the
+        scheduler and the two status reports all read this one property, and a
+        report that quotes a different minute from the one actually registered
+        is indistinguishable, from the chat, from a job running late.
+        """
+        return self.digest_hour, DIGEST_MINUTE
+
+    @property
+    def heartbeat_at(self) -> tuple[int, int]:
+        """(hour, minute) the daily heartbeat runs at, local time."""
+        return self.heartbeat_hour, HEARTBEAT_MINUTE
+
+    @property
     def snooze_days(self) -> int:
         return self._num("notify", self.notify, "snooze_days", 7)
 
@@ -400,6 +437,11 @@ class Config:
     @property
     def kb_hour(self) -> int:
         return self._num("kb", self.kb, "hour", 18)
+
+    @property
+    def kb_at(self) -> tuple[int, int]:
+        """(hour, minute) the weekly kb pass runs at, local time."""
+        return self.kb_hour, KB_MINUTE
 
     @property
     def kb_min_decisions(self) -> int:
