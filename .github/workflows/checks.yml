@@ -111,6 +111,15 @@ jobs:
       - name: Compile Python sources
         run: python -m compileall -q scripts automation/watcher automation/hooks
 
+      - name: Build guard self-test
+        # The guard is the only thing standing between a headless build and the
+        # rest of the disk, and it has no test file of its own — the case table
+        # lives inside the hook. Runs before the dependency install because it
+        # imports nothing but the standard library. The drive-letter containment
+        # cases are Windows-shaped and report themselves as skipped here.
+        working-directory: automation
+        run: python hooks/guard.py --self-test
+
       - name: Install watcher dependencies
         run: python -m pip install --quiet -r automation/requirements.txt
 
