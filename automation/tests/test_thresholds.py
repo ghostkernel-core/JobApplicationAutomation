@@ -401,3 +401,86 @@ def test_recheck_does_not_rescore(db, monkeypatch) -> None:
     _scored(db, 90)
     _run(run_watcher.on_recheck, _App(_Notifier()))
     assert called == []
+
+
+# --------------------------------------------------------------------------
+# /rescore — the one that does re-judge
+# --------------------------------------------------------------------------
+#
+# `/threshold` and `/recheck` move the bar and send what clears it; neither
+# touches a verdict. `/rescore` is the exception, and it exists because of the
+# one case a bar cannot reach: a posting whose verdict was never a judgement at
+# all. Scoring fails, the matcher retries, the retries run out, and the fallback
+# 45/`maybe` is written as though it meant something. From that moment the
+# posting is invisible to every other command here — it is scored, so no cut
+# re-qualifies it and no cycle re-selects it. One outage did that to 25 roles in
+# an afternoon, twelve of which scored `strong` the moment they were re-judged.
+
+def _degraded(db, *titles: str) -> None:
+    """Postings parked at the fallback, as an exhausted retry leaves them."""
+    with store.connect() as conn:
+        for index, title in enumerate(titles):
+            posting = Posting(source="ats:Acme", provider="greenhouse",
+                              source_job_id=f"d{index}",
+                              url=f"https://example.com/d{index}",
+                              company="Acme", title=title)
+            store.insert_posting(conn, posting)
+            store.save_verdict(conn, posting.fingerprint,
+                               run_watcher.matcher._FALLBACK, "haiku")
+            store.bump_score_attempt(conn, posting.fingerprint, "upstream 503")
+
+
+def test_rescore_puts_the_parked_postings_back(db) -> None:
+    _degraded(db, "Senior Data Engineer")
+    replies = _run(run_watcher.on_rescore, _App(_Notifier()))
+
+    with store.connect() as conn:
+        assert len(store.unscored(conn)) == 1
+        assert store.degraded_verdict_ids(conn) == []
+    assert "1" in replies[0] and "Senior Data Engineer" in replies[0]
+
+
+def test_rescore_names_what_it_re_queued(db) -> None:
+    """The list is the point — it is how the user sees what the outage cost."""
+    _degraded(db, "Senior Data Engineer", "AI Platform Engineer")
+    replies = _run(run_watcher.on_rescore, _App(_Notifier()))
+    assert "Senior Data Engineer" in replies[0]
+    assert "AI Platform Engineer" in replies[0]
+
+
+def test_a_long_recovery_is_summarised_rather_than_dumped(db) -> None:
+    over = run_watcher.MAX_RESCORE_LIST + 4
+    _degraded(db, *(f"Role {i}" for i in range(over)))
+    replies = _run(run_watcher.on_rescore, _App(_Notifier()))
+
+    assert f"{over} posting(s)" in replies[0]
+    assert "and 4 more" in replies[0]
+    assert len(replies[0]) < 4096  # TELEGRAM_MAX_CHARS
+
+
+def test_rescore_leaves_a_real_verdict_alone(db) -> None:
+    """A genuine 45/`maybe` is a result, not a failure to produce one."""
+    _scored(db, 45)
+    replies = _run(run_watcher.on_rescore, _App(_Notifier()))
+
+    with store.connect() as conn:
+        assert store.unscored(conn) == []
+    assert "Nothing to re-score" in replies[0]
+
+
+def test_rescore_scores_nothing_itself(db, monkeypatch) -> None:
+    """Twenty-five postings take over ten minutes to judge. The poll loop owns
+    that; a chat command must not hold a connection open through it."""
+    called = []
+    monkeypatch.setattr(run_watcher.matcher, "match_pending",
+                        lambda *a, **k: called.append(1))
+    _degraded(db, "Senior Data Engineer")
+    _run(run_watcher.on_rescore, _App(_Notifier()))
+    assert called == []
+
+
+def test_a_broken_store_is_reported_not_swallowed(db, monkeypatch) -> None:
+    monkeypatch.setattr(run_watcher.store, "degraded_verdict_ids",
+                        lambda *a: (_ for _ in ()).throw(RuntimeError("locked")))
+    replies = _run(run_watcher.on_rescore, _App(_Notifier()))
+    assert "failed" in replies[0]

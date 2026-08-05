@@ -360,6 +360,11 @@ def print_state(config: Config) -> None:
                     f"{snap['pending']} still pending"
                     + (f", {snap['retrying']} retrying" if snap["retrying"] else "")
                     + ")")
+    if snap["unjudged"]:
+        # Not a queue — see the same line in the Telegram report. These are
+        # done, at a score nobody meant, and only `rescore` undoes that.
+        field("unjudged", f"{snap['unjudged']}  (scoring failed and the retries "
+                          f"ran out — `watcherctl rescore` re-queues them)")
     field("notifications sent", f"{snap['notified']}  "
                                 f"({snap['notified_today']} today)")
     field("replies recorded", snap["decisions"])

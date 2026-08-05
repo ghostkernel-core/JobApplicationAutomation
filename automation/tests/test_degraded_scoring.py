@@ -222,3 +222,63 @@ def test_nothing_useful_says_so_rather_than_returning_empty():
 
 def test_detail_is_length_capped():
     assert len(claude_cli.failure_detail("x" * 5000, "", limit=200)) == 200
+
+
+# --------------------------------------------------------------------------
+# and what the status report says about them
+# --------------------------------------------------------------------------
+#
+# The counts are the only way anyone sees this from outside, and they were
+# telling two different stories about the same postings. An outage parked 25 of
+# them, and `/status` then read `25 retrying · 25 unjudged` for hours — one half
+# of the line promising the watcher was still working on them, the other half
+# correct. Nothing was retrying: they had run out of attempts, and their
+# `score_attempts` rows simply outlived the loop that wrote them.
+
+def snapshot(conn) -> dict:
+    return store.snapshot(conn, notify_threshold=65, digest_threshold=40)
+
+
+def test_a_posting_still_in_the_retry_loop_counts_as_retrying(conn):
+    pid = add_posting(conn, "p1")
+    persist(conn, pid, matcher._degraded("upstream 503"))
+
+    snap = snapshot(conn)
+    assert (snap["retrying"], snap["unjudged"]) == (1, 0)
+    assert snap["pending"] == 1  # the next cycle really will pick it up
+
+
+def test_a_posting_out_of_attempts_is_unjudged_not_retrying(conn):
+    """The regression. Its attempt row survives; it is not being retried."""
+    pid = add_posting(conn, "p1")
+    for _ in range(FakeConfig.max_score_attempts):
+        persist(conn, pid, matcher._degraded("upstream 503"))
+
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM score_attempts").fetchone()["c"] == 1
+    snap = snapshot(conn)
+    assert (snap["retrying"], snap["unjudged"]) == (0, 1)
+    assert snap["pending"] == 0  # nothing will pick it up again
+
+
+def test_the_two_counts_never_describe_the_same_posting(conn):
+    """One held back, one written off — one of each, not two of both."""
+    held, done = add_posting(conn, "p1"), add_posting(conn, "p2")
+    persist(conn, held, matcher._degraded("blip"))
+    for _ in range(FakeConfig.max_score_attempts):
+        persist(conn, done, matcher._degraded("blip"))
+
+    snap = snapshot(conn)
+    assert (snap["retrying"], snap["unjudged"]) == (1, 1)
+
+
+def test_rescore_clears_both_counts(conn):
+    pid = add_posting(conn, "p1")
+    for _ in range(FakeConfig.max_score_attempts):
+        persist(conn, pid, matcher._degraded("blip"))
+
+    store.clear_degraded_verdicts(conn)
+
+    snap = snapshot(conn)
+    assert (snap["retrying"], snap["unjudged"]) == (0, 0)
+    assert snap["pending"] == 1

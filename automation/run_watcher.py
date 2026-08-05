@@ -12,9 +12,10 @@ Fetching is blocking (requests) and scoring shells out to the CLI, so both run
 in worker threads; the loop stays free to answer a reply while a poll is still
 in flight.
 
-Four commands are answered from the chat itself — `/status`, `/threshold`,
-`/recheck` and `/restart` — but only outside the posting topics, so a mis-sent
-command inside one is still read as a reply to the posting it was sent under.
+Five commands are answered from the chat itself — `/status`, `/threshold`,
+`/recheck`, `/rescore` and `/restart` — but only outside the posting topics, so
+a mis-sent command inside one is still read as a reply to the posting it was
+sent under.
 """
 
 from __future__ import annotations
@@ -410,6 +411,11 @@ async def on_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 #: of stored postings at once, and a phone does not survive that.
 MAX_RECHECK_PINGS = 20
 
+#: How many re-queued postings `/rescore` names before it summarises the rest.
+#: Every one of them is re-scored either way — this is only about not turning a
+#: recovery into a wall of text on a phone.
+MAX_RESCORE_LIST = 15
+
 THRESHOLDS = {
     "ping": ("notify_threshold", "instant ping"),
     "digest": ("digest_threshold", "evening digest"),
@@ -597,6 +603,63 @@ async def on_recheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await message.reply_html("\n".join(lines))
 
 
+async def on_rescore(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/rescore` — put back the postings the scorer never managed to judge.
+
+    A posting that fails to score is held back and retried, but only
+    `max_score_attempts` times; after that the fallback 45/`maybe` is written as
+    if it were a real verdict. That is right when the posting is genuinely
+    unreadable and wrong when the upstream API was simply down — one outage
+    parked twenty-five Data and AI engineering roles in a single afternoon, and
+    they stayed parked, because a posting with a verdict row is never re-selected
+    by `store.unscored()`. No amount of the API recovering brings them back.
+
+    So this drops those verdicts, and the attempt counters with them, which puts
+    the postings back in front of the next cycle with a clean budget. Only
+    verdicts carrying the scorer's own "I could not judge this" marker are
+    touched — a real 45/`maybe` is a real result and stays.
+
+    The scoring itself is left to that cycle rather than done here. Twenty-five
+    postings take well over ten minutes to judge; a chat command should not sit
+    on a connection for that long when the poll loop already does it in the
+    background.
+    """
+    message = update.effective_message
+    if message is None:
+        return
+    notifier: Notifier = context.application.bot_data["notifier"]
+    config = notifier.config
+
+    try:
+        with store.connect() as conn:
+            ids = store.degraded_verdict_ids(conn)
+            rows = list(conn.execute(
+                f"SELECT company, title FROM postings WHERE id IN "
+                f"({','.join('?' * len(ids))}) ORDER BY company", ids
+            )) if ids else []
+            cleared = store.clear_degraded_verdicts(conn)
+    except Exception:
+        log.exception("rescore failed")
+        await message.reply_html("⚠️ The re-score failed — see watcher.log.")
+        return
+
+    if not cleared:
+        await message.reply_html(
+            "Nothing to re-score — every posting on record carries a verdict "
+            "the scorer actually stood behind.")
+        return
+
+    lines = [f"🔁 <b>Re-queued {cleared} posting(s)</b> the scorer could not "
+             f"judge.", ""]
+    shown = rows[:MAX_RESCORE_LIST]
+    lines += [f"• {_escape(r['company'])} — {_escape(r['title'])}" for r in shown]
+    if len(rows) > len(shown):
+        lines.append(f"• …and {len(rows) - len(shown)} more")
+    lines.append(f"\n<i>They are scored on the next poll, within "
+                 f"{config.interval_minutes} minutes.</i>")
+    await message.reply_html("\n".join(lines))
+
+
 async def on_restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """`/restart` — bring the watcher back up on the current config.
 
@@ -692,6 +755,7 @@ BOT_COMMANDS = [
     ("status", "is it alive, and what has it been doing"),
     ("threshold", "read or move the score cuts"),
     ("recheck", "send anything qualifying under the current cut"),
+    ("rescore", "re-queue the postings the scorer could not judge"),
     ("restart", "bring the watcher back up on the current config"),
 ]
 
@@ -745,6 +809,7 @@ def build_app(notifier: Notifier) -> Application:
     app.add_handler(CommandHandler("status", on_status, filters=general))
     app.add_handler(CommandHandler("threshold", on_threshold, filters=general))
     app.add_handler(CommandHandler("recheck", on_recheck, filters=general))
+    app.add_handler(CommandHandler("rescore", on_rescore, filters=general))
     app.add_handler(CommandHandler("restart", on_restart, filters=general))
     app.add_handler(MessageHandler(chat_only & filters.REPLY & filters.TEXT, on_reply))
     app.add_handler(MessageHandler(chat_only & filters.TEXT & ~filters.COMMAND

@@ -299,6 +299,7 @@ a mis-sent reply than a question. They are published to Telegram's own `/` menu 
 /threshold digest 30     move the digest cut
 /recheck                 send anything qualifying under the current cut
 /recheck 50              …with a different cap for this run
+/rescore                 re-queue the postings the scorer could not judge
 /restart                 restart the watcher process
 /restart force           …even with a build running
 ```
@@ -344,6 +345,31 @@ evening digest, exactly as instant-ping overflow does during a normal poll.
 
 Postings that have never been scored are a different problem and are left to the next cycle,
 which does that in the background.
+
+### /rescore
+
+The one command here that does change a verdict, for the one case the cuts cannot reach.
+
+When scoring fails, the posting is held back and tried again on later cycles — but only
+`[match] max_score_attempts` times. After that the fallback 45/`maybe` is written as if it were
+a real judgement, because a posting that has failed three times is usually an unreadable
+posting rather than bad weather. When it *was* the weather, that write is unrecoverable by any
+other route: `store.unscored()` only selects postings with no verdict row, so the posting is
+never re-judged, and 45 sits below the digest cut so it is never mentioned either. An API
+outage on 5 August parked 25 Data and AI engineering roles that way in about twenty seconds.
+Twelve of them scored `strong` — up to 82 — the moment they were re-judged.
+
+`/rescore` drops those verdicts and their attempt counters, which puts the postings in front of
+the next cycle with a clean budget. Only verdicts carrying the scorer's own "could not judge
+this" marker are touched, so a genuine 45/`maybe` survives. The scoring itself is left to that
+cycle: 25 postings take over ten minutes, which is not something to hold a chat connection open
+through.
+
+`/status` counts these separately as **unjudged**, and says so — a bare number next to
+"retrying" read as a queue that was still moving. `retrying` now counts only postings that
+really will be tried again (an attempt row and no verdict yet); a posting that ran out of
+attempts is unjudged, not retrying. The two counts previously described the same 25 postings in
+contradictory terms.
 
 ### /restart
 
