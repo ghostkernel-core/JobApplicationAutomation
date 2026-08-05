@@ -24,8 +24,8 @@ from typing import Any, Iterable
 from . import store
 from .config import (BUILD_SETTINGS_PATH, CONFIG_PATH, DB_PATH, ENV_PATH,
                      LOG_DIR, PROFILE_KB_PATH, PROFILE_DIGEST_PATH, REPO_ROOT,
-                     SOURCES_PATH, Config, Sources, env_name, load_config,
-                     load_env, load_sources, source_key)
+                     SOURCES_PATH, TOPIC_KINDS, Config, Sources, env_name,
+                     load_config, load_env, load_sources, source_key)
 from .fetchers import source_urls
 from .logsetup import force_utf8
 
@@ -272,6 +272,15 @@ def print_behaviour(config: Config) -> None:
     field("heartbeat", f"{config.heartbeat_hour:02d}:00 local",
           env_note("notify", "heartbeat_hour"))
     field("snooze (\"later\")", f"{config.snooze_days} days", env_note("notify", "snooze_days"))
+    if config.topics_enabled:
+        # Only shown once routing is on. In a plain chat there is nothing here
+        # to be in force, and a block of "→ General" would be five lines saying
+        # the feature is off.
+        field("topics", "routed by kind — anything unset goes to General")
+        for kind in TOPIC_KINDS:
+            thread = config.topic_for(kind)
+            field(f"  {kind}", str(thread) if thread else "General",
+                  env_note("notify_topics", kind))
 
     rule("HEADLESS BUILDS")
     field("enabled", "yes — an approval reply spawns a run"

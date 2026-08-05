@@ -87,11 +87,11 @@ snooze_days = 7
 # Everything else — the heartbeat, source alerts, the weekly rules proposal, the
 # interrupted-build notice — stays in General, beside /status and /restart, which
 # are only answered from there.
-new_posting = 0
-targeted_build = 0
-processing_build = 0
-failed_build = 0
-completed_build = 0
+new_posting = 159
+targeted_build = 162
+processing_build = 172
+failed_build = 165
+completed_build = 168
 
 [build]
 # While false, an approval reply is recorded but no headless build is spawned.
