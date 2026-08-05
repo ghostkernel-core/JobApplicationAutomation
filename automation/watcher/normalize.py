@@ -35,13 +35,24 @@ TRACKING_PARAMS = {
 
 # Corporate suffixes that differ between how a company writes itself on its own
 # job board and how an aggregator writes it.
+#
+# No entry here may contain punctuation. `company_key` replaces every non
+# alphanumeric character with a space before it tokenises, so a `"b.v."` entry
+# could never match anything — the dotted form arrives as the two tokens `b` and
+# `v`. Dotted abbreviations are folded back together instead (see DOTTED_ABBREV),
+# which is what makes the `bv`/`nv`/`sa`/`as` entries below actually fire.
 LEGAL_SUFFIXES = {
-    "gmbh", "ag", "se", "kg", "kgaa", "ohg", "mbh", "ug",
-    "inc", "inc.", "llc", "ltd", "ltd.", "limited", "plc", "corp", "corporation",
-    "bv", "b.v.", "nv", "n.v.", "sa", "s.a.", "as", "a.s.", "ab", "oy", "aps",
-    "co", "co.", "company", "group", "holding", "holdings", "international",
+    "gmbh", "ag", "aktiengesellschaft", "se", "kg", "kgaa", "ohg", "mbh", "ug",
+    "inc", "llc", "ltd", "limited", "plc", "corp", "corporation",
+    "bv", "nv", "sa", "as", "ab", "oy", "aps",
+    "co", "company", "group", "holding", "holdings", "international",
     "deutschland", "germany", "europe", "eu",
 }
+
+# A run of single letters each followed by a dot: `B.V.`, `N.V.`, `S.A.`, `A.S.`.
+# Folded to `bv`, `nv`, … so they reach LEGAL_SUFFIXES as one token. Requiring at
+# least two groups is what keeps an ordinary sentence-ending initial out of it.
+DOTTED_ABBREV = re.compile(r"(?:\b[a-z]\.){2,}")
 
 # German job ads bolt a gender tag onto nearly every title.
 GENDER_TAG = re.compile(
@@ -75,8 +86,15 @@ def strip_accents(value: str) -> str:
 
 
 def company_key(name: str) -> str:
-    """Employer identity, insensitive to spelling, legal form, and accents."""
+    """Employer identity, insensitive to spelling, legal form, and accents.
+
+    The legal form has to go, and go in every spelling the same employer uses.
+    A posting said `PFALZWERKE AKTIENGESELLSCHAFT` while the application folder
+    said `PFALZWERKE`; the two keyed differently, so a finished application was
+    reported as a failed build and would not have blocked a rebuild either.
+    """
     text = strip_accents(name or "").casefold()
+    text = DOTTED_ABBREV.sub(lambda m: m.group(0).replace(".", ""), text)
     text = re.sub(r"[^a-z0-9\s]", " ", text)
     tokens = [t for t in text.split() if t and t not in LEGAL_SUFFIXES]
     if not tokens:  # a name made entirely of suffixes — keep something
