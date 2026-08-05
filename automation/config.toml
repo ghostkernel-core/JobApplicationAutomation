@@ -68,6 +68,31 @@ heartbeat_hour = 9
 # Snooze duration for a "later" reply.
 snooze_days = 7
 
+[notify.topics]
+# Forum topic ids, if TELEGRAM_CHAT_ID points at a group with topics turned on.
+# Leave them all at 0 (or delete the section) and every message goes to the chat
+# exactly as it always has — this is purely additive.
+#
+# To find an id: open the topic in Telegram Web and read the number after the
+# chat id in the URL, or forward a message from it to @RawDataBot and take
+# `message_thread_id`. Any topic you leave at 0 falls back to General.
+#
+#   new_posting      instant pings and the evening digest
+#   targeted_build   a posting you replied "yes" to, filed as a record of the
+#                    decision — this one sends nothing at all until it is set
+#   processing_build queued, building, retrying, or declined as a duplicate
+#   failed_build     a build that failed, and any retraction of a ready message
+#   completed_build  the application is ready, and the run is complete
+#
+# Everything else — the heartbeat, source alerts, the weekly rules proposal, the
+# interrupted-build notice — stays in General, beside /status and /restart, which
+# are only answered from there.
+new_posting = 0
+targeted_build = 0
+processing_build = 0
+failed_build = 0
+completed_build = 0
+
 [build]
 # While false, an approval reply is recorded but no headless build is spawned.
 # Builds run with bypassPermissions, guarded by build_settings.json and

@@ -113,10 +113,13 @@ class _Builder:
     def __init__(self, ok: bool, detail: str, announce: bool) -> None:
         self.config = _Config()
         self.sent: list[str] = []
+        self.topics: list[str] = []
         self._ok, self._detail, self._announce = ok, detail, announce
 
-    async def _reply(self, job, text: str) -> None:
+    async def _reply(self, job, text: str,
+                     topic: str = "processing_build") -> None:
         self.sent.append(text)
+        self.topics.append(topic)
 
     async def _announce_ready(self, job, company, title, label) -> bool:
         if self._announce:

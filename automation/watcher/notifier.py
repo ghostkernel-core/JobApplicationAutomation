@@ -11,6 +11,7 @@ cannot produce a second ping.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 import sqlite3
@@ -20,7 +21,7 @@ from telegram import Bot
 from telegram.constants import ParseMode
 
 from . import roles, store
-from .config import Config, load_config, require_env
+from .config import TOPIC_KINDS, Config, load_config, require_env
 
 log = logging.getLogger("watcher.notify")
 
@@ -211,6 +212,116 @@ def format_kb_proposal(proposal: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_targeted(company: str, title: str, url: str, score: int | None,
+                    note: str, when: dt.datetime | None = None) -> str:
+    """An approved posting, written into the Targeted Build topic as a record.
+
+    Deliberately self-contained rather than a copy of the original ping. The
+    ping lives in another topic and says nothing about the approval; what makes
+    this row worth keeping is the decision — when it was taken and with what
+    instruction — beside the link it was taken on.
+    """
+    stamp = (when or dt.datetime.now()).strftime("%d %b %H:%M")
+    lines = [f"✅ <b>{_escape(company)}</b> — {_escape(title)}"]
+    detail = f"approved {stamp}"
+    if score is not None:
+        detail = f"score {score} · {detail}"
+    lines.append(f"<i>{detail}</i>")
+    if note:
+        lines.append(f"📝 {_escape(note)}")
+    if url:
+        lines.append(_escape(url))
+    return "\n".join(lines)
+
+
+def _uptime(since: dt.datetime | None) -> str:
+    if since is None:
+        return "unknown"
+    seconds = max(0, int((dt.datetime.now() - since).total_seconds()))
+    days, rest = divmod(seconds, 86400)
+    hours, rest = divmod(rest, 3600)
+    if days:
+        return f"{days}d {hours}h"
+    minutes = rest // 60
+    return f"{hours}h {minutes}m" if hours else f"{minutes}m"
+
+
+def _source_tally() -> tuple[int, int, int, int] | None:
+    """(ok, failing, disabled, parked) across every source with health on record.
+
+    None when the database cannot be read. `/status` is answered on demand and
+    is often the thing someone reaches for *because* something is wrong, so one
+    unreadable line has to cost that line and nothing else.
+    """
+    ok = failing = disabled = parked = 0
+    try:
+        with store.connect() as conn:
+            rows = store.source_health(conn)
+    except Exception:
+        log.exception("could not read source health")
+        return None
+    for row in rows:
+        if row["disabled"]:
+            if store.row_is_parked(row):
+                parked += 1
+            else:
+                disabled += 1
+        elif row["consecutive_failures"]:
+            failing += 1
+        else:
+            ok += 1
+    return ok, failing, disabled, parked
+
+
+def format_status(config: Config, cycle: dict[str, int],
+                  builds: dict[str, int], since: dt.datetime | None) -> str:
+    """The watcher on a phone screen, for `/status`.
+
+    Not `watcher.status`, which prints a 78-column terminal report of every
+    source, URL and setting. That answers "what is this configured to do"; this
+    answers "is it alive and what has it been doing", which is the question
+    someone asks from their phone.
+    """
+    tally = _source_tally()
+    if tally is None:
+        health = ["unreadable — see watcher.log"]
+    else:
+        ok, failing, disabled, parked = tally
+        health = [f"{ok} ok"]
+        if failing:
+            health.append(f"{failing} failing")
+        if disabled:
+            health.append(f"{disabled} disabled")
+        if parked:
+            health.append(f"{parked} parked")
+
+    running = builds.get("running", 0)
+    queued = builds.get("queued", 0)
+    if not config.build_enabled:
+        build_line = "off — approvals recorded, nothing built"
+    elif running or queued:
+        build_line = f"{running} running, {queued} queued"
+    else:
+        build_line = "idle"
+
+    lines = [
+        f"📡 <b>Watcher</b> · up {_uptime(since)}",
+        f"Last cycle: {cycle.get('fetched', 0)} fetched · "
+        f"{cycle.get('stored', 0)} new · {cycle.get('notified', 0)} pinged"
+        if cycle else "Last cycle: none yet this run",
+        f"Sources: {' · '.join(health)}",
+        f"Builds: {build_line}",
+        f"Every {config.interval_minutes} min · digest "
+        f"{config.digest_hour:02d}:00 · heartbeat {config.heartbeat_hour:02d}:00",
+        f"Ping at ≥{config.notify_threshold}, digest at "
+        f"≥{config.digest_threshold}",
+    ]
+    if config.topics_enabled:
+        lines.append(f"<i>Topics: {len(config.topics)} of "
+                     f"{len(TOPIC_KINDS)} routed</i>")
+    return "\n".join(lines)
+
+
 class Notifier:
     def __init__(self, config: Config | None = None) -> None:
         # Held as an override rather than a snapshot: with none passed, `config`
@@ -229,10 +340,26 @@ class Notifier:
     def bot(self) -> Bot:
         return self._bot
 
-    async def send(self, text: str, reply_to: int | None = None) -> int:
+    async def send(self, text: str, reply_to: int | None = None,
+                   topic: str | None = None) -> int:
+        """Send one message, routed to `topic`'s thread if one is configured.
+
+        `topic` is a kind from `TOPIC_KINDS`, not a thread id — the mapping is
+        config's to own, so an unconfigured kind quietly resolves to None and
+        the message lands in General exactly as it always did.
+
+        The reply is dropped when a thread is chosen, and only then. Telegram
+        rejects `reply_to_message_id` outright when the message being replied to
+        lives in a different topic, and it is the whole send that fails, not
+        just the threading — so a build report would vanish rather than arrive
+        unthreaded. Every message that carries a reply also names its posting in
+        the text, which is what identifies it once the two are separated.
+        """
+        thread = self.config.topic_for(topic)
         message = await self._bot.send_message(
             chat_id=self.chat_id, text=text, parse_mode=ParseMode.HTML,
-            reply_to_message_id=reply_to,
+            message_thread_id=thread,
+            reply_to_message_id=None if thread is not None else reply_to,
             disable_web_page_preview=True,
         )
         return message.message_id
@@ -248,7 +375,8 @@ class Notifier:
         sent = 0
         for row in rows[:limit]:
             try:
-                message_id = await self.send(format_instant(row))
+                message_id = await self.send(format_instant(row),
+                                             topic="new_posting")
             except Exception as exc:  # network, rate limit, bad markup
                 log.error("failed to notify %s (%s): %s", row["company"], row["id"], exc)
                 continue
@@ -274,7 +402,9 @@ class Notifier:
         sent = 0
         for number, (text, batch) in enumerate(chunks, start=1):
             try:
-                message_id = await self.send(text)
+                # Same topic as an instant ping: a digest line is a posting the
+                # user has not seen yet, only a quieter one.
+                message_id = await self.send(text, topic="new_posting")
             except Exception as exc:  # network, rate limit, bad markup
                 # Recorded per part, so a rejected one costs only its own rows:
                 # the rest still go out, and these stay in the band for the next
@@ -290,12 +420,39 @@ class Notifier:
             log.info("digest sent as %d part(s)", len(chunks))
         return sent
 
-    async def send_notice(self, text: str) -> None:
-        """Operational message — source failure, heartbeat, build result."""
+    async def send_notice(self, text: str, topic: str | None = None) -> None:
+        """Operational message — source failure, heartbeat, build result.
+
+        Untopiced by default, which puts source alerts, the heartbeat and the
+        interrupted-build notice in General: none of them is about one posting,
+        and General is where a reply reaches the watcher.
+        """
         try:
-            await self.send(text)
+            await self.send(text, topic=topic)
         except Exception as exc:
             log.error("failed to send notice: %s", exc)
+
+    async def send_targeted(self, company: str, title: str, url: str,
+                            score: int | None, note: str) -> None:
+        """File an approved posting in the Targeted Build topic.
+
+        A no-op unless that topic is configured, and deliberately so: this
+        message has no equivalent in the chat-id-only setup, and posting it
+        there would add traffic to a chat whose behaviour is supposed to be
+        untouched by this feature. The record only makes sense as a topic.
+
+        Failure is logged and swallowed. Losing the record is a nuisance; losing
+        the build it was recording, because the record failed to send first,
+        would be the actual problem.
+        """
+        if self.config.topic_for("targeted_build") is None:
+            return
+        try:
+            await self.send(format_targeted(company, title, url, score, note),
+                            topic="targeted_build")
+        except Exception as exc:
+            log.error("failed to file %s — %s in the targeted topic: %s",
+                      company, title, exc)
 
     async def send_source_alerts(self, disabled: Sequence[str]) -> None:
         if not disabled:

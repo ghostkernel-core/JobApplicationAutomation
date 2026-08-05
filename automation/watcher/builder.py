@@ -676,13 +676,23 @@ class Builder:
                 with store.connect() as conn:
                     store.finish_build(conn, job.build_id, FAILED,
                                        detail="unhandled error, see watcher.log")
-                await self._reply(job, "❌ <b>Build failed</b>\nSee watcher.log.")
+                await self._reply(job, "❌ <b>Build failed</b>\nSee watcher.log.",
+                                  topic="failed_build")
             finally:
                 self._busy = False
                 self._queue.task_done()
 
-    async def _reply(self, job: Job, text: str) -> None:
-        await self.notifier.send(text, reply_to=job.reply_message_id)
+    async def _reply(self, job: Job, text: str,
+                     topic: str = "processing_build") -> None:
+        """Report on a build, in the topic that stage of it belongs to.
+
+        `processing_build` is the default because most of what a build says is
+        progress — building, retrying, queued behind something, declined as a
+        duplicate. Only the two ends of the run route elsewhere. With no topics
+        configured every one of these is an ordinary reply, exactly as before.
+        """
+        await self.notifier.send(text, reply_to=job.reply_message_id,
+                                 topic=topic)
 
     async def _attempt(self, job: Job, company: str, title: str, url: str,
                        label: str) -> tuple[bool, str, Path]:
@@ -777,7 +787,11 @@ class Builder:
                 sizes = current
                 continue
 
-            await self._reply(job, ready_message(label, outcome))
+            # Completed rather than processing: from the user's side this *is*
+            # the finished application. Interview Prep still rendering behind it
+            # is a study aid, and the message says so itself.
+            await self._reply(job, ready_message(label, outcome),
+                              topic="completed_build")
             log.info("application ready (prep still rendering): %s — %s",
                      company, title)
             return True
@@ -789,7 +803,8 @@ class Builder:
             with store.connect() as conn:
                 store.finish_build(conn, job.build_id, FAILED,
                                    detail="posting vanished from the database")
-            await self._reply(job, "❌ That posting is no longer in the database.")
+            await self._reply(job, "❌ That posting is no longer in the database.",
+                              topic="failed_build")
             return
 
         company, title, url = row["company"], row["title"], row["url"]
@@ -860,7 +875,14 @@ class Builder:
             store.finish_build(conn, job.build_id, outcome.status,
                                folder=outcome.folder, detail=record)
         log.info("build %s: %s — %s", outcome.status, company, title)
-        await self._reply(job, result_message(label, outcome, log_file))
+        # A salvaged run counts as completed: its status is DONE and the
+        # documents are on disk, which is what the Completed topic is a record
+        # of. The caveat about the run not finishing cleanly rides along in the
+        # message rather than moving it to Failed, where it would sit next to
+        # applications that do not exist.
+        await self._reply(
+            job, result_message(label, outcome, log_file),
+            topic="completed_build" if outcome.status == DONE else "failed_build")
 
 
 # --------------------------------------------------------------------------

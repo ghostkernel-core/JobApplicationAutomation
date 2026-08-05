@@ -11,6 +11,10 @@ sync with each other.
 Fetching is blocking (requests) and scoring shells out to the CLI, so both run
 in worker threads; the loop stays free to answer a reply while a poll is still
 in flight.
+
+Two commands are answered from the chat itself — `/status` and `/restart` — but
+only outside the posting topics, so a mis-sent command inside one is still read
+as a reply to the posting it was sent under.
 """
 
 from __future__ import annotations
@@ -18,16 +22,22 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime as dt
+import json
 import logging
+import os
+import subprocess
+import sys
 
 from telegram import Update
-from telegram.ext import Application, ContextTypes, MessageHandler, filters
+from telegram.ext import (Application, CommandHandler, ContextTypes,
+                          MessageHandler, filters)
 
 from watcher import kb, matcher, poll, replies, store
 from watcher.builder import Builder
-from watcher.config import load_config, load_env, require_env
+from watcher.config import (RESTART_MARKER_PATH, load_config, load_env,
+                            require_env)
 from watcher.logsetup import setup
-from watcher.notifier import Notifier, format_kb_proposal
+from watcher.notifier import Notifier, format_kb_proposal, format_status
 
 log = logging.getLogger("watcher.run")
 
@@ -278,10 +288,23 @@ async def on_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if builder is None:
         await message.reply_html(f"📝 {label}\nNo builder is wired up yet.{tail}")
         return
+
+    # File the approval before queueing. The record is what makes the Targeted
+    # topic a log of what was decided rather than of what happened to succeed,
+    # so it has to survive a build that then fails — and it is a no-op unless
+    # that topic is configured.
+    await notifier.send_targeted(
+        row["company"], row["title"], row["url"],
+        verdict["score"] if verdict else None, reply.note)
+
     ahead = await builder.enqueue(posting_id, reply.note, message.message_id)
     if ahead:
-        await message.reply_html(
-            f"🛠 Queued {label} — {ahead} build{'s' if ahead > 1 else ''} ahead.{tail}")
+        # Sent through the notifier rather than `reply_html` so it lands in the
+        # Processing topic with the rest of the build's progress. Still one
+        # message carrying the same text, so the chat-id-only case is unchanged.
+        await notifier.send(
+            f"🛠 Queued {label} — {ahead} build{'s' if ahead > 1 else ''} ahead.{tail}",
+            reply_to=message.message_id, topic="processing_build")
     elif tail:
         # Nothing to announce about the queue, but the note that went into
         # profile_kb.md still has to be reported somewhere.
@@ -301,8 +324,139 @@ async def on_stray(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # --------------------------------------------------------------------------
+# commands
+# --------------------------------------------------------------------------
+
+def _escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _unfinished() -> list[tuple[str, str]]:
+    """(status, "Company — Role") for every build not yet finished.
+
+    While this process is alive these rows *are* the in-flight work: the queue
+    is in memory and `store` only moves a row off 'queued'/'running' when the
+    build ends. (At boot the same query means the opposite — see
+    `Builder._recover` — because then no process owns them.)
+
+    Never raises. Both callers are answering the user, and a database hiccup
+    should degrade the answer, not swallow the command.
+    """
+    try:
+        with store.connect() as conn:
+            return [(row["status"], f"{row['company']} — {row['title']}")
+                    for row in store.unfinished_builds(conn)]
+    except Exception:
+        log.exception("could not read the build queue")
+        return []
+
+
+async def on_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/status` — is it alive, and what has it been doing."""
+    message = update.effective_message
+    if message is None:
+        return
+    notifier: Notifier = context.application.bot_data["notifier"]
+
+    tally = {"queued": 0, "running": 0}
+    for status, _ in _unfinished():
+        tally["running" if status == "running" else "queued"] += 1
+
+    await message.reply_html(format_status(
+        notifier.config,
+        context.application.bot_data.get("last_cycle", {}),
+        tally,
+        context.application.bot_data.get("started_at"),
+    ))
+
+
+async def on_restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/restart` — bring the watcher back up on the current config.
+
+    Nothing supervises this process, so restarting means relaunching itself:
+    `stop_running` unwinds the polling loop cleanly and `main` puts the new
+    process in its place once it has. Config edits do not need this — they are
+    re-read on every access — but a code change, a wedged worker, or a source
+    module reloaded from disk does.
+
+    A build in flight is killed by it, and a killed build has its folder erased
+    by the next start's recovery. That is worth refusing over, so it is refused
+    unless the user says `force`.
+    """
+    message = update.effective_message
+    if message is None:
+        return
+
+    args = getattr(context, "args", None) or []
+    force = any(arg.strip().lower() == "force" for arg in args)
+    unfinished = _unfinished()
+
+    if unfinished and not force:
+        names = "\n".join(f"• {_escape(label)}" for _, label in unfinished)
+        await message.reply_html(
+            f"⚠️ <b>{len(unfinished)} build(s) in flight</b>\n{names}\n\n"
+            "Restarting kills them, and a killed build has its folder erased.\n"
+            "<i>Send <code>/restart force</code> to do it anyway.</i>"
+        )
+        return
+
+    # Written before the confirmation is sent, and before the loop is asked to
+    # stop: the answer to this command is sent by a different process, and a
+    # file is the only thing that survives the gap.
+    try:
+        RESTART_MARKER_PATH.parent.mkdir(parents=True, exist_ok=True)
+        RESTART_MARKER_PATH.write_text(json.dumps({
+            "chat_id": str(message.chat_id),
+            "requested_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "in_flight": [label for _, label in unfinished],
+        }), encoding="utf-8")
+    except Exception:
+        # Worth continuing without: the restart still happens, the user just
+        # does not get told it finished.
+        log.exception("could not write the restart marker")
+
+    count = len(unfinished)
+    await message.reply_html(
+        f"↩️ <b>Restarting</b> — {count} build{'' if count == 1 else 's'} in flight."
+    )
+    context.application.bot_data["restart"] = True
+    context.application.stop_running()
+
+
+# --------------------------------------------------------------------------
 # wiring
 # --------------------------------------------------------------------------
+
+async def _report_restart(app: Application) -> None:
+    """Close the loop on a `/restart`, from the process that came back.
+
+    The request was answered by a process that no longer exists, so the marker
+    file on disk is the only thing that crossed the gap. It is removed whatever
+    happens next: a marker that outlives its restart makes the following
+    start — a reboot, a manual one — announce itself as a restart it never was.
+    """
+    if not RESTART_MARKER_PATH.exists():
+        return
+    try:
+        marker = json.loads(RESTART_MARKER_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        log.warning("unreadable restart marker — reporting the restart anyway")
+        marker = {}
+    try:
+        RESTART_MARKER_PATH.unlink()
+    except OSError:
+        log.exception("could not remove %s", RESTART_MARKER_PATH)
+
+    notifier: Notifier = app.bot_data["notifier"]
+    asked_from = str(marker.get("chat_id") or notifier.chat_id)
+    if asked_from != str(notifier.chat_id):
+        # The configured chat changed between the request and now, so whoever
+        # asked is not on the other end of this bot any more.
+        log.info("restart was requested from chat %s, now talking to %s — "
+                 "not reporting", asked_from, notifier.chat_id)
+        return
+    await notifier.send_notice("👋 <b>Watcher back up.</b>")
+
 
 async def _post_init(app: Application) -> None:
     """Start the build queue once the event loop exists.
@@ -310,6 +464,9 @@ async def _post_init(app: Application) -> None:
     The worker task and the interrupted-build recovery both need a running
     loop, so neither can happen in `build_app`.
     """
+    # Before recovery, so "back up" lands above the list of builds the restart
+    # interrupted rather than after it.
+    await _report_restart(app)
     builder = app.bot_data.get("builder")
     if builder is not None:
         await builder.start()
@@ -322,10 +479,20 @@ def build_app(notifier: Notifier) -> Application:
            .post_init(_post_init)
            .build())
     app.bot_data["notifier"] = notifier
+    app.bot_data["started_at"] = dt.datetime.now()
     if config.build_enabled:
         app.bot_data["builder"] = Builder(notifier, config)
 
     chat_only = filters.Chat(int(notifier.chat_id))
+    # Commands are answered from the General topic of a forum, and from an
+    # ordinary chat — `is_topic_message` is unset for both. Inside a posting
+    # topic they are left to `on_reply`, which knows which posting is meant;
+    # `/status` there is far more likely to be a mis-sent reply than a request
+    # for a report. Registered ahead of the message handlers so a command sent
+    # as a reply is still read as a command.
+    general = chat_only & ~filters.IS_TOPIC_MESSAGE
+    app.add_handler(CommandHandler("status", on_status, filters=general))
+    app.add_handler(CommandHandler("restart", on_restart, filters=general))
     app.add_handler(MessageHandler(chat_only & filters.REPLY & filters.TEXT, on_reply))
     app.add_handler(MessageHandler(chat_only & filters.TEXT & ~filters.COMMAND
                                    & ~filters.REPLY, on_stray))
@@ -349,6 +516,29 @@ def build_app(notifier: Notifier) -> Application:
 
 async def _once(notifier: Notifier) -> None:
     await run_cycle(notifier)
+
+
+def relaunch() -> None:
+    """Put a fresh process in this one's place, same interpreter, same argv.
+
+    Called only after `run_polling` has returned, so this process has already
+    stopped talking to Telegram — two watchers polling the same bot at once get
+    409s from `getUpdates`, and the overlap is entirely avoidable by ordering.
+
+    `os.execv` is the obvious tool and is used everywhere it works. On Windows
+    it goes through the CRT, which joins the arguments with spaces and quotes
+    none of them, so a workspace cloned into a path containing a space would
+    come back up with its own script path split across two arguments. Popen's
+    list form quotes properly. It inherits stdio and creates no new console, so
+    a watcher started under `pythonw` stays windowless and one started in a
+    terminal keeps that terminal.
+    """
+    argv = [sys.executable, os.path.abspath(sys.argv[0]), *sys.argv[1:]]
+    log.info("restarting: %s", " ".join(argv))
+    if os.name == "nt":
+        subprocess.Popen(argv, cwd=os.getcwd(), close_fds=False)
+        return
+    os.execv(argv[0], argv)  # never returns
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -385,7 +575,13 @@ def main(argv: list[str] | None = None) -> int:
 
     log.info("watcher starting — polling every %d min",
              notifier.config.interval_minutes)
-    build_app(notifier).run_polling(drop_pending_updates=True)
+    app = build_app(notifier)
+    app.run_polling(drop_pending_updates=True)
+    # `/restart` is the only thing that ends run_polling without ending the
+    # watcher; every other way out — Ctrl-C, a signal, a crash — leaves this
+    # flag unset and falls straight through to the exit.
+    if app.bot_data.get("restart"):
+        relaunch()
     return 0
 
 
