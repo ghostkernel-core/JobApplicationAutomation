@@ -80,6 +80,7 @@ class Report:
     considered: int = 0
     filled: int = 0
     failed: int = 0
+    deferred: int = 0
     skipped: int = 0
     grew: list[tuple[str, int, int]] = field(default_factory=list)
 
@@ -87,6 +88,8 @@ class Report:
         parts = [f"considered {self.considered}", f"filled {self.filled}"]
         if self.failed:
             parts.append(f"failed {self.failed}")
+        if self.deferred:
+            parts.append(f"deferred {self.deferred}")
         if self.skipped:
             parts.append(f"skipped {self.skipped}")
         if self.grew:
@@ -212,6 +215,38 @@ def _write_back(conn: sqlite3.Connection, posting_id: str, posting: Posting) -> 
     )
 
 
+# How long to keep trying a write before giving the row up for this run. A poll
+# cycle holds its write transaction across minutes of network and browser I/O,
+# which is longer than `store.connect`'s own 30s busy timeout, so a sweep that
+# treats "database is locked" as fatal dies the first time it overlaps one — it
+# did, at posting 105 of 196.
+_WRITE_ATTEMPTS = 5
+_WRITE_BACKOFF_S = (5, 15, 30, 60)
+
+
+def _write_with_retry(posting_id: str, posting: Posting) -> bool:
+    """Write one posting back, waiting out a poll cycle if it has to.
+
+    Returns False once it has stopped trying. That is deliberately *not* a
+    failure of the posting: the row still holds its teaser, so it matches the
+    work query and the next run picks it up. Recording it as failed would
+    blame the ad for a lock held by this process's own watcher.
+    """
+    for attempt in range(_WRITE_ATTEMPTS):
+        try:
+            with store.connect() as conn:
+                _write_back(conn, posting_id, posting)
+            return True
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or attempt == _WRITE_ATTEMPTS - 1:
+                log.warning("write failed for %s: %s", posting_id, exc)
+                return False
+            wait = _WRITE_BACKOFF_S[attempt]
+            log.info("database busy — retrying the write in %ds", wait)
+            time.sleep(wait)
+    return False
+
+
 # --------------------------------------------------------------------------
 # the sweep
 # --------------------------------------------------------------------------
@@ -261,13 +296,22 @@ def run(dry_run: bool = False, provider: str | None = None,
         if after < TEASER_CHARS:
             report.failed += 1
             log.warning("%s: still %d chars — recording it as failed", label, after)
-            with store.connect() as conn:
-                _remember_failure(conn, row["id"])
+            try:
+                with store.connect() as conn:
+                    _remember_failure(conn, row["id"])
+            except sqlite3.OperationalError as exc:
+                # Losing the note costs one re-fetch on the next run. It is not
+                # worth waiting out a poll cycle for, the way a body is.
+                log.warning("could not record the failure: %s", exc)
             time.sleep(delay)
             continue
 
-        with store.connect() as conn:
-            _write_back(conn, row["id"], posting)
+        if not _write_with_retry(row["id"], posting):
+            report.deferred += 1
+            log.warning("%s: fetched %d chars but could not store them — "
+                        "left for the next run", label, after)
+            time.sleep(delay)
+            continue
         report.filled += 1
         report.grew.append((row["id"], before, after))
         log.info("%s: %d -> %d chars, %s, %s", label, before, after,
