@@ -254,7 +254,7 @@ def render_prep_blocks(items: Any) -> str:
         heading = latex_escape(entry.get("name", entry.get("title", entry.get("label", ""))))
         body = latex_escape(entry.get("body", ""))
         use_for = entry.get("use_for", "")
-        parts = [rf"\textbf{{\color{{subblue}}{heading}}}\par"]
+        parts = [rf"\prepheading{{{heading}}}"]
         if body:
             parts.append(body)
         if use_for:

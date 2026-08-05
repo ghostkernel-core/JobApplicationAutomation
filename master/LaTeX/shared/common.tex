@@ -53,3 +53,9 @@
 \newlength{\xgap}\setlength{\xgap}{3mm}
 \newcommand{\xitem}[2]{\item \makebox[\xlab][l]{#1}\hspace{\xgap}\parbox[t]{\dimexpr\linewidth-\xlab-\xgap\relax}{\RaggedRight\spaceskip=\fontdimen2\font\relax #2}}
 \newcommand{\xcat}[1]{\par\addvspace{3pt}{\bfseries\color{subblue}#1}\par\vspace{1.5pt}}
+% Sub-entry heading used inside repeated interview-prep blocks (STRONG EXAMPLES,
+% GAPS, THEMES, etc. in interview_prep_en). Needspace-guards the heading the same
+% way \cvsection guards a top-level section, so it can never end up as the last
+% line on a page with its body pushed onto the next one; \nopagebreak then forbids
+% a break landing between the heading and the paragraph that follows it.
+\newcommand{\prepheading}[1]{\par\needspace{5\baselineskip}{\bfseries\color{subblue}#1}\par\nopagebreak}
