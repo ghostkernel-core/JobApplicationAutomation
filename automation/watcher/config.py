@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 import tomllib
 from dataclasses import dataclass, field
@@ -641,6 +642,15 @@ class _Reloader:
         self._value, self._stamp = value, stamp
         return value
 
+    def invalidate(self) -> None:
+        """Force a re-read on the next call, whatever the mtime says.
+
+        For the one case mtime cannot cover: this process wrote the file
+        itself, and needs the new value now rather than whenever the timestamp
+        resolution happens to notice.
+        """
+        self._stamp = None
+
 
 def _parse_config(raw: dict[str, Any]) -> Config:
     # Populate the environment first: the numeric knobs read os.environ on every
@@ -664,6 +674,84 @@ _config_reloader = _Reloader(CONFIG_PATH, _parse_config, "config.toml")
 def load_config() -> Config:
     """The current config.toml, re-read whenever the file changes on disk."""
     return _config_reloader()
+
+
+class ConfigWriteError(RuntimeError):
+    """A knob could not be changed. The message is shown to the user verbatim."""
+
+
+def set_number(section: str, key: str, value: int) -> int:
+    """Rewrite one numeric knob in config.toml, in place. Returns the old value.
+
+    A line edit, not a re-serialisation: the file is more comment than setting
+    — the paragraph above `notify_threshold` is the calibration record for why
+    the cut is 70 — and round-tripping it through a TOML writer would drop all
+    of that to save two lines of parsing.
+
+    So the assignment is found by key inside its own `[section]` and only its
+    right-hand side is replaced. Anything unexpected raises rather than
+    guessing: this file is what the watcher reads on the next access, and a
+    half-written one takes the whole thing down.
+
+    Refuses when the matching environment variable is set, because that wins
+    over the file (see `_num`) and the edit would appear to work while changing
+    nothing at all.
+    """
+    env = env_name(section, key)
+    if os.environ.get(env, "").strip():
+        raise ConfigWriteError(
+            f"{env} is set in the environment and overrides config.toml. "
+            f"Change it there, or unset it, and try again.")
+
+    try:
+        original = CONFIG_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigWriteError(f"could not read config.toml: {exc}") from exc
+
+    lines = original.splitlines(keepends=True)
+    # `[section]` opens at a line of its own and runs until the next header.
+    # Matching the key anywhere in the file would find `[kb] hour` from the
+    # `[notify]` section, which is the kind of edit nobody notices until the
+    # weekly job moves.
+    in_section = False
+    pattern = re.compile(rf"^(\s*{re.escape(key)}\s*=\s*)(-?\d+)(.*)$")
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_section = stripped == f"[{section}]"
+            continue
+        if not in_section:
+            continue
+        match = pattern.match(line)
+        if match:
+            old = int(match.group(2))
+            if old == value:
+                return old
+            lines[index] = f"{match.group(1)}{value}{match.group(3)}\n"
+            break
+    else:
+        raise ConfigWriteError(
+            f"no `{key}` setting under `[{section}]` in config.toml — "
+            f"it may have been renamed or removed.")
+
+    # Written via a temporary file in the same directory and moved into place,
+    # so a crash mid-write cannot leave the watcher's own config truncated.
+    # os.replace is atomic on both platforms this runs on.
+    temp = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".tmp")
+    try:
+        temp.write_text("".join(lines), encoding="utf-8")
+        os.replace(temp, CONFIG_PATH)
+    except OSError as exc:
+        temp.unlink(missing_ok=True)
+        raise ConfigWriteError(f"could not write config.toml: {exc}") from exc
+
+    # The reloader keys on mtime, and it would pick this up on its own within
+    # the second. Dropped explicitly anyway: the caller is about to quote the
+    # new value back to whoever asked for the change, and "set to 60" followed
+    # by a report still saying 70 is worse than a redundant re-read.
+    _config_reloader.invalidate()
+    log.info("config.toml: [%s] %s %d -> %d", section, key, old, value)
+    return old
 
 
 def _strs(section: dict[str, Any], key: str) -> tuple[str, ...]:

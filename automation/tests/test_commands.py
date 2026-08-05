@@ -355,7 +355,18 @@ def test_the_commands_are_registered(monkeypatch) -> None:
     commands = {name for handler in app.handlers
                 if isinstance(handler, CommandHandler)
                 for name in handler.commands}
-    assert commands == {"status", "restart"}
+    assert commands == {"status", "threshold", "recheck", "restart"}
+
+
+def test_every_registered_command_is_offered_in_telegrams_menu(monkeypatch) -> None:
+    """A command nobody can discover may as well not be there."""
+    from telegram.ext import CommandHandler
+
+    app = _wire(monkeypatch)
+    registered = {name for handler in app.handlers
+                  if isinstance(handler, CommandHandler)
+                  for name in handler.commands}
+    assert {name for name, _ in run_watcher.BOT_COMMANDS} == registered
 
 
 def test_the_commands_are_checked_before_the_reply_handler(monkeypatch) -> None:
