@@ -174,9 +174,11 @@ class _Recorder:
     def __init__(self) -> None:
         self.config = object()
         self.sent: list[str] = []
+        self.topics: list[str] = []
 
-    async def _reply(self, job, text: str) -> None:
+    async def _reply(self, job, text: str, topic: str = "processing_build") -> None:
         self.sent.append(text)
+        self.topics.append(topic)
 
 
 def _drive(monkeypatch, tmp_path, sizes_over_time):
@@ -244,6 +246,9 @@ def test_announcer_fires_once_the_sizes_hold_steady(monkeypatch, tmp_path) -> No
     ])
     assert fired is True
     assert recorder.sent == ["READY"]
+    # From the user's side this *is* the finished application, so it belongs in
+    # the completed topic rather than beside the build's progress.
+    assert recorder.topics == ["completed_build"]
 
 
 def test_announcer_ignores_a_zero_byte_placeholder(monkeypatch, tmp_path) -> None:

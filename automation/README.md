@@ -71,7 +71,7 @@ Underneath, the entrypoint is still directly usable, and every sub-command below
 | `-m watcher.matcher --rescore-degraded` | drop the fallback verdicts left by a scoring outage so the next cycle judges those postings properly |
 | `-m watcher.dedupe_check --company Deluxe --role "AI Engineer"` | "have I already applied?" |
 | `-m watcher.discover --company X` | probe ATS providers for a company's board token |
-| `-m watcher.whoami` | print the chat id of whoever messages the bot next |
+| `-m watcher.whoami` | print the chat id of whoever messages the bot next, and a thread id for every forum topic it hears from |
 | `-m watcher.health` | per-source failure counts and time to the next auto-retry; `--reset <source>` re-enables a disabled one immediately |
 | `-m watcher.status` | every watched board and portal with its URL, then every setting in force |
 | `-m watcher.builder --posting <id> --dry-run` | print argv, cwd, prompt, and dedupe verdict; spawn nothing |
@@ -216,6 +216,70 @@ later                    snooze for [notify] snooze_days
 build 3                  promote line 3 of a digest
 ```
 
+## Sorting into topics
+
+If the chat is an ordinary one, skip this section — nothing below changes anything for you.
+
+If it is a forum (a supergroup with Topics turned on), the watcher can file each kind of
+message into its own topic instead of piling everything into one stream. Fill in `[notify.topics]`
+in `config.toml` with the thread ids:
+
+```toml
+[notify.topics]
+new_posting     = 0    # instant pings and the evening digest
+targeted_build  = 0    # postings you approved, kept as a record
+processing_build = 0   # queued, building, retrying, declined as a duplicate
+failed_build    = 0    # a build that failed, and any retraction
+completed_build = 0    # the application is ready, and the run is complete
+```
+
+To find the ids, run the same tool that finds the chat id and post a message in each topic you
+want to use:
+
+```powershell
+python -m watcher.whoami
+```
+
+It prints the chat id on the first message, then a thread id for every topic it hears from —
+one pass fills in the whole section. General reports as having no thread id, which is correct:
+that is the fallback, and where the commands below are answered. (Telegram Web's URL also ends
+in the thread id, `.../#-1001234567890_25` → `25`, if you would rather read it off there.)
+
+Everything here is optional and independent:
+
+- **`0` means unset.** Any kind you leave at `0` stays in General, so configuring one topic and
+  ignoring the rest is a legitimate setup.
+- **No topics at all is the original behaviour**, byte for byte: same chat, no thread, and the
+  replies still thread to the message they answer.
+- **`targeted_build` sends nothing until you set it.** It is a new record with no equivalent in a
+  plain chat, so it stays silent rather than adding traffic to a setup that never asked for it.
+- The watcher's own talk — heartbeats, source-disabled and recovered alerts, the weekly
+  `profile_kb.md` proposal, interrupted-build notices — stays in **General**, next to the two
+  commands below.
+
+One consequence worth knowing: a message routed to a topic loses its `reply_to`. Telegram rejects
+the whole send when a reply points across topics, and the topic is the more useful half of the
+pair — every routed message already names its posting in its own text.
+
+Replies still work exactly as before. Reply inside whichever topic the posting was announced in.
+
+## /status and /restart
+
+Two commands are answered in the chat itself — in **General**, or anywhere in a non-forum chat.
+They are deliberately ignored inside a posting topic, where a stray `/status` is far more likely
+a mis-sent reply than a question.
+
+```
+/status                  cycle, queue, builds in flight, source health, uptime
+/restart                 restart the watcher process
+/restart force           …even with a build running
+```
+
+`/restart` re-executes the watcher with the same command line it started under, then confirms
+with a short message once it is back. While a build is in flight it refuses and names the builds
+instead: restarting kills them, and a killed build has its folder erased. `force` overrides that
+when you mean it.
+
 ## What the watcher learns
 
 Two halves, deliberately unequal in trust.
@@ -253,7 +317,8 @@ sub-commands `watcherctl.py` runs for you in your own terminal, where the output
 
 `config.toml` and `sources.toml` are re-read when they change; a momentarily unparseable file
 keeps the last good version and logs once. `build_settings.json` is re-rendered from its
-template before every build. `.env` and the watcher's own Python code need a restart.
+template before every build. `.env` and the watcher's own Python code need a restart — which
+is what `/restart` is for, so a code update no longer means finding the terminal.
 
 Nothing about the pipeline itself is cached: `CLAUDE.md`, `rules/`, and `.claude/agents/` are
 read fresh by each `claude -p` process, so an agent you add, edit, or delete applies to the very
