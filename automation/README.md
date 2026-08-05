@@ -93,7 +93,8 @@ Telegram reply and nowhere else — that is the whole containment story (see bel
 the URL being watched, then the filters, thresholds, schedules and build settings actually in
 force, with any value coming from an environment override marked as such. It reads the same
 loaders and URL builders the poller uses, so it cannot show a setting or an endpoint that
-differs from the one being polled.
+differs from the one being polled. It closes with the stored state — counts, the unsent bands,
+and the last poll cycle broken down the same way `/status` breaks it down.
 
 ### Overriding a number from the environment
 
@@ -263,17 +264,66 @@ pair — every routed message already names its posting in its own text.
 
 Replies still work exactly as before. Reply inside whichever topic the posting was announced in.
 
-## /status and /restart
+## Commands
 
-Two commands are answered in the chat itself — in **General**, or anywhere in a non-forum chat.
+Four commands are answered in the chat itself — in **General**, or anywhere in a non-forum chat.
 They are deliberately ignored inside a posting topic, where a stray `/status` is far more likely
-a mis-sent reply than a question.
+a mis-sent reply than a question. They are published to Telegram's own `/` menu at startup.
 
 ```
-/status                  cycle, queue, builds in flight, source health, uptime
+/status                  the full technical report (below)
+/threshold               current score cuts, and what is waiting under them
+/threshold 60            move the instant-ping cut
+/threshold digest 30     move the digest cut
+/recheck                 send anything qualifying under the current cut
+/recheck 50              …with a different cap for this run
 /restart                 restart the watcher process
 /restart force           …even with a build running
 ```
+
+### /status
+
+The report answers "is this thing still working", which is a harder question than "is it up".
+`4068 fetched · 0 new · 0 pinged` is the healthy steady state — the same boards returning the
+same listings every half hour, all already known — and it is *also* what a watcher whose poller
+died three days ago says, because the numbers are frozen at whatever they were when it last
+worked. So the report leads with when the last cycle finished and how the listings moved through
+it:
+
+```
+Last cycle: 11:25:40 (11m ago) · took 41s
+    4067 fetched → 4061 already seen → 0 filtered → 6 new
+    6 scored · 4 pinged
+    Next cycle: 11:54 (in 17m)
+```
+
+Past the interval with no cycle, that last line reads `overdue` instead. Below it: stored-state
+counts and today's activity, the timestamps of the newest posting, the last score and the last
+ping, the unsent bands, source health with any ailing source named, the build queue, the daily
+schedule, and the database size. The cycle is written to sqlite, not just held in memory, so a
+watcher that came back up thirty seconds ago still reports the poll it did before the restart.
+
+### /threshold and /recheck
+
+`/threshold` rewrites one line of `config.toml` — in place, comments and all — and the watcher
+picks it up on its next access without a restart. It refuses when the matching environment
+variable is set, since that wins over the file and the edit would look like it worked while
+changing nothing.
+
+It sends nothing. A cut change acts retroactively on every posting already scored and skipped
+over, so lowering it by thirty points can qualify hundreds at once; firing those as a side
+effect of a one-word command is not something to do without being asked. `/recheck` is that ask.
+
+`/recheck` re-runs the poll's own notify step against the current cut. Nothing is re-scored —
+every posting already carries a verdict, and what a cut change alters is which of them clears
+the bar. The once-per-posting rule still holds, so anything already messaged about stays sent.
+Beyond 20 pings (or whatever cap you pass) the rest are left unrecorded and go out with the
+evening digest, exactly as instant-ping overflow does during a normal poll.
+
+Postings that have never been scored are a different problem and are left to the next cycle,
+which does that in the background.
+
+### /restart
 
 `/restart` re-executes the watcher with the same command line it started under, then confirms
 with a short message once it is back. While a build is in flight it refuses and names the builds

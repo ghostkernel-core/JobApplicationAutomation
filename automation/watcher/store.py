@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -22,6 +23,8 @@ from typing import Any, Iterable, Iterator
 
 from .config import DB_PATH, ensure_dirs
 from .normalize import Posting
+
+log = logging.getLogger("watcher.store")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS postings (
@@ -714,3 +717,111 @@ def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
            ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
         (key, value),
     )
+
+
+# --------------------------------------------------------------------------
+# the last cycle
+# --------------------------------------------------------------------------
+
+LAST_CYCLE_KEY = "last_cycle"
+
+
+def save_cycle(conn: sqlite3.Connection, stats: dict[str, Any]) -> None:
+    """Record what the poll cycle just did, for `/status` to read back.
+
+    In the database rather than in `bot_data` because the interesting version
+    of "when did it last fetch" is the one that survives a restart. Held only
+    in memory, a watcher that came back up thirty seconds ago answered "none
+    yet this run" — which is indistinguishable, on a phone, from one that has
+    not polled in a day.
+    """
+    set_meta(conn, LAST_CYCLE_KEY, json.dumps(stats, ensure_ascii=False))
+
+
+def last_cycle(conn: sqlite3.Connection) -> dict[str, Any]:
+    """The stats `save_cycle` wrote, or {} if it has never run.
+
+    A malformed value reads as "never": this feeds a status report, and one
+    bad row should cost the cycle line, not the whole answer.
+    """
+    raw = get_meta(conn, LAST_CYCLE_KEY)
+    if not raw:
+        return {}
+    try:
+        stats = json.loads(raw)
+    except json.JSONDecodeError:
+        log.warning("ignoring unreadable %s in meta", LAST_CYCLE_KEY)
+        return {}
+    return stats if isinstance(stats, dict) else {}
+
+
+# --------------------------------------------------------------------------
+# the whole picture, for a status report
+# --------------------------------------------------------------------------
+
+def snapshot(conn: sqlite3.Connection, notify_threshold: int,
+             digest_threshold: int) -> dict[str, Any]:
+    """Every count `/status` needs, in one pass.
+
+    Gathered here rather than in the notifier so the report is a formatting
+    problem and this is a query problem, and so that `watcherctl status` and
+    the Telegram command cannot drift into counting different things.
+
+    The band counts deliberately exclude anything already messaged about:
+    "17 waiting" has to mean seventeen postings the user has not seen, or the
+    number is just a restatement of how long the watcher has been running.
+    """
+    def count(sql: str, *params: Any) -> int:
+        return int(conn.execute(sql, params).fetchone()[0])
+
+    today = dt.date.today().isoformat()
+    scored = count("SELECT COUNT(*) FROM verdicts")
+    out: dict[str, Any] = {
+        "postings": count("SELECT COUNT(*) FROM postings"),
+        "scored": scored,
+        "pending": count(
+            """SELECT COUNT(*) FROM postings p
+               WHERE NOT EXISTS (SELECT 1 FROM verdicts v WHERE v.posting_id = p.id)"""),
+        "retrying": count("SELECT COUNT(*) FROM score_attempts"),
+        "seen_today": count(
+            "SELECT COUNT(*) FROM postings WHERE substr(first_seen_at, 1, 10) = ?",
+            today),
+        "scored_today": count(
+            "SELECT COUNT(*) FROM verdicts WHERE substr(created_at, 1, 10) = ?",
+            today),
+        "notified": count("SELECT COUNT(*) FROM notifications"),
+        "notified_today": count(
+            "SELECT COUNT(*) FROM notifications WHERE substr(sent_at, 1, 10) = ?",
+            today),
+        "decisions": count("SELECT COUNT(*) FROM decisions"),
+        "builds": count("SELECT COUNT(*) FROM builds"),
+        # What a threshold change would act on, which is the same query
+        # `/recheck` runs — see `unnotified_in_band`.
+        "waiting_ping": count(
+            """SELECT COUNT(*) FROM postings p JOIN verdicts v ON v.posting_id = p.id
+               WHERE v.score >= ?
+                 AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.posting_id = p.id)""",
+            notify_threshold),
+        "waiting_digest": count(
+            """SELECT COUNT(*) FROM postings p JOIN verdicts v ON v.posting_id = p.id
+               WHERE v.score >= ? AND v.score < ?
+                 AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.posting_id = p.id)""",
+            digest_threshold, notify_threshold),
+    }
+    out["unjudged"] = len(degraded_verdict_ids(conn))
+
+    row = conn.execute(
+        "SELECT MAX(sent_at) AS at FROM notifications").fetchone()
+    out["last_notified_at"] = row["at"] if row else None
+    row = conn.execute("SELECT MAX(created_at) AS at FROM verdicts").fetchone()
+    out["last_scored_at"] = row["at"] if row else None
+    row = conn.execute(
+        "SELECT MAX(first_seen_at) AS at FROM postings").fetchone()
+    out["last_new_posting_at"] = row["at"] if row else None
+    row = conn.execute(
+        """SELECT score, company, title FROM verdicts v
+           JOIN postings p ON p.id = v.posting_id
+           ORDER BY v.created_at DESC, v.score DESC LIMIT 1""").fetchone()
+    out["top_recent"] = (f"{row['company']} — {row['title']} ({row['score']})"
+                         if row else None)
+    return out

@@ -19,7 +19,7 @@ import sys
 import pytest
 
 import run_watcher
-from watcher import config
+from watcher import config, notifier, store
 from watcher.notifier import format_status
 
 
@@ -172,7 +172,27 @@ def test_the_registered_times_match_the_config(monkeypatch) -> None:
 # what the schedule says vs what it does
 # --------------------------------------------------------------------------
 
-def test_status_quotes_the_minute_the_job_actually_runs_at(monkeypatch) -> None:
+@pytest.fixture
+def empty_db(tmp_path, monkeypatch):
+    """Point `/status` at a database of its own.
+
+    It reads counts and timestamps out of the store now, and the live one has
+    real postings in it — a status assertion that passes or fails depending on
+    whether this morning's ping happened to land on the hour is not a test.
+    """
+    path = tmp_path / "status.db"
+    monkeypatch.setattr(store, "DB_PATH", path)
+    monkeypatch.setattr(notifier, "DB_PATH", path)
+    store.init_db(path)
+    return path
+
+
+def _schedule_line(text: str) -> str:
+    return next(line for line in text.splitlines() if line.startswith("Every "))
+
+
+def test_status_quotes_the_minute_the_job_actually_runs_at(
+        monkeypatch, empty_db) -> None:
     """The second half of the same bug, and the half that survived the fix.
 
     Moving the daily jobs into local time left both status reports formatting a
@@ -184,16 +204,18 @@ def test_status_quotes_the_minute_the_job_actually_runs_at(monkeypatch) -> None:
     app = _build(monkeypatch)
     scheduled = {f"{when.hour:02d}:{when.minute:02d}"
                  for when in app.job_queue.daily}
-    text = format_status(config.Config(), {}, {}, None)
+    line = _schedule_line(format_status(config.Config(), {}, {}, None))
 
-    assert "digest 19:05" in text and "19:05" in scheduled
-    assert "heartbeat 09:15" in text and "09:15" in scheduled
-    assert ":00" not in text, "a flat :00 is the old hour-only formatting"
+    assert "digest 19:05" in line and "19:05" in scheduled
+    assert "heartbeat 09:15" in line and "09:15" in scheduled
+    assert ":00" not in line, "a flat :00 is the old hour-only formatting"
 
 
 @pytest.mark.parametrize("hour", [0, 7, 19, 23])
-def test_a_changed_hour_moves_both_the_job_and_the_report(hour: int) -> None:
+def test_a_changed_hour_moves_both_the_job_and_the_report(
+        hour: int, empty_db) -> None:
     """Editing `digest_hour` must not need a second edit somewhere else."""
     cfg = config.Config(notify={"digest_hour": hour})
     assert cfg.digest_at == (hour, config.DIGEST_MINUTE)
-    assert config.clock(cfg.digest_at) in format_status(cfg, {}, {}, None)
+    assert config.clock(cfg.digest_at) in _schedule_line(
+        format_status(cfg, {}, {}, None))

@@ -345,24 +345,55 @@ def print_files() -> None:
           else "not pinned (first chat to talk to the bot wins)")
 
 
-def print_state() -> None:
+def print_state(config: Config) -> None:
     rule("STORED STATE")
-    counts = {
-        "postings seen": "SELECT COUNT(*) FROM postings",
-        "scored": "SELECT COUNT(*) FROM verdicts",
-        "notifications sent": "SELECT COUNT(*) FROM notifications",
-        "replies recorded": "SELECT COUNT(*) FROM decisions",
-        "builds": "SELECT COUNT(*) FROM builds",
-    }
     with store.connect() as conn:
-        for label, sql in counts.items():
-            field(label, conn.execute(sql).fetchone()[0])
+        snap = store.snapshot(conn, config.notify_threshold,
+                              config.digest_threshold)
+        cycle = store.last_cycle(conn)
         newest = conn.execute(
             "SELECT first_seen_at, company, title FROM postings "
             "ORDER BY first_seen_at DESC LIMIT 1").fetchone()
+
+    field("postings seen", f"{snap['postings']}  ({snap['seen_today']} today)")
+    field("scored", f"{snap['scored']}  ({snap['scored_today']} today, "
+                    f"{snap['pending']} still pending"
+                    + (f", {snap['retrying']} retrying" if snap["retrying"] else "")
+                    + ")")
+    field("notifications sent", f"{snap['notified']}  "
+                                f"({snap['notified_today']} today)")
+    field("replies recorded", snap["decisions"])
+    field("builds", snap["builds"])
     if newest:
         field("newest posting", f"{newest['first_seen_at']}  "
                                 f"{newest['company']} — {newest['title']}"[:WIDTH - 24])
+    # The unsent bands, because they are what a threshold change moves and the
+    # only way to see the effect of one without waiting for the next poll.
+    field("waiting for a ping", f"{snap['waiting_ping']} at "
+                                f"≥ {config.notify_threshold}, unsent")
+    field("waiting for digest", f"{snap['waiting_digest']} between "
+                                f"{config.digest_threshold} and "
+                                f"{config.notify_threshold}, unsent")
+
+    rule("LAST POLL CYCLE")
+    if not cycle:
+        field("ran", "never — no cycle has been recorded yet")
+        return
+    field("finished", str(cycle.get("finished_at") or "unknown")
+          + (f"   in {cycle['seconds']}s" if cycle.get("seconds") else ""))
+    if "already_known" in cycle:
+        field("listings", f"{cycle.get('fetched', 0)} fetched → "
+                          f"{cycle.get('already_known', 0)} already seen → "
+                          f"{cycle.get('filtered', 0)} filtered → "
+                          f"{cycle.get('stored', 0)} stored")
+    else:
+        field("listings", f"{cycle.get('fetched', 0)} fetched → "
+                          f"{cycle.get('stored', 0)} stored")
+    field("then", f"{cycle.get('scored', 0)} scored, "
+                  f"{cycle.get('deferred', 0)} deferred, "
+                  f"{cycle.get('notified', 0)} pinged")
+    if cycle.get("sources_failed"):
+        field("sources failed", ", ".join(str(s) for s in cycle["sources_failed"]))
 
 
 # --------------------------------------------------------------------------
@@ -392,7 +423,7 @@ def main(argv: list[str] | None = None) -> int:
         print_filters(sources)
         print_behaviour(config)
         print_files()
-        print_state()
+        print_state(config)
 
     print()
     return 0

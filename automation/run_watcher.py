@@ -12,9 +12,9 @@ Fetching is blocking (requests) and scoring shells out to the CLI, so both run
 in worker threads; the loop stays free to answer a reply while a poll is still
 in flight.
 
-Two commands are answered from the chat itself — `/status` and `/restart` — but
-only outside the posting topics, so a mis-sent command inside one is still read
-as a reply to the posting it was sent under.
+Four commands are answered from the chat itself — `/status`, `/threshold`,
+`/recheck` and `/restart` — but only outside the posting topics, so a mis-sent
+command inside one is still read as a reply to the posting it was sent under.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ import logging
 import os
 import subprocess
 import sys
+from typing import Any
 
 from telegram import Update
 from telegram.ext import (Application, CommandHandler, ContextTypes,
@@ -34,8 +35,8 @@ from telegram.ext import (Application, CommandHandler, ContextTypes,
 
 from watcher import kb, matcher, poll, replies, store
 from watcher.builder import Builder
-from watcher.config import (RESTART_MARKER_PATH, load_config, load_env,
-                            require_env)
+from watcher.config import (RESTART_MARKER_PATH, ConfigWriteError, clock,
+                            load_config, load_env, require_env, set_number)
 from watcher.logsetup import setup
 from watcher.notifier import Notifier, format_kb_proposal, format_status
 
@@ -74,9 +75,20 @@ def local_time(hour: int, minute: int) -> dt.time:
 # the cycle
 # --------------------------------------------------------------------------
 
-async def run_cycle(notifier: Notifier) -> dict[str, int]:
-    """Poll every source, score what is new, ping what scores well."""
+async def run_cycle(notifier: Notifier) -> dict[str, Any]:
+    """Poll every source, score what is new, ping what scores well.
+
+    The returned dict is the record of the cycle that `/status` reads back, so
+    it carries the whole shape of the work and not just the headline: how many
+    listings came back, how many of those were already known, how many the
+    filters dropped, how many were stored, how many were then scored, and how
+    long the lot took. "Fetched 4067, new 0" on its own is the steady state and
+    the dead state at once — the same boards returning the same postings, or a
+    number frozen at whatever it was when the poller last worked. The timestamp
+    and the already-known count are what tell those two apart.
+    """
     config = notifier.config
+    started = dt.datetime.now()
 
     report = await asyncio.to_thread(poll.poll_once, False, None, config, None)
     if report.errors:
@@ -95,10 +107,32 @@ async def run_cycle(notifier: Notifier) -> dict[str, int]:
     await notifier.send_scoring_degraded(match_report)
 
     notified = await notifier.send_instant()
+    finished = dt.datetime.now()
     log.info("cycle: fetched %d, new %d, notified %d",
              report.fetched, report.stored, notified)
-    return {"fetched": report.fetched, "stored": report.stored,
-            "notified": notified}
+
+    stats: dict[str, Any] = {
+        "started_at": started.isoformat(timespec="seconds"),
+        "finished_at": finished.isoformat(timespec="seconds"),
+        "seconds": round((finished - started).total_seconds(), 1),
+        "fetched": report.fetched,
+        "already_known": report.already_known,
+        "filtered": report.filtered,
+        "stored": report.stored,
+        "scored": match_report.scored,
+        "deferred": match_report.deferred,
+        "notified": notified,
+        "sources_failed": sorted(report.errors),
+    }
+    # Persisted, not just returned: `bot_data` dies with the process, and the
+    # first thing anyone asks a watcher that just came back up is when it last
+    # did anything. See `store.save_cycle`.
+    try:
+        with store.connect() as conn:
+            store.save_cycle(conn, stats)
+    except Exception:
+        log.exception("could not record the cycle stats")
+    return stats
 
 
 async def poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -370,6 +404,199 @@ async def on_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ))
 
 
+#: How many pings one `/recheck` may send before the rest are left for the
+#: digest. Higher than the per-poll cap because this one was asked for — but
+#: still capped: dropping the threshold by thirty points can qualify hundreds
+#: of stored postings at once, and a phone does not survive that.
+MAX_RECHECK_PINGS = 20
+
+THRESHOLDS = {
+    "ping": ("notify_threshold", "instant ping"),
+    "digest": ("digest_threshold", "evening digest"),
+}
+
+
+def _band_counts(config) -> tuple[int, int]:
+    """(waiting for a ping, waiting for the digest) — unsent postings only."""
+    try:
+        with store.connect() as conn:
+            snap = store.snapshot(conn, config.notify_threshold,
+                                  config.digest_threshold)
+        return snap["waiting_ping"], snap["waiting_digest"]
+    except Exception:
+        log.exception("could not count the notification bands")
+        return 0, 0
+
+
+async def on_threshold(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/threshold` — read or move the score cuts.
+
+        /threshold            what they are now, and what is waiting under them
+        /threshold 60         move the ping cut
+        /threshold digest 30  move the digest cut
+
+    Writes config.toml, which is the file the watcher re-reads on every access,
+    so the new cut applies from the next poll without a restart. It does *not*
+    send anything: a threshold change acts on postings already scored and
+    already skipped over, and firing twenty pings as a side effect of a
+    one-word command is not a thing to do without being asked. `/recheck` is
+    that ask.
+    """
+    message = update.effective_message
+    if message is None:
+        return
+    notifier: Notifier = context.application.bot_data["notifier"]
+    config = notifier.config
+    args = [a.strip().lower() for a in (getattr(context, "args", None) or [])]
+
+    which = "ping"
+    if args and args[0] in THRESHOLDS:
+        which = args.pop(0)
+
+    if not args:
+        waiting_ping, waiting_digest = _band_counts(config)
+        await message.reply_html(
+            f"🎯 <b>Thresholds</b>\n"
+            f"Ping at ≥{config.notify_threshold} — {waiting_ping} scored "
+            f"posting(s) qualify and have not been sent\n"
+            f"Digest at ≥{config.digest_threshold} — {waiting_digest} more in "
+            f"the band below the ping cut\n\n"
+            f"<code>/threshold 60</code> to move the ping cut, "
+            f"<code>/threshold digest 30</code> for the digest one.\n"
+            f"<i>Changing a cut sends nothing by itself — /recheck does.</i>"
+        )
+        return
+
+    try:
+        value = int(args[0])
+    except ValueError:
+        await message.reply_html(
+            f"“{_escape(args[0])}” is not a number. "
+            f"<code>/threshold 60</code>.")
+        return
+    if not 0 <= value <= 100:
+        await message.reply_html("Scores run 0–100, so a cut outside that "
+                                 "either pings everything or nothing.")
+        return
+
+    key, label = THRESHOLDS[which]
+    other = (config.digest_threshold if which == "ping"
+             else config.notify_threshold)
+    if which == "ping" and value < other:
+        await message.reply_html(
+            f"The ping cut has to sit at or above the digest cut "
+            f"({other}); below it the digest band is empty and everything "
+            f"pings. Move the digest cut first.")
+        return
+    if which == "digest" and value > other:
+        await message.reply_html(
+            f"The digest cut has to sit at or below the ping cut ({other}).")
+        return
+
+    try:
+        old = await asyncio.to_thread(set_number, "match", key, value)
+    except ConfigWriteError as exc:
+        await message.reply_html(f"⚠️ {_escape(str(exc))}")
+        return
+    except Exception:
+        log.exception("could not write %s", key)
+        await message.reply_html("⚠️ Could not write config.toml — see watcher.log.")
+        return
+
+    if old == value:
+        await message.reply_html(f"Already at {value}. Nothing changed.")
+        return
+
+    # Re-read rather than reusing `config`: the point of the confirmation is to
+    # quote back what the watcher will actually use from here on.
+    config = notifier.config
+    waiting_ping, waiting_digest = _band_counts(config)
+    direction = "Lowered" if value < old else "Raised"
+    lines = [f"🎯 <b>{direction} the {label} cut: {old} → {value}</b>",
+             f"Ping at ≥{config.notify_threshold}, digest at "
+             f"≥{config.digest_threshold}",
+             f"{waiting_ping} scored posting(s) now qualify for a ping and "
+             f"have not been sent; {waiting_digest} sit in the digest band."]
+    if waiting_ping:
+        lines.append(f"\n<i>Send <code>/recheck</code> to push them out now — "
+                     f"otherwise they go with the next poll.</i>")
+    await message.reply_html("\n".join(lines))
+
+
+async def on_recheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/recheck` — send anything that qualifies under the current cut.
+
+        /recheck        up to MAX_RECHECK_PINGS
+        /recheck 50     a different cap for this run
+
+    Nothing is re-scored. Every posting already has a verdict on record; what
+    a threshold change alters is which of those verdicts clears the bar, and
+    `store.unnotified_in_band` — the same query the poll cycle uses — answers
+    that against whatever the cut is *now*. So this is exactly the poll's own
+    notify step, run on demand, and the once-per-posting rule still holds:
+    anything already messaged about stays sent.
+
+    Postings that have never been scored are a different problem and are left
+    to the next cycle, which does that in the background. Re-scoring thousands
+    of stored listings from a chat command is not something that should be one
+    word away.
+    """
+    message = update.effective_message
+    if message is None:
+        return
+    notifier: Notifier = context.application.bot_data["notifier"]
+    config = notifier.config
+
+    args = getattr(context, "args", None) or []
+    limit = MAX_RECHECK_PINGS
+    if args:
+        try:
+            limit = max(1, min(100, int(args[0].strip())))
+        except ValueError:
+            await message.reply_html(
+                f"“{_escape(args[0])}” is not a number. "
+                f"<code>/recheck</code> or <code>/recheck 50</code>.")
+            return
+
+    waiting_ping, waiting_digest = _band_counts(config)
+    if not waiting_ping:
+        pending = 0
+        try:
+            with store.connect() as conn:
+                pending = store.snapshot(conn, config.notify_threshold,
+                                         config.digest_threshold)["pending"]
+        except Exception:
+            log.exception("could not count unscored postings")
+        tail = (f"\n{pending} posting(s) are still waiting to be scored; the "
+                f"next cycle handles them." if pending else "")
+        await message.reply_html(
+            f"Nothing new to send. Everything at ≥{config.notify_threshold} "
+            f"has already gone out.\n{waiting_digest} posting(s) sit in the "
+            f"digest band and go out at {clock(config.digest_at)}.{tail}")
+        return
+
+    await message.reply_html(
+        f"🔁 Re-checking {waiting_ping} posting(s) at ≥"
+        f"{config.notify_threshold}…")
+    try:
+        sent = await notifier.send_instant(limit=limit)
+    except Exception:
+        log.exception("recheck failed")
+        await message.reply_html("⚠️ The re-check failed — see watcher.log.")
+        return
+
+    held = max(0, waiting_ping - sent)
+    lines = [f"✅ Sent {sent} of {waiting_ping}."]
+    if held:
+        # Deliberately not recorded as notified, so they stay in the band —
+        # see `send_instant`. Saying so is the difference between "held back"
+        # and "dropped", which is not obvious from the numbers alone.
+        lines.append(f"{held} held back for the digest at "
+                     f"{clock(config.digest_at)} — run <code>/recheck</code> "
+                     f"again to send more now.")
+    await message.reply_html("\n".join(lines))
+
+
 async def on_restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """`/restart` — bring the watcher back up on the current config.
 
@@ -458,12 +685,36 @@ async def _report_restart(app: Application) -> None:
     await notifier.send_notice("👋 <b>Watcher back up.</b>")
 
 
+#: What Telegram offers when someone types "/" in the chat. Kept beside the
+#: handler registrations below — a command that exists but is not listed is one
+#: nobody discovers, and one listed but not handled is worse.
+BOT_COMMANDS = [
+    ("status", "is it alive, and what has it been doing"),
+    ("threshold", "read or move the score cuts"),
+    ("recheck", "send anything qualifying under the current cut"),
+    ("restart", "bring the watcher back up on the current config"),
+]
+
+
+async def _publish_commands(app: Application) -> None:
+    """Put the command list in Telegram's own menu.
+
+    Best-effort. A failed call here means the "/" menu is stale, which is a
+    cosmetic loss; refusing to start the watcher over it would not be.
+    """
+    try:
+        await app.bot.set_my_commands(BOT_COMMANDS)
+    except Exception:
+        log.warning("could not publish the command list", exc_info=True)
+
+
 async def _post_init(app: Application) -> None:
     """Start the build queue once the event loop exists.
 
     The worker task and the interrupted-build recovery both need a running
     loop, so neither can happen in `build_app`.
     """
+    await _publish_commands(app)
     # Before recovery, so "back up" lands above the list of builds the restart
     # interrupted rather than after it.
     await _report_restart(app)
@@ -492,6 +743,8 @@ def build_app(notifier: Notifier) -> Application:
     # as a reply is still read as a command.
     general = chat_only & ~filters.IS_TOPIC_MESSAGE
     app.add_handler(CommandHandler("status", on_status, filters=general))
+    app.add_handler(CommandHandler("threshold", on_threshold, filters=general))
+    app.add_handler(CommandHandler("recheck", on_recheck, filters=general))
     app.add_handler(CommandHandler("restart", on_restart, filters=general))
     app.add_handler(MessageHandler(chat_only & filters.REPLY & filters.TEXT, on_reply))
     app.add_handler(MessageHandler(chat_only & filters.TEXT & ~filters.COMMAND

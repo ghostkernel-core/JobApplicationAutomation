@@ -21,7 +21,8 @@ from telegram import Bot
 from telegram.constants import ParseMode
 
 from . import roles, store
-from .config import TOPIC_KINDS, Config, clock, load_config, require_env
+from .config import (DB_PATH, TOPIC_KINDS, Config, clock, load_config,
+                     require_env)
 
 log = logging.getLogger("watcher.notify")
 
@@ -273,15 +274,166 @@ def _source_tally() -> tuple[int, int, int, int] | None:
     return ok, failing, disabled, parked
 
 
-def format_status(config: Config, cycle: dict[str, int],
+def _ailing_sources(limit: int = 4) -> list[str]:
+    """Names of the sources that are not currently fine, worst first.
+
+    The counts from `_source_tally` answer "is anything wrong" but not "what",
+    and the whole reason to ask from a phone is usually that something is.
+    Capped because a bad afternoon can put every source on this list at once
+    and the point is a hint, not an inventory — `watcherctl status` has them all.
+    """
+    try:
+        with store.connect() as conn:
+            rows = store.source_health(conn)
+    except Exception:
+        return []  # already logged by `_source_tally`, which reads the same table
+    ailing: list[tuple[int, str]] = []
+    for row in rows:
+        if store.row_is_parked(row):
+            rank, note = 0, "parked"
+        elif row["disabled"]:
+            rank, note = 1, "disabled"
+        elif row["consecutive_failures"]:
+            rank, note = 2, f"failing ×{row['consecutive_failures']}"
+        else:
+            continue
+        ailing.append((rank, f"{row['source']} ({note})"))
+    ailing.sort()
+    return [label for _, label in ailing[:limit]]
+
+
+def _moment(stamp: str | dt.datetime | None) -> dt.datetime | None:
+    """A stored ISO timestamp as a datetime, or None if it is not one."""
+    if isinstance(stamp, dt.datetime):
+        return stamp
+    if not stamp:
+        return None
+    try:
+        return dt.datetime.fromisoformat(str(stamp))
+    except ValueError:
+        return None
+
+
+def _span(seconds: float) -> str:
+    """A duration in the largest unit that still says something useful."""
+    seconds = max(0, int(seconds))
+    if seconds < 90:
+        return f"{seconds}s"
+    minutes, rest = divmod(seconds, 60)
+    if minutes < 90:
+        return f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 48:
+        return f"{hours}h {minutes}m"
+    return f"{hours // 24}d {hours % 24}h"
+
+
+def _when(stamp: str | dt.datetime | None, now: dt.datetime | None = None) -> str:
+    """"14:32 (12m ago)" — a clock time and the distance to it.
+
+    Both halves earn their place. The clock time is what gets compared against
+    the schedule; the age is what answers "is this thing stuck", which reading
+    a timestamp off a phone screen and doing the subtraction by hand does not.
+    """
+    moment = _moment(stamp)
+    if moment is None:
+        return "never"
+    now = now or dt.datetime.now()
+    delta = (now - moment).total_seconds()
+    if delta < 0:  # clock moved, or a stamp from the future — say the time only
+        return moment.strftime("%d %b %H:%M")
+    shown = (moment.strftime("%H:%M:%S") if delta < 86400
+             else moment.strftime("%d %b %H:%M"))
+    return f"{shown} ({_span(delta)} ago)"
+
+
+def _db_size() -> str:
+    try:
+        return f"{DB_PATH.stat().st_size / 1_048_576:.1f} MB"
+    except OSError:
+        return "missing"
+
+
+def _cycle_lines(config: Config, cycle: dict[str, Any],
+                 now: dt.datetime) -> list[str]:
+    """The poll cycle: when, how long, and what happened to each listing.
+
+    This is the block the whole report exists for. A watcher that has quietly
+    stopped polling looks exactly like one with nothing to report unless the
+    time of the last fetch is on the screen, and the funnel — fetched, already
+    known, filtered, stored, scored — is what distinguishes "the boards have
+    nothing new" from "everything is being dropped before it reaches scoring".
+    """
+    if not cycle:
+        return ["<b>Last cycle:</b> none on record"]
+
+    fetched = int(cycle.get("fetched", 0) or 0)
+    known = int(cycle.get("already_known", 0) or 0)
+    filtered = int(cycle.get("filtered", 0) or 0)
+    stored = int(cycle.get("stored", 0) or 0)
+
+    head = f"<b>Last cycle:</b> {_when(cycle.get('finished_at'), now)}"
+    seconds = cycle.get("seconds")
+    if seconds is not None:
+        head += f" · took {_span(float(seconds))}"
+    lines = [head]
+
+    # Older records predate the wider stats; showing a funnel of zeros for the
+    # three fields they lack would read as a broken poller rather than an
+    # out-of-date row.
+    if "already_known" in cycle:
+        lines.append(f"    {fetched} fetched → {known} already seen → "
+                     f"{filtered} filtered → <b>{stored} new</b>")
+    else:
+        lines.append(f"    {fetched} fetched → <b>{stored} new</b>")
+    scored = cycle.get("scored")
+    tail = [f"{scored} scored"] if scored is not None else []
+    if cycle.get("deferred"):
+        tail.append(f"{cycle['deferred']} deferred")
+    tail.append(f"{int(cycle.get('notified', 0) or 0)} pinged")
+    lines.append(f"    {' · '.join(tail)}")
+    if cycle.get("sources_failed"):
+        failed = ", ".join(str(s) for s in cycle["sources_failed"][:4])
+        lines.append(f"    ⚠️ failed: {_escape(failed)}")
+
+    started = _moment(cycle.get("started_at"))
+    if started is not None:
+        due = started + dt.timedelta(minutes=config.interval_minutes)
+        overdue = (now - due).total_seconds()
+        if overdue > 60:
+            lines.append(f"    <b>Next cycle:</b> {due:%H:%M} — "
+                         f"{_span(overdue)} overdue")
+        else:
+            lines.append(f"    Next cycle: {due:%H:%M} "
+                         f"(in {_span(max(0, -overdue))})")
+    return lines
+
+
+def format_status(config: Config, cycle: dict[str, Any],
                   builds: dict[str, int], since: dt.datetime | None) -> str:
     """The watcher on a phone screen, for `/status`.
 
     Not `watcher.status`, which prints a 78-column terminal report of every
     source, URL and setting. That answers "what is this configured to do"; this
-    answers "is it alive and what has it been doing", which is the question
-    someone asks from their phone.
+    answers "is it alive, is it still doing the work, and is anything stuck" —
+    which is what someone reaching for their phone actually wants to settle.
+
+    `cycle` is the in-memory record from this process, and it wins when there
+    is one. With none — a watcher that came back up a minute ago — the last
+    cycle is read from the database instead, so a fresh start reports the poll
+    it did before the restart rather than the useless "none yet this run".
     """
+    now = dt.datetime.now()
+    snap: dict[str, Any] = {}
+    try:
+        with store.connect() as conn:
+            if not cycle:
+                cycle = store.last_cycle(conn)
+            snap = store.snapshot(conn, config.notify_threshold,
+                                  config.digest_threshold)
+    except Exception:
+        log.exception("could not read the status snapshot")
+
     tally = _source_tally()
     if tally is None:
         health = ["unreadable — see watcher.log"]
@@ -304,17 +456,49 @@ def format_status(config: Config, cycle: dict[str, int],
     else:
         build_line = "idle"
 
-    lines = [
-        f"📡 <b>Watcher</b> · up {_uptime(since)}",
-        f"Last cycle: {cycle.get('fetched', 0)} fetched · "
-        f"{cycle.get('stored', 0)} new · {cycle.get('notified', 0)} pinged"
-        if cycle else "Last cycle: none yet this run",
-        f"Sources: {' · '.join(health)}",
-        f"Builds: {build_line}",
+    lines = [f"📡 <b>Watcher</b> · up {_uptime(since)}", ""]
+    lines += _cycle_lines(config, cycle, now)
+
+    if snap:
+        lines += [
+            "",
+            f"<b>Database:</b> {snap['postings']} postings · "
+            f"{snap['scored']} scored · {snap['pending']} awaiting score"
+            + (f" · {snap['retrying']} retrying" if snap["retrying"] else "")
+            + (f" · {snap['unjudged']} unjudged" if snap["unjudged"] else ""),
+            f"    Today: {snap['seen_today']} new · {snap['scored_today']} scored"
+            f" · {snap['notified_today']} pinged",
+            f"    Newest posting: {_when(snap['last_new_posting_at'], now)}",
+            f"    Last score: {_when(snap['last_scored_at'], now)}",
+            f"    Last ping: {_when(snap['last_notified_at'], now)}",
+        ]
+        if snap.get("top_recent"):
+            lines.append(f"    Latest verdict: {_escape(snap['top_recent'])}")
+        lines += [
+            "",
+            f"<b>Unsent:</b> {snap['waiting_ping']} at ≥{config.notify_threshold}"
+            f" · {snap['waiting_digest']} in the digest band",
+        ]
+        if snap["waiting_ping"]:
+            lines.append("    <i>/recheck sends them</i>")
+
+    lines += [
+        "",
+        f"<b>Sources:</b> {' · '.join(health)}",
+    ]
+    for label in _ailing_sources():
+        lines.append(f"    ⚠️ {_escape(label)}")
+    lines += [
+        f"<b>Builds:</b> {build_line}"
+        + (f" · {snap['builds']} all-time · {snap['decisions']} decisions"
+           if snap else ""),
+        "",
         f"Every {config.interval_minutes} min · digest "
         f"{clock(config.digest_at)} · heartbeat {clock(config.heartbeat_at)}",
         f"Ping at ≥{config.notify_threshold}, digest at "
-        f"≥{config.digest_threshold}",
+        f"≥{config.digest_threshold} — <i>/threshold to change</i>",
+        f"<i>{DB_PATH.name} · {_db_size()} · scoring on "
+        f"{_escape(config.match_model)}</i>",
     ]
     if config.topics_enabled:
         lines.append(f"<i>Topics: {len(config.topics)} of "
@@ -527,6 +711,11 @@ class Notifier:
         """Daily proof of life, so silence is distinguishable from a crash."""
         with store.connect() as conn:
             health = store.source_health(conn)
+            # A restart between the last poll and 09:15 leaves the caller with
+            # nothing in memory, and "0 fetched, 0 new" is the one thing this
+            # message must never say when the watcher is in fact fine.
+            if not report:
+                report = store.last_cycle(conn)
         broken = [row["source"] for row in health if row["disabled"]]
         lines = [
             "💚 <b>Watcher alive</b>",
@@ -534,6 +723,8 @@ class Notifier:
             f"{report.get('stored', 0)} new, {report.get('notified', 0)} notified",
             f"sources: {len(health) - len(broken)} ok, {len(broken)} disabled",
         ]
+        if report.get("finished_at"):
+            lines.insert(2, f"           at {_when(report['finished_at'])}")
         if broken:
             lines.append("disabled: " + _escape(", ".join(broken)))
         await self.send_notice("\n".join(lines))
