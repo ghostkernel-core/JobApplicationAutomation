@@ -109,11 +109,16 @@ model = "sonnet"
 timeout_minutes = 45
 # Extra attempts after a build dies on a *transient upstream* failure — a 503, a
 # rate limit, a dropped connection. Nothing else is retried: a timeout, a crash,
-# or a build that wrote the wrong files would fail the same way again. An outage
-# can land on the last turn of a 25-minute run, and cleanup then erases an
-# application that was all but finished, so one free retry is cheap insurance.
-# 0 disables it.
-retries = 1
+# or a build that wrote the wrong files would fail the same way again.
+#
+# 0 disables it: one attempt, and a transient failure is reported like any other.
+# Currently off. The case for 1 was that an outage landing on the last turn of a
+# 25-minute run costs an application that was all but finished — but the two
+# guards added since take most of that risk away on their own. A run whose CV and
+# cover letter are already on disk is salvaged rather than retried, and a run that
+# died earlier than that is a second half-hour spent on a gateway that is usually
+# still unwell. Put it back to 1 if failed builds start clustering on 503s.
+retries = 0
 retry_delay_seconds = 120
 # The "🛠 Building …" message is edited in place for the length of the run,
 # showing each pipeline step and what it cost. Turn it off and that message is

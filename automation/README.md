@@ -13,6 +13,208 @@ poll sources → dedupe → prefilter (free) → score (haiku) → Telegram
                           dedupe vs folders + tracker → claude -p → "✅ Built · <path>"
 ```
 
+## End to end
+
+Two ways in, one pipeline. The watcher finds work and asks; you paste a URL when you have found
+it yourself. Both end up running `../CLAUDE.md` against a URL and an optional note, which is why
+there is no second set of instructions anywhere — see **One pipeline, two front doors** below.
+
+The numbers below are the shipped `config.toml`; `/status` prints the ones actually in force.
+
+### 1 · Poll — every 30 minutes
+
+```
+ sources.toml
+      │
+      ▼
+ fetch each source ─┬─ failed 3× running (6× if fragile)? ──► disabled, one alert,
+      │             │                                        probed again after 1h,
+      │             │                                        2h, 4h … capped at daily
+      │             └─ failed structurally? ──► parked: no auto-retry at all,
+      │                                        the fetcher needs fixing
+      ▼
+ for each posting
+      │
+      ├─ fingerprint already stored, or a loose company+title match in 30 days?
+      │        └──► dropped as already known
+      │
+      ├─ prefilter (free): title allow/deny, posted ≤ 14d ago, hard blockers,
+      │  location, seniority — years is extracted and shown, not enforced
+      │        └──► dropped, with a reason (`poll --dry-run` prints them)
+      │
+      ├─ body under 800 chars? fetch the real ad and run the prefilter again
+      │        └──► dropped — the hard blockers usually sit in the body, not the title
+      │
+      └──► stored in state/watch.db
+```
+
+The second prefilter pass matters more than it looks: StepStone and hiring.cafe both ship the
+search tile's opening sentence, which is *not* empty, so the 800-char floor is what tells a
+teaser from an ad. See `rehydrate` under **Run it** for the back catalogue that predates it.
+
+### 2 · Score — same cycle, everything unscored
+
+```
+ postings with no verdict row
+      │
+      ▼
+ haiku, 8 at a time, 4000 chars of description each
+      │     ├─ profile digest + profile_kb.md go in with every batch
+      │     │
+      │     └─ scorer failed (timeout, bad JSON, upstream 503)?
+      │            └──► no verdict written, so the next cycle picks it up again.
+      │                 After 3 attempts the fallback score is stored as the
+      │                 real answer — by then it is the posting, not the weather.
+      ▼
+ verdict row: score 0–100, verdict, reasons, stop-and-ask flag
+```
+
+**A missing verdict is the work queue.** Nothing carries a "needs scoring" flag; `unscored()`
+selects on the absence of a verdict, so deleting one re-queues the posting. That is how
+`/rescore`, `rehydrate`, and `--rescore-before` all work.
+
+### 3 · Notify — by band
+
+```
+ score ≥ 65 (notify_threshold) ──► instant ping, at most 6 per cycle
+      │                             └─ beyond 6: left unrecorded, so they fall
+      │                                into the digest instead of vanishing
+ score ≥ 40 (digest_threshold) ──► one line in the 19:00 digest
+ below 40                      ──► stored silently; `match --replay` to see them
+```
+
+A `notifications` row is written *only when a message is actually sent*, and
+`unnotified_in_band` skips anything that has one. So a ping cannot repeat — and deleting the
+message in Telegram does not bring it back, which is what `resend` is for.
+
+Also on the clock: the 09:00 heartbeat, and the weekly rules proposal (Sunday 18:00), which
+never writes `profile_kb.md` without an explicit yes.
+
+### 4 · Reply — you answer the ping
+
+Replies are resolved by *which message you replied to*, so several can be in flight at once.
+
+```
+ "no" / "skip" / "nein" ──► decision recorded, note learned into profile_kb.md
+ "later" / "snooze"     ──► snoozed 7 days
+ "yes" / "ok" / "build" ──► approved.  Anything after the keyword is passed
+       │                    through verbatim: "yes, add German",
+       │                    "yes, apply as Data Scientist"
+ "3" / "build 3"        ──► approves line 3 of a digest
+ anything else          ──► "not sure what to do with that". A stray message
+                            can never start a build.
+```
+
+### 5 · Build — one at a time
+
+```
+ approved
+      │
+      ├─ [build] enabled = false? ──► recorded, nothing spawned
+      │
+      ├─ already applied? folder tree + tracker, 365 days back, title
+      │  similarity ≥ 0.8, company matched on its normalised key
+      │        └──► duplicate — build refused, prior folder named
+      │        └──► an *incomplete* prior folder does not block; it is rebuilt over
+      │
+      ▼
+ queued (one build at a time; "N ahead" if something is running)
+      │
+      ▼
+ claude -p, stdin = "<url>\n<note>" and nothing else
+      │  cwd pinned to the workspace · bypassPermissions · guard.py on every call
+      │  45-minute timeout · full NDJSON stream to logs/builds/
+      │
+      ├─ live checklist: the "🛠 Building …" message is edited in place, one row
+      │  per pipeline step with its duration, refreshed every 30s
+      │
+      ├─ CV + cover letter appear on disk ──► "ready" message goes out *now*,
+      │  without waiting for Interview Prep (the last ~7 of ~40 minutes)
+      │
+      ▼
+ process exits — and then the disk is asked, never the model
+```
+
+### 6 · Outcome
+
+```
+ done             exit ok + every required PDF present        → Completed topic
+ done (salvaged)  died late, but the PDFs are there anyway.   → Completed topic
+                  The study aid is optional; the application is the point.
+ duplicate        blocked before spawning                     → Processing topic
+ needs_decision   clean exit, no documents — the pipeline hit a stop-and-ask.
+                  Its closing words are relayed verbatim      → Targeted topic
+ incomplete       ran, wrote some of the documents            → Failed topic
+ failed           timeout, crash, upstream error              → Failed topic
+ interrupted      the watcher restarted mid-build             → General
+                  (reply "yes" again to run it afresh)
+
+ failed, incomplete and needs_decision erase their folder via
+ scripts/cleanup_application.py — dated folder, empty company folder, the
+ tracker row, and that run's _tmp scratch. A folder with no PDFs reads as
+ "already applied" to everything that scans the tree, including this watcher.
+
+ `interrupted` is the exception: the process was killed, so nothing ran to
+ tidy up. The next build for that role reports the partial folder and
+ rebuilds over it.
+```
+
+`retries` is currently `0`, so each build gets one attempt. Set it back to `1` and a build that
+dies on a *transient upstream* failure — a 503, a rate limit, a dropped connection — gets a
+second run 120s later, after its partial folder has been erased. See **Retry on a transient
+upstream failure**.
+
+### One pipeline, two front doors
+
+```
+  ┌─────────────────────────────┐        ┌──────────────────────────────────┐
+  │ watcher                     │        │ you, in Claude Code              │
+  │ approved posting            │        │ paste a URL (+ optional note)    │
+  └──────────────┬──────────────┘        └───────────────┬──────────────────┘
+                 │                                       │
+     claude -p, stdin = "<url>\n<note>"        the same text, typed
+                 │                                       │
+                 └───────────────┬───────────────────────┘
+                                 ▼
+                    ../CLAUDE.md  §Trigger
+                                 │
+                          00 archive posting
+                                 │
+                 ┌───────────────┴───────────────┐
+            01A match brief              01B research note
+                 └───────────────┬───────────────┘
+                 ┌───────────────┴───────────────┐
+            02A CV → 03A verify        02B letter → 03B verify
+                 └───────────────┬───────────────┘
+                                 │  [04A German, if asked for]
+                 ┌───────────────┴───────────────┐
+        05A render → 06A QA              04B interview prep
+                 │                              → 05B render → 06B QA
+      ready ◄────┤ the employer-facing              │
+                 │ half is finished here            │
+                 └───────────────┬──────────────────┘
+                    08 proofread → 09 final QA → clean
+                          → 10 tracker row → 11 report
+```
+
+The two tracks after verification are genuinely concurrent, and the split is the reason the
+watcher can say "ready" early: the CV and cover letter render the moment they pass, and interview
+prep — the longest step, and the only one no employer sees — cannot take them down with it.
+
+`build_prompt()` is one line — `f"{url}\n{note}"` — and that is deliberate. Every sentence of
+scaffolding added there would be a second source of truth competing with `CLAUDE.md`, and the
+day the two disagree the pipeline behaves differently depending on who started it.
+
+What actually differs between the two doors:
+
+| | pasted into the CLI | spawned by the watcher |
+|---|---|---|
+| stop-and-ask | you answer, the run continues | the question is relayed to Telegram and the run ends; the folder is erased |
+| duplicate check | the pipeline's own | plus the watcher's, before spawning |
+| permissions | your session's | `bypassPermissions` + `build_settings.json` + `guard.py` |
+| timeout | none | 45 minutes, then the process tree is killed |
+| tracker row | step 10 | step 10, unchanged |
+
 ## Run it
 
 `watcherctl.py` is the front door. It is the one file here that imports nothing from `watcher`
@@ -548,16 +750,25 @@ message says it is rebuilding over an incomplete attempt.
 
 ### Retry on a transient upstream failure
 
+**Currently off — `[build] retries = 0`, so every build gets one attempt.** The rest of this
+section describes what setting it back to `1` does.
+
 An API or gateway outage can land on the *last* turn of a run that has already spent
 25 minutes producing a match brief, research note, CV, cover letter, both verifications,
 and interview prep — and with cleanup wired in, that erases all of it. So a build that
-dies on an upstream failure gets `[build] retries` more attempts (default 1) after
+dies on an upstream failure gets `[build] retries` more attempts after
 `retry_delay_seconds`, and cleanup only fires once the last one is spent.
 
 Only upstream symptoms qualify: `429`/`5xx`, "overloaded", "temporarily unavailable",
 "bad gateway", a reset or refused connection, `fetch failed`. Not a timeout, not a crash,
 not a build that wrote the wrong files, and not a 401 — those fail the same way twice and
-the second 45 minutes buys nothing. `retries = 0` turns it off.
+the second 45 minutes buys nothing.
+
+What made `0` reasonable is the first of the two bounds below. The expensive case the retry was
+bought for — an outage on the last turn — is now settled by salvage instead: the documents are
+already on disk, the failure is not retried, and the run is reported complete. What is left for
+the retry to catch is a drop *early* in a run, where the second half-hour usually meets the same
+gateway still unwell. Put it back to `1` if failed builds start clustering on 503s.
 
 Two things bound the retry, both of them learned from one run.
 
