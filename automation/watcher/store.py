@@ -19,7 +19,7 @@ import logging
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable, Iterator, Sequence
 
 from .config import DB_PATH, ensure_dirs
 from .normalize import Posting
@@ -376,13 +376,49 @@ def clear_degraded_verdicts(conn: sqlite3.Connection) -> int:
     were written after the retries ran out, and either way the posting deserves
     a clean set of attempts rather than being re-buried on the first failure.
     """
-    ids = degraded_verdict_ids(conn)
+    return clear_verdicts(conn, degraded_verdict_ids(conn))
+
+
+def clear_verdicts(conn: sqlite3.Connection,
+                   posting_ids: Sequence[str]) -> int:
+    """Drop these verdicts so the next cycle re-scores them.
+
+    Deleting the verdict *is* the re-queue: `unscored()` selects on the absence
+    of one, so there is no "needs re-scoring" flag to keep in step with it.
+
+    The attempt counter goes with them. Whatever the caller's reason for
+    throwing a verdict away, it is a reason the posting was never fairly judged,
+    and starting it at two of three attempts would re-bury it on the first
+    failure.
+    """
+    ids = list(dict.fromkeys(posting_ids))
     if not ids:
         return 0
     marks = ",".join("?" * len(ids))
     conn.execute(f"DELETE FROM verdicts WHERE posting_id IN ({marks})", ids)
     conn.execute(f"DELETE FROM score_attempts WHERE posting_id IN ({marks})", ids)
     return len(ids)
+
+
+def forget_notifications(conn: sqlite3.Connection, posting_ids: Sequence[str],
+                         kind: str | None = None) -> int:
+    """Forget that these postings were messaged about, so they can be again.
+
+    The bulk sibling of `forget_notification`, and it carries the same warning:
+    `unnotified_in_band` is the only thing standing between the user and a
+    second ping for every posting here, so a caller that clears more than it
+    means to sends a chat full of duplicates. Narrow it with `kind`.
+    """
+    ids = list(dict.fromkeys(posting_ids))
+    if not ids:
+        return 0
+    marks = ",".join("?" * len(ids))
+    sql = f"DELETE FROM notifications WHERE posting_id IN ({marks})"
+    params: list[object] = list(ids)
+    if kind:
+        sql += " AND kind = ?"
+        params.append(kind)
+    return conn.execute(sql, params).rowcount
 
 
 # --------------------------------------------------------------------------

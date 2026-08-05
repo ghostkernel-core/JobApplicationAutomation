@@ -14,6 +14,19 @@ nothing to do ever again.
     .venv\\Scripts\\python.exe -m watcher.rehydrate --dry-run
     .venv\\Scripts\\python.exe -m watcher.rehydrate
 
+**A body arriving throws the old verdict away.** The first version of this
+module replaced the description and stopped there, which fixed the record and
+left the damage: 185 postings kept scores that had been read off three hundred
+characters of preamble, and the sweep's own log said `filled 88` as though the
+job were done. `_write_back` now clears the verdict in the same transaction, so
+the next cycle re-scores the posting against what it actually says.
+
+That leaves the rows filled before this was true. `--rescore-before` is the
+one-off for them — it fetches nothing, and takes the cutoff from the operator
+because no row records when its body arrived:
+
+    .venv\\Scripts\\python.exe -m watcher.rehydrate --rescore-before 2026-08-05T15:18:21 --dry-run
+
 **Resumable by construction.** A row that gets a real body no longer matches
 the query that selects work, so an interrupted sweep picks up exactly where it
 stopped. Rows that fail are remembered in `meta` and skipped on the next run,
@@ -196,13 +209,21 @@ def _posting_from_row(row: sqlite3.Row) -> Posting:
 
 
 def _write_back(conn: sqlite3.Connection, posting_id: str, posting: Posting) -> None:
-    """Store the body and everything that is read off it.
+    """Store the body, everything read off it, and drop the teaser's verdict.
 
     The five derived columns are written in the same statement as the
     description because they are a *cache* of it — `insert_posting` fills them
     from exactly these properties, and leaving them behind would mean a ping
     quoting a seniority and a language bar taken from the teaser next to a body
     that says something else.
+
+    The verdict is the same argument carried one step further, and it was
+    missed the first time round. A score is read off the description too, so a
+    row that keeps its old verdict through a twenty-fold change of body is
+    worse than one that keeps a stale seniority: it is a judgement of an ad
+    nobody had read, and it looks exactly like a judgement of the real thing.
+    Dropping it is the whole re-score — `store.unscored()` selects on the
+    absence of a verdict, so the next cycle picks the posting up by itself.
     """
     conn.execute(
         """UPDATE postings
@@ -213,6 +234,7 @@ def _write_back(conn: sqlite3.Connection, posting_id: str, posting: Posting) -> 
          ", ".join(posting.languages), posting.contract, posting.arrangement,
          posting_id),
     )
+    store.clear_verdicts(conn, [posting_id])
 
 
 # How long to keep trying a write before giving the row up for this run. A poll
@@ -322,6 +344,104 @@ def run(dry_run: bool = False, provider: str | None = None,
     return report
 
 
+# --------------------------------------------------------------------------
+# the back catalogue
+# --------------------------------------------------------------------------
+
+@dataclass
+class Rescore:
+    verdicts: int = 0
+    pings: int = 0
+    kept_instant: int = 0
+    kept_decided: int = 0
+
+    def summary(self) -> str:
+        parts = [f"{self.verdicts} verdict(s) dropped",
+                 f"{self.pings} digest ping(s) forgotten"]
+        if self.kept_instant:
+            parts.append(f"{self.kept_instant} already pinged, left alone")
+        if self.kept_decided:
+            parts.append(f"{self.kept_decided} already decided, left alone")
+        return ", ".join(parts)
+
+
+def scored_on_a_teaser(conn: sqlite3.Connection, cutoff: str,
+                       provider: str | None = None) -> list[sqlite3.Row]:
+    """Postings holding a verdict older than the body it was meant to judge.
+
+    There is no per-row record of when a body arrived, which is why the caller
+    supplies the cutoff instead of this working it out: the sweep that filled
+    these postings logged when it finished, and any verdict written before that
+    was written against a teaser. Nothing was scored in the hours before it, so
+    the line falls in a gap rather than through the middle of a batch.
+    """
+    providers = [provider] if provider else sorted(DETAIL_URL)
+    marks = ",".join("?" * len(providers))
+    return list(conn.execute(
+        f"""SELECT p.id, p.company, p.title, p.provider, v.score, v.verdict,
+                   (SELECT n.kind FROM notifications n
+                     WHERE n.posting_id = p.id ORDER BY n.id LIMIT 1) AS notified,
+                   EXISTS (SELECT 1 FROM decisions d
+                            WHERE d.posting_id = p.id) AS decided
+              FROM postings p JOIN verdicts v ON v.posting_id = p.id
+             WHERE p.provider IN ({marks})
+               AND LENGTH(p.description) >= ?
+               AND v.created_at < ?
+             ORDER BY v.score DESC""",
+        (*providers, TEASER_CHARS, cutoff),
+    ))
+
+
+def rescore_before(cutoff: str, provider: str | None = None,
+                   dry_run: bool = False) -> Rescore:
+    """Re-queue the verdicts that a teaser produced, and unmute the quiet ones.
+
+    Two separate things, because the postings fall into three groups and only
+    one of them wants both:
+
+    * Never messaged about — dropping the verdict is enough. If the real body
+      scores high the next cycle pings, which is the ordinary path.
+    * Digested — the score put them in the round-up rather than in front of the
+      user, and that score is the one now known to be wrong. `unnotified_in_band`
+      excludes anything with a notifications row, so re-scoring alone would
+      correct the record and change nothing the user ever sees. These get the
+      digest row dropped too.
+    * Pinged, or already decided on — left exactly as they are. The user has
+      seen the posting; a second ping for a score that moved is noise, and
+      re-offering something they skipped is worse than noise.
+    """
+    store.init_db()
+    with store.connect() as conn:
+        rows = scored_on_a_teaser(conn, cutoff, provider=provider)
+        report = Rescore()
+        unmute: list[str] = []
+        for row in rows:
+            if row["decided"]:
+                report.kept_decided += 1
+            elif row["notified"] == "digest":
+                unmute.append(row["id"])
+            elif row["notified"]:
+                report.kept_instant += 1
+
+        log.info("%d posting(s) scored before %s now hold a full body",
+                 len(rows), cutoff)
+        for row in rows[:10]:
+            log.info("  %s/%s %s — %s (%s)", row["score"], row["verdict"],
+                     row["company"], row["title"], row["notified"] or "not sent")
+        if len(rows) > 10:
+            log.info("  ... and %d more", len(rows) - 10)
+
+        if dry_run:
+            report.verdicts = len(rows)
+            report.pings = len(unmute)
+            log.info("dry run — nothing was changed")
+            return report
+
+        report.verdicts = store.clear_verdicts(conn, [r["id"] for r in rows])
+        report.pings = store.forget_notifications(conn, unmute, kind="digest")
+    return report
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dry-run", action="store_true",
@@ -336,10 +456,23 @@ def main(argv: list[str] | None = None) -> int:
                         help="per-page timeout in seconds (default 45)")
     parser.add_argument("--retry-failed", action="store_true",
                         help="forget previous failures and try them again")
+    parser.add_argument("--rescore-before", metavar="TIMESTAMP",
+                        help="re-queue postings whose verdict predates this "
+                             "ISO timestamp and which now hold a full body; "
+                             "fetches nothing")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args(argv)
 
     setup(logging.DEBUG if args.verbose else logging.INFO)
+
+    if args.rescore_before:
+        # Its own mode. Nothing here touches the network, so it does not want a
+        # browser profile, a delay, or any of the sweep's other machinery.
+        report = rescore_before(args.rescore_before, provider=args.provider,
+                                dry_run=args.dry_run)
+        log.info("rescore: %s", report.summary())
+        return 0
+
     # Set before anything opens the browser. The watcher owns state/browser/ for
     # as long as it runs, and two Chromium processes cannot share one profile.
     os.environ[config.BROWSER_PROFILE_ENV] = str(PROFILE_COPY)

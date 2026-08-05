@@ -60,6 +60,16 @@ body. It is resumable — a posting that gets a body stops matching the query th
 and it runs while the watcher is up, on a copy of the browser profile, because Chromium locks a
 profile directory to one process.
 
+**A body arriving deletes the posting's verdict**, which is what re-queues it: `unscored()`
+selects on the absence of one, so the next cycle judges it on the real ad. The first version of
+the sweep replaced the description and left the score, which corrected the record and kept every
+wrong answer in it. The rows filled before that changed are re-queued once by
+`rehydrate --rescore-before <ISO timestamp>` — no fetching, and the cutoff comes from the
+operator because nothing records when a body arrived. It also drops the *digest* notification
+rows for those postings, since `unnotified_in_band` would otherwise mean a corrected score can
+never reach you; postings that were pinged outright, or that you have already replied to, keep
+their record and stay quiet.
+
 The repository root has `start_watcher.py`, which takes every one of these sub-commands and
 forwards it here unchanged — `python start_watcher.py restart` and `py watcherctl.py restart` are
 the same command. It defaults to `start` when given no arguments, so the launcher shortcuts and
