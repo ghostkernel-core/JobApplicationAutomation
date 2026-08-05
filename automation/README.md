@@ -457,7 +457,17 @@ build_settings.json`, cwd pinned to the workspace root, with the URL and note on
    the call and its stderr becomes the reason the model sees. It blocks destructive commands,
    credential and system paths, and any *write* outside the workspace; reads may roam, because
    the canonical profile cites work under `D:\Research Archive`. Every decision is appended to
-   `logs/builds/guard.log`. `--self-test` runs the fixture table.
+   `logs/builds/guard.log`. `--self-test` runs the fixture table, which CI runs on every push;
+   the drive-letter containment cases report themselves as skipped there, because a drive letter
+   is only an absolute path on the platform that has drives.
+
+   One rule is not about confinement at all: a double-quoted path containing `\$` is blocked.
+   Inside double quotes bash reads that as an escaped dollar, so `"...\2026\Company\${TODAY} -
+   Role"` loses the separator *and* keeps `${TODAY}` literal. `mkdir -p` then succeeds on a name
+   nobody meant and the run writes a whole application into it — which happened, and was noticed
+   only because that archiver echoed the path afterwards. Folders are scaffolded with
+   `scripts/scaffold.py`, which prints the absolute path; there is no reason to build one in the
+   shell.
 
    The hook's `command` must be the **absolute venv interpreter path**. Bare `python` resolves
    to the Microsoft Store alias stub on this machine and the hook silently never fires — the

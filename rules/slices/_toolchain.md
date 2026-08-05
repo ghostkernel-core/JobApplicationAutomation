@@ -25,6 +25,10 @@ this file in the same run — otherwise every other agent is working from a stal
 Run every script from the workspace root. Paths with spaces need quoting.
 
 ```
+python scripts/scaffold.py "<Company>" "<Role>"     # creates the deliverable folder
+       [--date YYYY-MM-DD]   # default today
+       # prints the absolute path on stdout — capture it, do not rebuild it by hand
+
 python scripts/render_latex_application.py <payload.json> <target_folder>
        [--only PAYLOAD_KEY]   # repeatable; render exactly these keys
        [--no-pdf]             # .tex only, skip PDF compilation

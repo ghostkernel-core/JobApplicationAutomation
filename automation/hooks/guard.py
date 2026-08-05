@@ -148,6 +148,21 @@ QUOTED_SPAN = re.compile(r"\"([^\"]*)\"|'([^']*)'")
 DRIVE_QUOTED = re.compile(r"\b([A-Za-z]):[\\/]+(.*)", re.DOTALL)
 MSYS_QUOTED = re.compile(r"^/([a-z])/(.*)", re.DOTALL)
 
+# A Windows path separator that ate the variable it was standing in front of.
+#
+# Inside double quotes bash treats `\$` as an escape, so a folder built as
+# "...\2026\${TODAY} - Role" loses the backslash *and* keeps `${TODAY}` as
+# four literal characters. `mkdir -p` then succeeds on a name nobody meant, the
+# run carries on writing into it, and the only symptom much later is a build
+# that reported success with no dated folder anywhere. It happened: one archiver
+# created `2026\kausable GmbH${TODAY} - ML Product Engineer` and only noticed
+# because it happened to echo the path afterwards.
+#
+# A digit cannot start a shell name, so `"\$5m"` — a literal price, or LaTeX —
+# is not this, and the separator test keeps it to things shaped like paths.
+ESCAPED_EXPANSION = re.compile(r"\\\$(?=[{A-Za-z_])")
+PATH_SEPARATOR = re.compile(r"[\\/]")
+
 def _split_root(root: Path) -> tuple[str, str]:
     """("d", "job applications") for D:\\Job Applications.
 
@@ -238,6 +253,19 @@ def evaluate_bash(command: str) -> str | None:
     if outside and WRITE_VERBS.search(command):
         return (f"this command writes outside {WORKSPACE} ({outside[0]}); "
                 f"builds may only modify the workspace")
+
+    # Last, because it is the only rule here that catches a command which would
+    # otherwise succeed. Everything above stops a build reaching somewhere it
+    # should not; this stops it quietly reaching the wrong place.
+    for double, _single in QUOTED_SPAN.findall(command):
+        if (double and ESCAPED_EXPANSION.search(double)
+                and PATH_SEPARATOR.search(double)):
+            return ("this path escapes its own variable: inside double quotes "
+                    "`\\$` is a literal dollar, so the separator disappears and "
+                    "the name is never expanded. Scaffold the folder with "
+                    "`python scripts/scaffold.py \"<Company>\" \"<Role>\"`, which "
+                    "prints the absolute path, or write the path with forward "
+                    "slashes")
     return None
 
 
@@ -401,6 +429,17 @@ CASES: list[tuple[str, dict, bool]] = [
     ("Bash", {"command": "cp cv.pdf \"D:/Research Archive/cv.pdf\""}, True),      # quoted write outside
     ("Bash", {"command": "echo x > \"C:/Users/someone/notes.txt\""}, True),
 
+    # The separator that ate its variable. The first is verbatim from the run
+    # that produced `2026\kausable GmbH${TODAY} - ML Product Engineer`.
+    ("Bash", {"command": f"TODAY=$(date +%F); mkdir -p \"{WS}\\2026\\kausable GmbH\\${{TODAY}} - ML Product Engineer\""}, True),
+    ("Bash", {"command": "mkdir -p \"2026/ExampleCo/\\$TODAY - AI Engineer\""}, True),
+    # ...and what it must not mistake for it. A price, a LaTeX escape, and the
+    # correct form of the same command.
+    ("Bash", {"command": "echo \"budget: \\$5m\""}, False),
+    ("Bash", {"command": "printf '%s' \"cost \\$1,200\" > _tmp/note.txt"}, False),
+    ("Bash", {"command": f"TODAY=$(date +%F); mkdir -p \"{WS}/2026/ExampleCo/$TODAY - AI Engineer\""}, False),
+    ("Bash", {"command": "python scripts/scaffold.py \"kausable GmbH\" \"ML Product Engineer\""}, False),
+
     ("Bash", {"command": "rm -rf /"}, True),
     ("Bash", {"command": "del /s C:\\Windows\\System32"}, True),
     ("Bash", {"command": "type %USERPROFILE%\\.claude\\settings.json"}, True),
@@ -415,13 +454,29 @@ CASES: list[tuple[str, dict, bool]] = [
 
     ("Write", {"file_path": f"{WS}/2026/Deluxe/x.tex"}, False),
     ("Edit", {"file_path": "2026/Deluxe/x.tex"}, False),              # relative to cwd
-    ("Edit", {"file_path": "D:/Research Archive/thesis.tex"}, True),
-    ("Write", {"file_path": "C:/Users/someone/.claude/settings.json"}, True),
     ("Edit", {"file_path": f"{WS}/../evil.txt"}, True),               # traversal
 
-    ("Read", {"file_path": "D:/Research Archive/thesis.tex"}, False),        # reading is fine
     ("Read", {"file_path": "C:/Users/someone/.claude/settings.json"}, True),
     ("WebFetch", {"url": "https://example.com"}, False),              # not our business
+]
+
+WINDOWS = sys.platform == "win32"
+
+# Cases that turn on how the platform spells "absolute". The file-path tools go
+# through `Path`, and there a drive letter only means anything on the platform
+# that has drives: `Path("D:/Research Archive/thesis.tex")` is a *relative* path
+# on Linux, so it resolves inside the workspace and is correctly allowed. The
+# same case therefore proves opposite things on the two platforms. The hook only
+# ever runs on the owner's Windows machine; CI runs the suite on Linux, so each
+# gets the trio written the way that platform writes a path.
+CASES += [
+    ("Edit", {"file_path": "D:/Research Archive/thesis.tex"}, True),
+    ("Write", {"file_path": "C:/Users/someone/.claude/settings.json"}, True),
+    ("Read", {"file_path": "D:/Research Archive/thesis.tex"}, False),        # reading is fine
+] if WINDOWS else [
+    ("Edit", {"file_path": "/srv/research archive/thesis.tex"}, True),
+    ("Write", {"file_path": "/home/someone/.claude/settings.json"}, True),
+    ("Read", {"file_path": "/srv/research archive/thesis.tex"}, False),
 ]
 
 
@@ -453,6 +508,12 @@ REF_CASES: list[tuple[str, bool]] = [
 # is exercised against a root that is deliberately neither this drive nor this
 # folder name. A regression to a literal drive letter / folder name fails here
 # and nowhere else â€” on this machine the hard-coded version passes everything.
+#
+# Windows-only, and not by oversight: `_outside_workspace` recognises an absolute
+# path by its drive letter, because a drive letter is what the hook sees. Under a
+# posix root `_split_root` yields no drive, nothing matches, and every case would
+# report "inside" — a suite that passes by testing nothing. So on Linux these are
+# skipped and counted as such rather than quietly rewritten into something weaker.
 ALT_ROOT = Path("E:/Bewerbungen/Zweitkonto")
 ALT_CASES: list[tuple[str, bool]] = [
     # (command, should any path be reported as outside)
@@ -462,7 +523,7 @@ ALT_CASES: list[tuple[str, bool]] = [
     ("cp cv.pdf \"D:/Other Workspace/2026/x.pdf\"", True),
     ("cp cv.pdf \"E:/Bewerbungen/Other/x.pdf\"", True),
     ("cat \"E:/Bewerbungen/Zweitkonto/rules/00-canonical-profile.md\"", False),
-]
+] if WINDOWS else []
 
 
 def _self_test() -> int:
@@ -492,7 +553,8 @@ def _self_test() -> int:
             print(f"  FAIL  want {want}, got {got}: read {path}")
 
     total = len(CASES) + len(ALT_CASES) + len(REF_CASES)
-    print(f"{total - failures}/{total} guard cases pass")
+    note = "" if WINDOWS else " (posix: drive-letter containment cases skipped)"
+    print(f"{total - failures}/{total} guard cases pass{note}")
     return 1 if failures else 0
 
 
