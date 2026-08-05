@@ -480,7 +480,20 @@ def duplicate_message(label: str, existing: dedupe.ExistingApplication) -> str:
 
 
 def _doc_list(documents: tuple[str, ...]) -> str:
-    prefix = f"{load_identity().file_prefix} - "
+    """Document names for a report, with the owner's file prefix stripped.
+
+    Stripping it is cosmetic: `<file_prefix> - CV.pdf` reads better as "CV" in a
+    Telegram message that already says whose workspace this is. It is not
+    worth an exception. `load_identity` raises when identity.toml is missing or
+    still full of FILL IN, and this is the function that reports a build —
+    including the build that failed *because* the workspace is incomplete. A
+    report that cannot render is strictly worse than one that spells a filename
+    out in full, and raising here replaces the real failure with this one.
+    """
+    try:
+        prefix = f"{load_identity().file_prefix} - "
+    except Exception:  # missing, unreadable, or still a placeholder
+        prefix = ""
     return " · ".join(name.removeprefix(prefix).replace(".pdf", "")
                       for name in documents)
 

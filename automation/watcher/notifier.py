@@ -26,6 +26,13 @@ log = logging.getLogger("watcher.notify")
 
 MAX_INSTANT_PER_POLL = 6  # anything beyond this waits for the digest
 
+TELEGRAM_MAX_CHARS = 4096  # hard API limit; a longer message is rejected, not trimmed
+# Room for the header and footer. Packing decides how many parts there are and
+# the part count decides the header's width, so the allowance is reserved up
+# front rather than measured.
+DIGEST_OVERHEAD = 320
+DIGEST_ENTRY_MAX = TELEGRAM_MAX_CHARS - DIGEST_OVERHEAD
+
 
 def _escape(text: str) -> str:
     """Escape for Telegram HTML parse mode."""
@@ -98,17 +105,82 @@ def format_instant(row: sqlite3.Row) -> str:
     return "\n".join(lines)
 
 
+def _digest_entry(index: int, row: sqlite3.Row) -> str:
+    where = row["location"] or row["country"] or "?"
+    entry = (
+        f"{index}. <b>{int(row['score'])}</b> {_escape(row['title'])}\n"
+        f"    {_escape(row['company'])} — {_escape(where)}\n"
+        f"    {_escape(row['url'])}"
+    )
+    if len(entry) > DIGEST_ENTRY_MAX:
+        # Only the tail — company and URL — is cut. The one tag pair closes
+        # around the score on the first line, so the HTML stays balanced.
+        entry = entry[:DIGEST_ENTRY_MAX - 1] + "…"
+    return entry
+
+
+def _pack_digest(rows: Sequence[sqlite3.Row]) -> list[list[sqlite3.Row]]:
+    """Group rows into per-message batches that fit inside the size limit."""
+    budget = TELEGRAM_MAX_CHARS - DIGEST_OVERHEAD
+    batches: list[list[sqlite3.Row]] = []
+    current: list[sqlite3.Row] = []
+    used = 0
+    for row in rows:
+        # Numbering restarts per message, so an entry's width follows its
+        # position in the batch being filled, not its position overall.
+        width = len(_digest_entry(len(current) + 1, row)) + 1
+        if current and used + width > budget:
+            batches.append(current)
+            current, used = [], 0
+            width = len(_digest_entry(1, row)) + 1
+        current.append(row)
+        used += width
+    if current:
+        batches.append(current)
+    return batches
+
+
+def format_digest_chunks(
+    rows: Sequence[sqlite3.Row],
+) -> list[tuple[str, list[sqlite3.Row]]]:
+    """The digest as one or more messages, each with the rows it covers.
+
+    The digest is unbounded — it carries the whole mid-band plus every high
+    scorer the instant cap held back — while Telegram rejects anything over
+    4096 characters outright. One night of backlog is a 21k-character message
+    and a BadRequest, and because nothing is recorded when the send raises, the
+    band keeps growing and every later digest is larger still. Splitting is
+    what stops that from being permanent.
+
+    Line numbers restart at 1 in each message on purpose: `build 3` resolves
+    against the postings recorded for the message it replies to
+    (`store.postings_for_message`), so continuous numbering across parts would
+    send "build 17" looking for a seventeenth entry in a message that has six.
+    """
+    batches = _pack_digest(list(rows))
+    total = sum(len(batch) for batch in batches)
+    chunks: list[tuple[str, list[sqlite3.Row]]] = []
+    for number, batch in enumerate(batches, start=1):
+        head = f"📋 <b>{total} posting(s) worth a look</b>"
+        if len(batches) > 1:
+            head += f" — part {number}/{len(batches)}"
+        lines = [head, ""]
+        lines += [_digest_entry(i, row) for i, row in enumerate(batch, start=1)]
+        footer = "<i>Reply to this message with “build 2” — or “2, add German”."
+        if len(batches) > 1:
+            footer += " Numbers count from 1 in each part, so reply to the part"
+            footer += " the posting is in.</i>"
+        else:
+            footer += "</i>"
+        lines += ["", footer]
+        chunks.append(("\n".join(lines), batch))
+    return chunks
+
+
 def format_digest(rows: Sequence[sqlite3.Row]) -> str:
-    lines = [f"📋 <b>{len(rows)} posting(s) worth a look</b>", ""]
-    for index, row in enumerate(rows, start=1):
-        where = row["location"] or row["country"] or "?"
-        lines.append(
-            f"{index}. <b>{int(row['score'])}</b> {_escape(row['title'])}\n"
-            f"    {_escape(row['company'])} — {_escape(where)}\n"
-            f"    {_escape(row['url'])}"
-        )
-    lines += ["", "<i>Reply to this message with “build 2” — or “2, add German”.</i>"]
-    return "\n".join(lines)
+    """The first digest message. Use `format_digest_chunks` to send them all."""
+    chunks = format_digest_chunks(rows)
+    return chunks[0][0] if chunks else ""
 
 
 def format_kb_proposal(proposal: dict[str, Any]) -> str:
@@ -198,12 +270,25 @@ class Notifier:
             log.info("nothing for the digest")
             return 0
 
-        message_id = await self.send(format_digest(rows))
-        with store.connect() as conn:
-            for row in rows:
-                store.record_notification(conn, row["id"], self.chat_id,
-                                          message_id, "digest")
-        return len(rows)
+        chunks = format_digest_chunks(rows)
+        sent = 0
+        for number, (text, batch) in enumerate(chunks, start=1):
+            try:
+                message_id = await self.send(text)
+            except Exception as exc:  # network, rate limit, bad markup
+                # Recorded per part, so a rejected one costs only its own rows:
+                # the rest still go out, and these stay in the band for the next
+                # digest instead of being marked sent or lost.
+                log.error("digest part %d/%d failed: %s", number, len(chunks), exc)
+                continue
+            with store.connect() as conn:
+                for row in batch:
+                    store.record_notification(conn, row["id"], self.chat_id,
+                                              message_id, "digest")
+            sent += len(batch)
+        if len(chunks) > 1:
+            log.info("digest sent as %d part(s)", len(chunks))
+        return sent
 
     async def send_notice(self, text: str) -> None:
         """Operational message — source failure, heartbeat, build result."""

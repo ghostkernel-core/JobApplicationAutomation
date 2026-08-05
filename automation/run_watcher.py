@@ -37,6 +37,29 @@ BUILD_DISABLED_NOTE = (
 )
 
 
+def local_time(hour: int, minute: int) -> dt.time:
+    """A daily run time in the machine's own timezone.
+
+    JobQueue treats a naive `dt.time` as UTC, so `digest_hour = 19` in
+    config.toml was firing at 21:05 in Berlin while both the config comment and
+    `watcherctl status` called it "19:00 local". Two hours is enough to push the
+    evening digest past the point anyone is still looking, and the heartbeat out
+    of the morning entirely.
+
+    The zone is resolved rather than the current offset frozen: a fixed +02:00
+    captured in August would still be claiming summer time in December.
+    """
+    try:
+        from tzlocal import get_localzone  # APScheduler's own dependency
+        zone = get_localzone()
+    except Exception:  # no tzlocal, or no system zone to read
+        # Fixed offset for today. Wrong after the next DST change, but closer
+        # than UTC and it keeps the watcher starting.
+        zone = dt.datetime.now().astimezone().tzinfo
+        log.warning("no local timezone available; daily jobs pinned to %s", zone)
+    return dt.time(hour=hour, minute=minute, tzinfo=zone)
+
+
 # --------------------------------------------------------------------------
 # the cycle
 # --------------------------------------------------------------------------
@@ -89,7 +112,15 @@ async def digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def heartbeat_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     notifier: Notifier = context.application.bot_data["notifier"]
-    await notifier.send_heartbeat(context.application.bot_data.get("last_cycle", {}))
+    cycle = context.application.bot_data.get("last_cycle", {})
+    # Logged on the way out as well as on failure: `send_notice` swallows its
+    # errors, so without this a heartbeat that never ran and one that ran fine
+    # look identical in the log — which is the wrong pair of things to confuse
+    # when the question is "has this been quiet or has it been dead?".
+    log.info("heartbeat: last cycle fetched %d, new %d, notified %d",
+             cycle.get("fetched", 0), cycle.get("stored", 0),
+             cycle.get("notified", 0))
+    await notifier.send_heartbeat(cycle)
 
 
 async def kb_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -304,14 +335,14 @@ def build_app(notifier: Notifier) -> Application:
     # first=10 so a restart proves itself quickly instead of going quiet for
     # the whole interval.
     queue.run_repeating(poll_job, interval=config.interval_minutes * 60, first=10)
-    queue.run_daily(digest_job, time=dt.time(hour=config.digest_hour, minute=5))
-    queue.run_daily(heartbeat_job, time=dt.time(hour=config.heartbeat_hour, minute=15))
+    queue.run_daily(digest_job, time=local_time(config.digest_hour, 5))
+    queue.run_daily(heartbeat_job, time=local_time(config.heartbeat_hour, 15))
     if config.kb_enabled:
         # `[kb] weekday` follows `date.weekday()` (0 = Monday), because that is
         # what Python means by a weekday everywhere else in this codebase.
         # JobQueue.run_daily counts 0 = Sunday, so it is shifted here rather
         # than leaving the config off by one day.
-        queue.run_daily(kb_job, time=dt.time(hour=config.kb_hour, minute=25),
+        queue.run_daily(kb_job, time=local_time(config.kb_hour, 25),
                         days=((config.kb_weekday + 1) % 7,))
     return app
 

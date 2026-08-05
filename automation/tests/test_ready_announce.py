@@ -117,6 +117,48 @@ def test_a_failure_with_no_announcement_retracts_nothing(status: str) -> None:
     assert "retracts" not in text.lower()
 
 
+def test_a_report_renders_without_an_identity(monkeypatch) -> None:
+    """identity.toml is git-ignored, so CI and a fresh clone both lack it.
+
+    `_doc_list` only strips a cosmetic filename prefix, but it raised through
+    every message in this module — which is how the suite came to pass on a
+    developer's machine and fail on every checkout that had not been through
+    `init_workspace.py`. Worse in production than in CI: the report that raises
+    is the one carrying news of a build that failed for that very reason.
+    """
+    from watcher import builder
+
+    def missing():
+        raise FileNotFoundError("identity.toml is missing")
+
+    monkeypatch.setattr(builder, "load_identity", missing)
+
+    outcome = Outcome(status=DONE, folder="2026/Acme/2026-08-04 - Data Scientist",
+                      documents=("Someone - CV.pdf", "Someone - Cover Letter.pdf"),
+                      tracker_row=True)
+    text = builder.result_message("<b>Acme</b>", outcome, _log())
+    assert "Built" in text
+    # Unstripped rather than absent: the name is still the useful part.
+    assert "Someone - CV" in text
+    assert "Someone - Cover Letter" in text
+
+
+def test_the_prefix_is_still_stripped_when_the_identity_is_there(monkeypatch) -> None:
+    """The fallback must not quietly become the only behaviour."""
+    from watcher import builder
+
+    class _Identity:
+        file_prefix = "Someone"
+
+    monkeypatch.setattr(builder, "load_identity", lambda: _Identity())
+
+    outcome = Outcome(status=DONE, folder="2026/Acme/2026-08-04 - Data Scientist",
+                      documents=("Someone - CV.pdf",), tracker_row=True)
+    text = builder.result_message("<b>Acme</b>", outcome, _log())
+    assert "Someone - CV" not in text
+    assert "CV" in text
+
+
 def _log():
     from pathlib import Path
     return Path("20260804-190411-acme-data-scientist.log")
