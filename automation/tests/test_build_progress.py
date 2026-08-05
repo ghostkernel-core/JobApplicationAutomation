@@ -24,8 +24,10 @@ are about a build surviving its progress reporting, not about the checklist.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import re
+import sys
 
 import pytest
 
@@ -500,3 +502,35 @@ def test_a_broken_replay_does_not_hold_up_boot(tmp_path):
     notifier = _Notifier(fail=True)
     _recover(notifier, _stale_row(tmp_path))  # must not raise
     assert notifier.edits == []
+
+
+# --------------------------------------------------------------------------
+# the replay CLI
+# --------------------------------------------------------------------------
+
+def test_replay_prints_on_a_cp1252_console(tmp_path, capsys, monkeypatch):
+    """The one command for inspecting a past build must survive Windows.
+
+    The checklist is drawn with ✅ and ⏳, and the console here defaults to
+    cp1252 — so `--replay` died on the first row it tried to print, on the
+    machine the watcher actually runs on.
+    """
+    log = tmp_path / "20260805-120000-acme-data-scientist.log"
+    log.write_text(
+        "$ claude -p\ncwd: .\n\n---\n"
+        + "\n".join(json.dumps(e) for e in [
+            _agent("00-posting-archiver", "t1", 0),
+            _result("t1", 30),
+        ]) + "\n",
+        encoding="utf-8")
+
+    # What `force_utf8` exists to undo: an encoder that cannot spell ✅.
+    monkeypatch.setattr(
+        sys, "stdout",
+        io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict"))
+
+    assert progress.main(["--replay", str(log)]) == 0
+    sys.stdout.flush()
+    written = sys.stdout.buffer.getvalue().decode("utf-8")
+    assert "Archive posting" in written
+    assert "✅" in written, "the mark cp1252 could not spell came through"

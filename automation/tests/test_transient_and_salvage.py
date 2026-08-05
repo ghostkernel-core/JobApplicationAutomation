@@ -106,6 +106,9 @@ class _Store:
     def finish_build(self, conn, build_id, status, folder="", detail=""):
         self.finished.append((status, folder, detail))
 
+    def mark_build_running(self, conn, build_id, log_file):
+        pass
+
 
 class _Builder:
     """Enough of a Builder for the real `_handle` to run against."""
@@ -116,11 +119,13 @@ class _Builder:
     # test.
     _finish = builder.Builder._finish
 
-    def __init__(self, ok: bool, detail: str, announce: bool) -> None:
+    def __init__(self, ok: bool, detail: str, announce: bool,
+                 closing: str = "") -> None:
         self.config = _Config()
         self.sent: list[str] = []
         self.topics: list[str] = []
         self._ok, self._detail, self._announce = ok, detail, announce
+        self._closing = closing
 
     async def _reply(self, job, text: str,
                      topic: str = "processing_build") -> None:
@@ -138,11 +143,11 @@ class _Builder:
         # would during a real build.
         await asyncio.sleep(0)
         await asyncio.sleep(0)
-        return self._ok, self._detail, Path("build.log")
+        return self._ok, self._detail, self._closing, Path("build.log")
 
 
 def _run(monkeypatch, *, ok: bool, detail: str, disk: Outcome,
-         announce: bool = False):
+         announce: bool = False, closing: str = ""):
     """Drive the real `_handle` with a fixed build result and a fixed disk."""
     cleaned: list[tuple[str, str]] = []
 
@@ -157,7 +162,7 @@ def _run(monkeypatch, *, ok: bool, detail: str, disk: Outcome,
                         lambda c, t, cfg: dataclasses.replace(disk))
     monkeypatch.setattr(builder, "clean_up", fake_clean_up)
 
-    instance = _Builder(ok, detail, announce)
+    instance = _Builder(ok, detail, announce, closing)
     job = Job(posting_id="p1", note="", reply_message_id=None, build_id=1)
     asyncio.run(builder.Builder._handle(instance, job))
     return instance, store, cleaned
@@ -254,3 +259,120 @@ def test_the_message_names_what_the_late_failure_cost() -> None:
     # The two things the user now has to check are already on the line above.
     assert "no tracker row" in text
     assert "CV" in text
+
+
+# --------------------------------------------------------------------------
+# what a retry is allowed to do
+# --------------------------------------------------------------------------
+#
+# The retry saved the run it was written for and then damaged the next one. A
+# build announced its application as ready at 18:10, lost the connection during
+# Interview Prep at 18:16, and was restarted from step 00 — twenty-six minutes
+# to rebuild two documents that were already on disk and already announced. It
+# also renamed the folder on the way (`AWS AI & Data Engineer` became `AWS AI
+# Data Engineer`), leaving the abandoned attempt behind as a second application
+# for the same role.
+
+
+class _RetryConfig(_Config):
+    build_retries = 1
+    build_retry_delay_seconds = 0
+
+
+class _Retrier:
+    """Enough of a Builder for the real `_attempt` to run against."""
+
+    _attempt = builder.Builder._attempt
+
+    def __init__(self) -> None:
+        self.config = _RetryConfig()
+        self.sent: list[str] = []
+
+    async def _reply(self, job, text: str,
+                     topic: str = "processing_build") -> None:
+        self.sent.append(text)
+
+
+def _drive(monkeypatch, *, spawns, disk: Outcome):
+    """Run the real `_attempt` over a fixed sequence of `_spawn` results."""
+    trace: list[str] = []
+    results = list(spawns)
+
+    async def fake_spawn(prompt, config, log_file, on_event=None):
+        trace.append("spawn")
+        return results.pop(0)
+
+    def fake_clean_up(folder: str, reason: str) -> str:
+        trace.append(f"clean:{folder}")
+        return f"removed {folder}"
+
+    monkeypatch.setattr(builder, "store", _Store())
+    monkeypatch.setattr(builder, "_spawn", fake_spawn)
+    monkeypatch.setattr(builder, "clean_up", fake_clean_up)
+    monkeypatch.setattr(builder, "locate_output",
+                        lambda c, t, cfg: dataclasses.replace(disk))
+    monkeypatch.setattr(builder, "log_path_for",
+                        lambda c, t, attempt=1: Path(f"build-{attempt}.log"))
+
+    instance = _Retrier()
+    job = Job(posting_id="p1", note="", reply_message_id=None, build_id=1)
+    outcome = asyncio.run(builder.Builder._attempt(
+        instance, job, "Acme", "Data Scientist", "https://example.com/job",
+        "<b>Acme</b> — Data Scientist"))
+    return instance, outcome, trace
+
+
+def test_a_drop_after_the_documents_landed_is_not_retried(monkeypatch) -> None:
+    """The regression: a finished application is not rebuilt from step 00."""
+    _, outcome, trace = _drive(
+        monkeypatch, spawns=[(False, DROPPED, "")], disk=_complete())
+
+    assert trace == ["spawn"], "the documents were already there"
+    # Returned as the failure it was — `_finish` is what turns that into a
+    # salvage, and it makes the same disk check to do it.
+    assert outcome[0] is False and outcome[1] == DROPPED
+
+
+def test_a_drop_before_the_documents_is_still_retried(monkeypatch) -> None:
+    """Widening the check must not disable the retry it lives inside."""
+    disk = Outcome(status=INCOMPLETE,
+                   folder="2026/Acme/2026-08-05 - Data Scientist",
+                   detail="missing Someone - Cover Letter.pdf",
+                   documents=("Someone - CV.pdf",))
+    _, outcome, trace = _drive(
+        monkeypatch,
+        spawns=[(False, DROPPED, ""), (True, "", "")],
+        disk=disk)
+
+    assert trace.count("spawn") == 2
+    assert outcome[0] is True
+
+
+def test_the_partial_folder_is_erased_before_the_retry(monkeypatch) -> None:
+    """The orphan: two folders for one application, under different names."""
+    folder = "2026/Acme/2026-08-05 - Data Scientist"
+    disk = Outcome(status=INCOMPLETE, folder=folder,
+                   detail="missing Someone - Cover Letter.pdf",
+                   documents=("Someone - CV.pdf",))
+    instance, _, trace = _drive(
+        monkeypatch,
+        spawns=[(False, DROPPED, ""), (True, "", "")],
+        disk=disk)
+
+    assert trace == ["spawn", f"clean:{folder}", "spawn"]
+    # And the notice says so, rather than the promise it used to make that
+    # nothing had been touched.
+    assert "removed" in instance.sent[-1]
+
+
+def test_nothing_is_erased_when_the_first_attempt_wrote_no_folder(
+        monkeypatch) -> None:
+    disk = Outcome(status=FAILED,
+                   detail="the build reported success but no dated folder appeared")
+    _, outcome, trace = _drive(
+        monkeypatch,
+        spawns=[(False, DROPPED, ""), (True, "", "")],
+        disk=disk)
+
+    assert trace == ["spawn", "spawn"]
+    assert outcome[0] is True

@@ -250,7 +250,7 @@ in `config.toml` with the thread ids:
 ```toml
 [notify.topics]
 new_posting     = 0    # instant pings and the evening digest
-targeted_build  = 0    # postings you approved, kept as a record
+targeted_build  = 0    # postings you approved, and any question a run stops to ask
 processing_build = 0   # queued, building, retrying, declined as a duplicate
 failed_build    = 0    # a build that failed, and any retraction
 completed_build = 0    # the application is ready, and the run is complete
@@ -539,16 +539,67 @@ Only upstream symptoms qualify: `429`/`5xx`, "overloaded", "temporarily unavaila
 not a build that wrote the wrong files, and not a 401 — those fail the same way twice and
 the second 45 minutes buys nothing. `retries = 0` turns it off.
 
+Two things bound the retry, both of them learned from one run.
+
+**A finished application is never rebuilt.** `CLAUDE.md` renders the CV and cover letter as
+soon as they pass QA and treats interview prep as optional after that, so an upstream drop
+during prep lands on a run whose documents are already on disk and already announced. Before
+retrying, the builder asks the disk: if both required PDFs are there, the failure is returned
+unretried and settled as a salvage. Without that check one drop cost twenty-six minutes
+rebuilding two documents from step 00 that had been announced as ready six minutes earlier.
+
+**A partial folder is erased before the next attempt.** The previous design left it for the
+retry to scaffold over, which holds only while both attempts name the folder identically — and
+the archiver names it from the role title. One retry wrote `AWS AI & Data Engineer` and the
+next `AWS AI Data Engineer`, leaving two folders for one application, the abandoned one reading
+as an application already sent. Re-capturing the posting costs a minute; a phantom application
+costs a real one.
+
 Each attempt writes its own log (`…-retry1.log`), so the transcript of the failure that
-caused the retry survives. The folder from the previous attempt is left in place — the
-pipeline scaffolds over it, so the archived posting is not re-fetched, and the tracker
-de-dupes on company + role + date. Telegram says what happened rather than going quiet:
+caused the retry survives. Telegram says what happened rather than going quiet:
 
 ```
 🔁 Retrying · Deluxe — AI Engineer
 API Error: 503 All accounts are temporarily unavailable
-Attempt 2 of 2, in 120s. Nothing has been cleaned up yet.
+Attempt 2 of 2, in 120s. The partial folder was removed first.
 ```
+
+### When the pipeline stops to ask
+
+`CLAUDE.md` gives the pipeline three reasons to stop mid-run rather than invent an answer: a
+claim `rules/00-canonical-profile.md` does not support, a posting that cannot be captured with
+no text pasted, and a company name too ambiguous to name a folder after. Headlessly there is
+nobody to answer, so it stops and says why.
+
+That is a question, and the watcher used to lose it. A run that stopped because the posting was
+built around an agent-framework stack the profile does not carry was reported as `incomplete:
+missing CV.pdf, Cover Letter.pdf`, filed under Failed, and its folder deleted — the three
+options it had laid out went no further than the log.
+
+A build that exits cleanly without producing documents is now filed as `needs_decision` and
+answered into the **targeted** topic, where the approval came from, with what the run actually
+said:
+
+```
+⏸ Stopped to ask · RWE — AI Data Engineer
+
+The Match Brief came back with a real integrity flag — this is exactly the "stop and ask"
+case CLAUDE.md calls out. …
+
+Nothing was drafted. Reply here with what you want done, or approve the posting again
+once the profile covers it.
+log: 20260805-184432-rwe-ag-ai-data-engineer.log
+```
+
+The quoted text is the last few turn-ending messages of the run, capped. It is more than the
+final one on purpose: the orchestrator ends a turn every time it hands off to a background
+subagent, and the run above asked its question a turn before the end and signed off with
+"still holding on your decision from above" — useless alone, since the message it points at is
+the one that was lost.
+
+No attempt is made to tell a stop-and-ask from a run that quietly produced nothing. Both end
+cleanly with no application, both have their folder cleaned up the same way, and quoting what
+the run said beats "the build reported success but no dated folder appeared" either way.
 
 ### Cleanup after a bad build
 

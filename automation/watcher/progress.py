@@ -54,6 +54,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from .logsetup import force_utf8
+
 # States a row moves through. `pending` rows are the ones still to come, and
 # showing them is the point: the reader can see how much is left, not only what
 # has happened.
@@ -439,6 +441,10 @@ def _iter_logs(patterns: Iterable[str]) -> list[Path]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The checklist is drawn with ✅ and ⏳, and the Windows console defaults to
+    # cp1252 — which turns the one command for inspecting a past build into a
+    # UnicodeEncodeError on the first row it prints.
+    force_utf8()
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--replay", nargs="+", metavar="LOG", required=True,
                         help="build log(s) under logs/builds/ — globs allowed")
