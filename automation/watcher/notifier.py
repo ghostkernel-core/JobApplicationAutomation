@@ -395,6 +395,78 @@ def _db_size() -> str:
         return "missing"
 
 
+#: How many source rows `/status` prints before it summarises the rest. Every
+#: source is still counted in the totals above the block — this is only about
+#: not turning a phone reply into a spreadsheet. `watcherctl status` has them all.
+MAX_STATUS_SOURCES = 20
+
+
+def funnel_rows(sources: dict[str, Any]) -> list[tuple[str, Any, ...]]:
+    """Per-source funnel rows, most productive first.
+
+    Sorted by what each source actually contributed rather than alphabetically,
+    because the question this block exists to answer — "why is everything
+    coming from one board" — is read off the top and the bottom of the list,
+    not looked up by name.
+    """
+    rows = []
+    for key, counts in sources.items():
+        if not isinstance(counts, dict):
+            continue
+        rows.append((
+            str(key),
+            int(counts.get("fetched", 0) or 0),
+            int(counts.get("already_known", 0) or 0),
+            int(counts.get("filtered", 0) or 0),
+            int(counts.get("stored", 0) or 0),
+            str(counts.get("error", "") or ""),
+        ))
+    # Failures first — a source that could not be reached is the most
+    # actionable line here — then by what reached the database, then volume.
+    rows.sort(key=lambda r: (not r[5], -r[4], -r[1], r[0]))
+    return rows
+
+
+def _source_funnel_lines(cycle: dict[str, Any]) -> list[str]:
+    """The funnel again, split by source, as a monospace block.
+
+    A `<pre>` block rather than plain lines because the columns only mean
+    anything lined up, and Telegram's default font is proportional — spaces in
+    an ordinary message collapse into a ragged mess on a phone.
+    """
+    sources = cycle.get("sources")
+    # Cycles recorded before this block existed have no per-source data. An
+    # empty table would read as "no sources configured", so say nothing.
+    if not isinstance(sources, dict) or not sources:
+        return []
+    rows = funnel_rows(sources)
+    if not rows:
+        return []
+
+    shown, hidden = rows[:MAX_STATUS_SOURCES], rows[MAX_STATUS_SOURCES:]
+    width = max(len(name) for name, *_ in shown)
+    width = min(max(width, 6), 22)
+
+    table = [f"{'source'.ljust(width)}  fetch   seen   filt    new"]
+    for name, fetched, known, filtered, stored, error in shown:
+        label = name if len(name) <= width else name[:width - 1] + "…"
+        if error:
+            # The counts would all be zero and would read as "this board has
+            # nothing", which is the opposite of what happened.
+            table.append(f"{label.ljust(width)}  failed — {error[:40]}")
+            continue
+        table.append(f"{label.ljust(width)}  {fetched:5d}  {known:5d}  "
+                     f"{filtered:5d}  {stored:5d}")
+
+    lines = ["", "<b>Per source:</b>",
+             "<pre>" + _escape("\n".join(table)) + "</pre>"]
+    if hidden:
+        quiet = sum(1 for row in hidden if not row[4])
+        lines.append(f"    <i>+{len(hidden)} more ({quiet} with nothing new) — "
+                     f"watcherctl status lists them all</i>")
+    return lines
+
+
 def _cycle_lines(config: Config, cycle: dict[str, Any],
                  now: dt.datetime) -> list[str]:
     """The poll cycle: when, how long, and what happened to each listing.
@@ -499,6 +571,8 @@ def format_status(config: Config, cycle: dict[str, Any],
 
     lines = [f"📡 <b>Watcher</b> · up {_uptime(since)}", ""]
     lines += _cycle_lines(config, cycle, now)
+    funnel = _source_funnel_lines(cycle)
+    lines += funnel
 
     if snap:
         lines += [
@@ -552,7 +626,17 @@ def format_status(config: Config, cycle: dict[str, Any],
     if config.topics_enabled:
         lines.append(f"<i>Topics: {len(config.topics)} of "
                      f"{len(TOPIC_KINDS)} routed</i>")
-    return "\n".join(lines)
+
+    text = "\n".join(lines)
+    if len(text) > TELEGRAM_MAX_CHARS:
+        # Telegram rejects an over-length message outright rather than trimming
+        # it, so an unusually wide source table would cost the whole reply. The
+        # funnel is the newest and least load-bearing part of the report; drop
+        # it and answer the question `/status` is actually for.
+        log.warning("status report was %d chars — dropping the source funnel",
+                    len(text))
+        text = "\n".join(line for line in lines if line not in funnel)
+    return text
 
 
 class Notifier:

@@ -124,6 +124,7 @@ async def run_cycle(notifier: Notifier) -> dict[str, Any]:
         "deferred": match_report.deferred,
         "notified": notified,
         "sources_failed": sorted(report.errors),
+        "sources": report.source_stats(),
     }
     # Persisted, not just returned: `bot_data` dies with the process, and the
     # first thing anyone asks a watcher that just came back up is when it last

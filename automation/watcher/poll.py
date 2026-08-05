@@ -60,11 +60,42 @@ TEASER_CHARS = 800
 
 
 @dataclass
+class SourceCounts:
+    """One source's share of the funnel, for the per-source `/status` block.
+
+    The totals alone cannot answer the question people actually ask, which is
+    never "how many listings were dropped" but "why is nothing coming from
+    *that* board". A single number covering eighteen sources hides a fetcher
+    returning its whole catalogue and having all of it filtered, which looks
+    identical to one returning nothing at all.
+    """
+    fetched: int = 0
+    already_known: int = 0
+    filtered: int = 0
+    stored: int = 0
+    #: Set when the fetch itself failed, so the row says so instead of
+    #: reporting a truthful but misleading four zeros.
+    error: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        stats: dict[str, Any] = {
+            "fetched": self.fetched,
+            "already_known": self.already_known,
+            "filtered": self.filtered,
+            "stored": self.stored,
+        }
+        if self.error:
+            stats["error"] = self.error
+        return stats
+
+
+@dataclass
 class PollReport:
     fetched: int = 0
     already_known: int = 0
     filtered: int = 0
     stored: int = 0
+    by_source: dict[str, SourceCounts] = field(default_factory=dict)
     new_postings: list[Posting] = field(default_factory=list)
     filtered_out: list[tuple[Posting, str]] = field(default_factory=list)
     errors: dict[str, str] = field(default_factory=dict)
@@ -74,6 +105,15 @@ class PollReport:
     newly_parked: list[tuple[str, str]] = field(default_factory=list)
     recovered: list[str] = field(default_factory=list)
     pending: list[str] = field(default_factory=list)
+
+    def source(self, key: str) -> SourceCounts:
+        """The counters for `key`, created on first mention."""
+        return self.by_source.setdefault(key, SourceCounts())
+
+    def source_stats(self) -> dict[str, dict[str, Any]]:
+        """The per-source funnel, JSON-safe for `store.save_cycle`."""
+        return {key: counts.as_dict()
+                for key, counts in sorted(self.by_source.items())}
 
     def summary(self) -> str:
         parts = [
@@ -123,6 +163,7 @@ def _collect(sources: Sources, config: Config, conn, only: str | None,
             message = f"{type(exc).__name__}: {exc}"
             structural = isinstance(exc, StructuralError)
             report.errors[key] = message
+            report.source(key).error = message
             log.warning("%s failed: %s", key, message)
             allowance = config.failures_allowed(entry)
             tripped = store.mark_source_failed(conn, key, message, allowance,
@@ -165,6 +206,11 @@ def _collect(sources: Sources, config: Config, conn, only: str | None,
         # exactly that: a scoring write lost to "database is locked".
         conn.commit()
         log.info("%s returned %d postings", key, len(found))
+        # Keyed off the config entry rather than `posting.source` so a source
+        # that legitimately returns nothing still gets a row. Attributing only
+        # what came back would make an empty board vanish from the report,
+        # which is the one case worth seeing.
+        report.source(key).fetched = len(found)
         postings.extend(found)
     return postings
 
@@ -193,9 +239,11 @@ def poll_once(dry_run: bool = False, only: str | None = None,
         for posting in raw:
             if posting.fingerprint in known or posting.fingerprint in batch_ids:
                 report.already_known += 1
+                report.source(posting.source).already_known += 1
                 continue
             if posting.loose_key in recent_loose or posting.loose_key in batch_loose:
                 report.already_known += 1
+                report.source(posting.source).already_known += 1
                 continue
             batch_ids.add(posting.fingerprint)
             batch_loose.add(posting.loose_key)
@@ -206,6 +254,7 @@ def poll_once(dry_run: bool = False, only: str | None = None,
                             sources.filters)
             if not verdict.accepted:
                 report.filtered += 1
+                report.source(posting.source).filtered += 1
                 report.filtered_out.append((posting, verdict.reason))
                 continue
 
@@ -221,15 +270,19 @@ def poll_once(dry_run: bool = False, only: str | None = None,
                             sources.filters)
             if not recheck.accepted:
                 report.filtered += 1
+                report.source(posting.source).filtered += 1
                 report.filtered_out.append((posting, recheck.reason))
                 continue
 
             report.new_postings.append(posting)
             if not dry_run and store.insert_posting(conn, posting):
                 report.stored += 1
+                report.source(posting.source).stored += 1
 
         if dry_run:
             report.stored = len(report.new_postings)
+            for posting in report.new_postings:
+                report.source(posting.source).stored += 1
             conn.rollback()
 
     return report
