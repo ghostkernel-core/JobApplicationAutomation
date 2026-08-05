@@ -110,6 +110,12 @@ class _Store:
 class _Builder:
     """Enough of a Builder for the real `_handle` to run against."""
 
+    # `_handle` hands the settling half of a run — salvage, cleanup, the result
+    # message — to `_finish`, which is the half these tests are about. Taken from
+    # the real class rather than stubbed, or there would be nothing left under
+    # test.
+    _finish = builder.Builder._finish
+
     def __init__(self, ok: bool, detail: str, announce: bool) -> None:
         self.config = _Config()
         self.sent: list[str] = []
@@ -127,7 +133,7 @@ class _Builder:
         await asyncio.sleep(3600)  # still polling when the build ends
         return True
 
-    async def _attempt(self, job, company, title, url, label):
+    async def _attempt(self, job, company, title, url, label, reporter=None):
         # Yield twice so the announcer task actually gets to run, the way it
         # would during a real build.
         await asyncio.sleep(0)

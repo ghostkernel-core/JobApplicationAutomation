@@ -589,6 +589,51 @@ class Notifier:
         )
         return message.message_id
 
+    async def edit(self, message_id: int, text: str) -> bool:
+        """Rewrite an already-sent message in place. Never raises.
+
+        There is no topic argument to match `send`'s: a message keeps the thread
+        it was posted in, and `editMessageText` has no say in it. Whichever topic
+        the original went to is where the edit lands.
+
+        This is the live build checklist's only write path, and it runs on a
+        timer for the whole length of a 40-minute build — so every way it can
+        fail has to be survivable. A progress message is a convenience; the
+        build behind it is not, and nothing here may end one.
+
+        Returns whether the message is still there and worth editing again —
+        *not* whether this edit changed anything. Only a message Telegram says it
+        cannot find gives up its place:
+
+        * *not modified* — nothing to do, but the message exists. True, unlogged,
+          because the caller re-rendering to the same text is ordinary.
+        * *not found* / *can't be edited* — gone, usually because someone cleared
+          the topic. False, and the caller stops trying.
+        * anything else, including rate limits and network trouble — True, so the
+          next tick has another go. The tick is slow enough that backing off
+          further would only mean a staler checklist.
+        """
+        from telegram.error import BadRequest
+
+        try:
+            await self._bot.edit_message_text(
+                chat_id=self.chat_id, message_id=message_id, text=text,
+                parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+            )
+        except BadRequest as exc:
+            reason = str(exc).casefold()
+            if "not modified" in reason:
+                return True
+            if "not found" in reason or "can't be edited" in reason:
+                log.info("progress message %s is gone; no further edits", message_id)
+                return False
+            log.warning("could not edit message %s: %s", message_id, exc)
+            return True
+        except Exception as exc:
+            log.warning("could not edit message %s: %s", message_id, exc)
+            return True
+        return True
+
     async def send_instant(self, limit: int = MAX_INSTANT_PER_POLL) -> int:
         """Ping for high-scoring postings not yet messaged about."""
         with store.connect() as conn:

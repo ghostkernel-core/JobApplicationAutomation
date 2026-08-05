@@ -169,6 +169,14 @@ _MIGRATIONS: list[str] = [
     ALTER TABLE postings ADD COLUMN contract TEXT DEFAULT '';
     ALTER TABLE postings ADD COLUMN arrangement TEXT DEFAULT '';
     """,
+    # The Telegram message carrying a build's live step checklist. Kept in the
+    # database rather than only in the running process because the build queue is
+    # in memory: a restart strands every build it was running, and without the id
+    # their checklists stay frozen at whatever step they had reached, reading as
+    # still-in-progress for good. With it, boot can edit them to say so.
+    """
+    ALTER TABLE builds ADD COLUMN progress_message_id INTEGER;
+    """,
 ]
 
 
@@ -517,6 +525,15 @@ def mark_build_running(conn: sqlite3.Connection, build_id: int, log_path: str) -
     conn.execute(
         "UPDATE builds SET status = 'running', log_path = ?, started_at = ? WHERE id = ?",
         (log_path, _now(), build_id),
+    )
+
+
+def set_build_progress_message(conn: sqlite3.Connection, build_id: int,
+                               message_id: int | None) -> None:
+    """Remember which Telegram message carries this build's step checklist."""
+    conn.execute(
+        "UPDATE builds SET progress_message_id = ? WHERE id = ?",
+        (message_id, build_id),
     )
 
 

@@ -115,6 +115,19 @@ timeout_minutes = 45
 # 0 disables it.
 retries = 1
 retry_delay_seconds = 120
+# The "🛠 Building …" message is edited in place for the length of the run,
+# showing each pipeline step and what it cost. Turn it off and that message is
+# sent once and left alone, exactly as it behaved before.
+#
+# The refresh is what keeps the *running* step's clock moving; a step starting or
+# finishing redraws straight away regardless. So the interval is not how quickly
+# progress shows up, only how live one number looks — which is why it is set in
+# tens of seconds rather than ones. The floor exists for the parallel phases,
+# where three or four steps land within a second of each other and would
+# otherwise be three or four separate edits.
+progress_updates = true
+progress_refresh_seconds = 30
+progress_min_interval_seconds = 5
 # Role-title similarity at or above this counts as "already applied".
 duplicate_title_ratio = 0.8
 # Only look this far back when deciding whether a role is a duplicate.
