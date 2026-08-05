@@ -50,7 +50,7 @@ batch_size = 8
 # it now reaches the evening digest intact rather than being lost — which was
 # not true while the digest was silently failing on its own length. Lower this
 # toward 60 to trade quiet for immediacy.
-notify_threshold = 70
+notify_threshold = 65
 digest_threshold = 40
 # How much of the job description is handed to the matcher.
 description_chars = 4000

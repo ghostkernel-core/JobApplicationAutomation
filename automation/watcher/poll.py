@@ -41,6 +41,23 @@ from .prefilter import check
 
 log = logging.getLogger("watcher.poll")
 
+# A description shorter than this is treated as a teaser and re-fetched from the
+# detail page, provided the source offered one.
+#
+# The guard here used to be `not posting.description`, which is only correct for
+# a source that sends nothing at all. stepstone and hiringcafe both ship the
+# search tile's one-line snippet — non-empty, around 300 characters, and enough
+# to satisfy an emptiness test — so their `hydrate()` functions never ran once,
+# and the two largest sources in the rotation (198 of the first 225 postings)
+# were prefiltered, scored, and reported on the opening sentence of the ad.
+# Everything downstream that reads the body was reading that sentence: the
+# seniority and years-of-experience bar, the language requirement, the hard
+# blockers the re-check exists to catch, and the matcher's own 4000-char window.
+#
+# 800 is comfortably above the longest observed teaser (476) and far below the
+# shortest real ad body (~2900).
+TEASER_CHARS = 800
+
 
 @dataclass
 class PollReport:
@@ -193,7 +210,7 @@ def poll_once(dry_run: bool = False, only: str | None = None,
                 continue
 
             # Only now is it worth paying for a description.
-            if posting.detail_url and not posting.description:
+            if posting.detail_url and len(posting.description) < TEASER_CHARS:
                 try:
                     posting.description = hydrate(posting, config.http_timeout)
                 except Exception as exc:  # noqa: BLE001

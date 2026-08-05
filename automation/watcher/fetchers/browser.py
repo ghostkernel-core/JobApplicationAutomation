@@ -33,7 +33,7 @@ import queue
 import threading
 from typing import Any
 
-from ..config import BROWSER_PROFILE_DIR
+from ..config import browser_profile_dir
 from .base import USER_AGENT
 
 log = logging.getLogger("watcher.fetch.browser")
@@ -86,11 +86,12 @@ def _open_context(state: dict[str, Any]):
             "`.venv\\Scripts\\python.exe -m playwright install chromium`"
         ) from exc
 
-    BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    profile = browser_profile_dir()
+    profile.mkdir(parents=True, exist_ok=True)
     playwright = sync_playwright().start()
     try:
         context = playwright.chromium.launch_persistent_context(
-            str(BROWSER_PROFILE_DIR),
+            str(profile),
             headless=True,
             user_agent=USER_AGENT,
             locale="de-DE",
@@ -111,7 +112,7 @@ def _open_context(state: dict[str, Any]):
     context.set_default_timeout(LAUNCH_TIMEOUT_MS)
     state["playwright"] = playwright
     state["context"] = context
-    log.info("browser context started at %s", BROWSER_PROFILE_DIR)
+    log.info("browser context started at %s", profile)
     return context
 
 

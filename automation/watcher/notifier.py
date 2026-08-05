@@ -20,7 +20,7 @@ from typing import Any, Sequence
 from telegram import Bot
 from telegram.constants import ParseMode
 
-from . import roles, store
+from . import roles, store, terms
 from .config import (DB_PATH, TOPIC_KINDS, Config, clock, load_config,
                      require_env)
 
@@ -62,6 +62,33 @@ def _field(row: sqlite3.Row, name: str, default: Any = None) -> Any:
         return default
 
 
+def _terms(row: sqlite3.Row) -> tuple[str, str, str]:
+    """(arrangement, contract, languages) for one posting row.
+
+    The stored columns win. When all three are blank the reading is recomputed
+    from the description, because those columns arrived in a later migration and
+    every posting already in the database has them empty — without the fallback
+    the language bar would only ever appear on jobs found after the upgrade, and
+    `/recheck` on an existing posting would show less than a fresh one.
+    """
+    langs = str(_field(row, "languages", "") or "").strip()
+    contract = str(_field(row, "contract", "") or "").strip()
+    arrangement = str(_field(row, "arrangement", "") or "").strip()
+    if langs or contract or arrangement:
+        return arrangement, contract, langs
+
+    description = str(_field(row, "description", "") or "")
+    if not description:
+        return "", "", ""
+    title = str(_field(row, "title", "") or "")
+    return (
+        terms.arrangement(title, description,
+                          remote_flag=bool(_field(row, "remote", 0))),
+        terms.contract(title, description),
+        ", ".join(terms.languages(title, description)),
+    )
+
+
 def _band_icon(score: int, stop_and_ask: bool) -> str:
     if stop_and_ask:
         return "🟡"
@@ -77,20 +104,34 @@ def format_instant(row: sqlite3.Row) -> str:
     """
     score = int(row["score"])
     stop = bool(row["stop_and_ask"])
-    where = row["location"] or row["country"] or "location unknown"
-    if row["remote"]:
+    arrangement, contract, langs = _terms(row)
+
+    # City first, falling back to whatever coarser place the source gave. The
+    # canonical city is the backstop rather than the preference: a source's own
+    # "Köln, Nordrhein-Westfalen" says more than the one word `geo` resolves.
+    where = (row["location"] or _field(row, "city", "") or row["country"]
+             or "location unknown")
+    if arrangement:
+        where += f" · {arrangement}"
+    elif row["remote"]:
         where += " · remote"
 
     lines = [
         f"{_band_icon(score, stop)} <b>{score}</b> · {_escape(row['title'])}",
         f"{_escape(row['company'])} — {_escape(where)} · {_escape(row['provider'])}",
     ]
-    # Rank and the stated experience bar, when the posting said either. Shown
-    # rather than filtered on: an out-of-reach bar is information for the reply,
-    # not grounds for never seeing the job.
+    # Rank, the stated experience bar, and the contract, when the posting said
+    # any of them. Shown rather than filtered on: an out-of-reach bar is
+    # information for the reply, not grounds for never seeing the job.
     rank = roles.describe(_field(row, "level", "") or "", _field(row, "years_required"))
-    if rank:
-        lines.append(f"· {_escape(rank)}")
+    facts = [p for p in (rank, contract) if p]
+    if facts:
+        lines.append(f"· {_escape(' · '.join(facts))}")
+    # The language bar gets its own line and its own marker. It is the single
+    # fact most likely to disqualify a posting outright and the one buried
+    # deepest in the ad, so it must survive a glance at a notification preview.
+    if langs:
+        lines.append(f"🗣 {_escape(langs)}")
     why, gaps = _phrases(row["why_json"]), _phrases(row["gaps_json"])
     if why:
         lines.append(f"✓ {_escape('; '.join(why))}")
@@ -574,6 +615,60 @@ class Notifier:
             log.info("%d high scorer(s) held back for the digest", len(overflow))
         return sent
 
+    async def message_exists(self, message_id: int) -> bool:
+        """Whether a message is still in the chat.
+
+        Telegram has no "does this exist" call, so this asks for a no-op edit of
+        the message's (absent) inline keyboard and reads the refusal. "Message is
+        not modified" and "message can't be edited" both mean it is there;
+        "message to edit not found" means it is gone. Nothing is changed either
+        way — the messages this sends have no reply markup to begin with.
+        """
+        from telegram.error import BadRequest
+
+        try:
+            await self._bot.edit_message_reply_markup(
+                chat_id=self.chat_id, message_id=message_id, reply_markup=None)
+        except BadRequest as exc:
+            text = str(exc).casefold()
+            if "not found" in text:
+                return False
+            return True
+        except Exception:  # network trouble is not evidence of deletion
+            return True
+        return True
+
+    async def forget_vanished(self, min_score: int = 0,
+                              dry_run: bool = True) -> list[str]:
+        """Re-enable pings whose Telegram message no longer exists.
+
+        Clearing a chat — which is what happens when a group is reorganised into
+        forum topics — deletes the messages but not the record of them, and the
+        two disagreeing is a silent, permanent hole: the posting counts as
+        notified, so no cycle and no `/recheck` will ever raise it again.
+
+        Only records Telegram positively reports as missing are dropped, so a
+        network failure mid-probe under-reports rather than resending something
+        the user already has.
+        """
+        with store.connect() as conn:
+            rows = store.sent_notifications(conn, "instant", min_score)
+
+        vanished: list[tuple[int, str]] = []
+        for row in rows:
+            if await self.message_exists(int(row["telegram_message_id"])):
+                continue
+            vanished.append((
+                int(row["rowid"]),
+                f"{row['score'] or '?'} · {row['company']} — {row['title']}",
+            ))
+
+        if not dry_run and vanished:
+            with store.connect() as conn:
+                for rowid, _ in vanished:
+                    store.forget_notification(conn, rowid)
+        return [label for _, label in vanished]
+
     async def send_digest(self) -> int:
         """The evening round-up: mid-band plus any instant overflow."""
         with store.connect() as conn:
@@ -728,3 +823,47 @@ class Notifier:
         if broken:
             lines.append("disabled: " + _escape(", ".join(broken)))
         await self.send_notice("\n".join(lines))
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Maintenance entry point. The watcher itself never calls this."""
+    import argparse
+    import asyncio
+
+    parser = argparse.ArgumentParser(description="notifier maintenance")
+    parser.add_argument(
+        "--forget-vanished", action="store_true",
+        help="re-enable pings whose Telegram message no longer exists")
+    parser.add_argument(
+        "--min-score", type=int, default=0,
+        help="only consider pings at or above this score")
+    parser.add_argument(
+        "--apply", action="store_true",
+        help="actually forget them; without this it only reports")
+    args = parser.parse_args(argv)
+
+    if not args.forget_vanished:
+        parser.print_help()
+        return 2
+
+    notifier = Notifier()
+    vanished = asyncio.run(
+        notifier.forget_vanished(args.min_score, dry_run=not args.apply))
+    if not vanished:
+        print("Every recorded ping is still in the chat. Nothing to do.")
+        return 0
+
+    verb = "Forgot" if args.apply else "Would forget"
+    print(f"{verb} {len(vanished)} ping(s) whose message is gone:")
+    for label in vanished:
+        print(f"  {label}")
+    if args.apply:
+        print("\nThey are eligible again. They go out on the next cycle, or "
+              "immediately with: python watcherctl.py poll")
+    else:
+        print("\nRe-run with --apply to make these sendable again.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
