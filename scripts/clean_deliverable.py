@@ -46,6 +46,10 @@ KEEP_SUFFIXES = {".tex", ".pdf", ".html"}
 # Scaffolding worth keeping, just not here. Payloads especially: re-rendering
 # from them is cheap, regenerating them costs a full pipeline run.
 MOVE_SUFFIXES = {".json"}
+# Compared against `_normalised()`, so "Research Note.md" and "research-note.md"
+# match the same entry. Agents write these titles the way CLAUDE.md names them —
+# "Match Brief", "Research Note" — and a file left behind for a separator costs
+# the run a step-09 FAIL on an unexpected file.
 MOVE_NAMES = {"match_brief.md", "research_note.md", "posting.txt", "posting.md"}
 MOVE_STEM_SUFFIXES = ("_extracted.txt",)
 
@@ -71,6 +75,15 @@ def _is_page_image(path: Path) -> bool:
     return marker != -1 and stem[marker + 2:].isdigit()
 
 
+def _normalised(name: str) -> str:
+    """Lowercase, with spaces and hyphens folded to underscores.
+
+    So the one filename can be written the way a person titles a document or the
+    way a script names a file, and still be recognised as the same thing.
+    """
+    return name.lower().replace(" ", "_").replace("-", "_")
+
+
 def _classify(entry: Path) -> str:
     """One of: keep, move, drop, unknown."""
     if entry.is_dir():
@@ -87,7 +100,7 @@ def _classify(entry: Path) -> str:
         return "drop"
     if suffix in KEEP_SUFFIXES:
         return "keep"
-    if name in MOVE_NAMES or suffix in MOVE_SUFFIXES:
+    if _normalised(entry.name) in MOVE_NAMES or suffix in MOVE_SUFFIXES:
         return "move"
     if any(name.endswith(tail) for tail in MOVE_STEM_SUFFIXES):
         return "move"
