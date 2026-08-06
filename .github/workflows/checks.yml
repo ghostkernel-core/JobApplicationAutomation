@@ -101,6 +101,10 @@ jobs:
 
   python:
     runs-on: ubuntu-latest
+    # The suite runs in about a minute. A job that is still going after twenty
+    # is wedged, not slow, and the default six-hour ceiling means nobody finds
+    # out until the day is over.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -132,9 +136,24 @@ jobs:
         # it, and the gate exists so a module added without tests is caught here
         # rather than the first time it runs a build unsupervised at 3am.
         working-directory: automation
-        run: >-
-          python -m pytest tests -q
-          --cov=watcher --cov-report=term-missing --cov-fail-under=90
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Output to a file rather than the step's pipe. A stray child process
+          # that outlives pytest inherits that pipe and holds it open, and the
+          # runner waits on the pipe, not on the process — so the step sits
+          # there long after the suite has finished and reports nothing.
+          #
+          # faulthandler_timeout dumps every thread's stack if one test runs
+          # long, and the outer timeout bounds the whole thing. Between them a
+          # wedged suite says where it wedged instead of going quiet.
+          timeout --signal=INT --kill-after=30s 12m \
+            python -m pytest tests -q -o faulthandler_timeout=180 \
+              --cov=watcher --cov-report=term-missing --cov-fail-under=90 \
+              > pytest.log 2>&1
+          code=$?
+          cat pytest.log
+          exit $code
 
       - name: Validate template and example config files
         run: |
