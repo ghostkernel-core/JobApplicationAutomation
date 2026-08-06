@@ -30,6 +30,7 @@ import builtins
 import datetime as dt
 import json
 import logging
+import os
 import shutil
 import sqlite3
 from pathlib import Path
@@ -982,8 +983,113 @@ def test_an_inherited_append_handle_survives_the_trim(tmp_path) -> None:
         handle.close()
 
     text = path.read_text(encoding="utf-8")
-    assert text.endswith("line 03999\nstill writing\n")
+    assert text.endswith("still writing\n")
     assert "\x00" not in text        # no sparse gap at the old offset
+
+
+def test_a_descriptor_left_past_the_new_end_is_moved_back(tmp_path) -> None:
+    """The bug that shipped, in one test.
+
+    A descriptor inherited from `watcherctl start` carries its own file pointer,
+    and the append flag it was opened with does not survive into the child on
+    Windows. Truncating underneath it leaves that pointer far past the end, so
+    the next line is written back at the old offset and the gap is zero-filled:
+    the file returns to the size it just lost, as NUL padding.
+    """
+    path = tmp_path / "watcher.out"
+    write_lines(path, 4000)
+    size = path.stat().st_size
+
+    # O_BINARY or Windows translates the newline below and the assertion reads
+    # as a trim bug rather than the test's own doing.
+    fd = os.open(path, os.O_WRONLY | getattr(os, "O_BINARY", 0))
+    try:
+        os.lseek(fd, size, os.SEEK_SET)     # where an inherited handle sits
+        assert logsetup.trim_startup_log(path, keep=1000, streams=(fd,)) is True
+        os.write(fd, b"still writing\n")
+    finally:
+        os.close(fd)
+
+    data = path.read_bytes()
+    assert b"\x00" not in data, "the trimmed bytes came back as NUL padding"
+    assert data.endswith(b"still writing\n")
+    assert len(data) < 1200
+
+
+def test_a_descriptor_pointing_somewhere_else_is_left_alone(tmp_path) -> None:
+    """In a foreground run fd 1 is a console and fd 2 may be a pipe. Seeking
+    those is at best meaningless, so only descriptors that are really this file
+    are touched."""
+    path = tmp_path / "watcher.out"
+    write_lines(path, 4000)
+    other = tmp_path / "unrelated.txt"
+    other.write_bytes(b"untouched\n" * 100)
+
+    fd = os.open(other, os.O_WRONLY)
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        assert logsetup.trim_startup_log(path, keep=1000, streams=(fd,)) is True
+        # Still at the start, so this overwrites rather than appending.
+        os.write(fd, b"OVERWROTE!")
+    finally:
+        os.close(fd)
+
+    assert other.read_bytes().startswith(b"OVERWROTE!")
+
+
+def test_a_closed_descriptor_does_not_break_the_trim(tmp_path) -> None:
+    """`pythonw` can leave stdout closed rather than redirected."""
+    path = tmp_path / "watcher.out"
+    write_lines(path, 4000)
+
+    fd = os.open(path, os.O_WRONLY)
+    os.close(fd)
+
+    assert logsetup.trim_startup_log(path, keep=1000, streams=(fd,)) is True
+    assert path.stat().st_size <= 1000
+
+
+def test_a_descriptor_that_refuses_to_seek_does_not_fail_the_trim(
+        tmp_path, monkeypatch) -> None:
+    """The trim has already happened by this point. Whatever the descriptors do
+    or will not do, the caller is told the file was cut, because it was."""
+    path = tmp_path / "watcher.out"
+    write_lines(path, 4000)
+
+    fd = os.open(path, os.O_WRONLY | getattr(os, "O_BINARY", 0))
+    try:
+        def refuse(*args, **kwargs):
+            raise OSError("not a seekable stream")
+
+        monkeypatch.setattr(os, "lseek", refuse)
+        assert logsetup.trim_startup_log(path, keep=1000, streams=(fd,)) is True
+    finally:
+        os.close(fd)
+
+    assert path.stat().st_size <= 1000
+
+
+def test_resyncing_a_file_that_is_no_longer_there_is_a_no_op(tmp_path) -> None:
+    """Nothing to compare a descriptor against, so nothing is moved."""
+    logsetup._resync_streams(tmp_path / "gone.out", (1,))       # must not raise
+
+
+def test_a_very_long_line_does_not_swallow_the_whole_kept_block(tmp_path) -> None:
+    """The second half of the same bug.
+
+    Skipping the partial first line is a nicety. Doing it with an unbounded
+    read means a single enormous line — a traceback with a large repr, or a run
+    of NUL padding left by the bug above — consumes everything that was meant
+    to be kept. It cut a 200 KB trim down to 1,491 bytes on the live file.
+    """
+    path = tmp_path / "watcher.out"
+    path.write_bytes(b"old\n" * 1000 + b"X" * 40_000 + b"\nthe real tail\n")
+
+    assert logsetup.trim_startup_log(path, keep=20_000) is True
+
+    data = path.read_bytes()
+    assert data.endswith(b"the real tail\n")
+    assert len(data) > 19_000, "the long line ate the block it was trimming into"
 
 
 def test_a_startup_log_that_cannot_be_rewritten_is_left_alone(
