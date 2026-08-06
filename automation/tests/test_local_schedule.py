@@ -13,6 +13,7 @@ the bug, on every machine that is not on UTC.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import sys
 
@@ -154,10 +155,25 @@ def test_the_daily_jobs_are_registered_with_aware_times(monkeypatch) -> None:
     """
     app = _build(monkeypatch)
 
-    assert len(app.job_queue.daily) == 3, "digest, heartbeat, and kb"
+    assert len(app.job_queue.daily) == 4, (
+        "digest, heartbeat, kb, and the startup-log trim")
     for when in app.job_queue.daily:
         assert when.tzinfo is not None, (
             "run_daily was handed a naive time — JobQueue reads that as UTC")
+
+
+def test_the_startup_log_trim_runs_daily_and_only_over_the_cap(monkeypatch) -> None:
+    """The scheduled pass exists for a watcher that stays up for months, so it
+    has to leave a normal-sized file alone; a restart is what cuts one back
+    unconditionally. Passing no `over` here would truncate the log every day."""
+    app = _build(monkeypatch)
+    assert (4, 17) in {(when.hour, when.minute) for when in app.job_queue.daily}
+
+    seen: dict = {}
+    monkeypatch.setattr(run_watcher, "trim_startup_log",
+                        lambda **kwargs: seen.update(kwargs) or False)
+    asyncio.run(run_watcher.startup_log_job(None))
+    assert seen == {"over": run_watcher.STARTUP_LOG_MAX_BYTES}
 
 
 def test_the_registered_times_match_the_config(monkeypatch) -> None:

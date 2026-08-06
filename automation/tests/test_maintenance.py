@@ -26,6 +26,7 @@ days and over a year are different answers.
 
 from __future__ import annotations
 
+import builtins
 import datetime as dt
 import json
 import logging
@@ -909,3 +910,109 @@ def test_setup_is_configured_once_however_many_clis_call_it(monkeypatch) -> None
     assert len(logger.handlers) == count
     for handler in logger.handlers[-1:]:
         logger.removeHandler(handler)
+
+
+# --------------------------------------------------------------------------
+# trimming the startup log
+# --------------------------------------------------------------------------
+
+def write_lines(path, count: int) -> None:
+    path.write_text("".join(f"line {i:05d}\n" for i in range(count)),
+                    encoding="utf-8")
+
+
+def test_a_startup_log_that_does_not_exist_yet_is_not_an_error(tmp_path) -> None:
+    """Every first run on a new machine takes this path."""
+    assert logsetup.trim_startup_log(tmp_path / "watcher.out") is False
+
+
+def test_a_small_startup_log_is_left_exactly_as_it_is(tmp_path) -> None:
+    path = tmp_path / "watcher.out"
+    write_lines(path, 10)
+    before = path.read_bytes()
+
+    assert logsetup.trim_startup_log(path) is False
+    assert path.read_bytes() == before
+
+
+def test_an_oversized_startup_log_keeps_its_tail_and_drops_its_head(tmp_path) -> None:
+    """The end is the part worth having: a crash is at the bottom of the file."""
+    path = tmp_path / "watcher.out"
+    write_lines(path, 4000)
+
+    assert logsetup.trim_startup_log(path, keep=1000) is True
+
+    text = path.read_text(encoding="utf-8")
+    assert len(text) <= 1000
+    assert text.endswith("line 03999\n")
+    assert "line 00000" not in text
+    # Cut on a line boundary, not mid-word — a truncated log whose first line is
+    # half a timestamp reads as corruption.
+    assert text.startswith("line 0")
+
+
+def test_the_periodic_trim_leaves_a_normally_sized_log_alone(tmp_path) -> None:
+    """`over` is what separates the daily cap from the restart trim: the same
+    file that a restart cuts back is untouched by a scheduled pass."""
+    path = tmp_path / "watcher.out"
+    write_lines(path, 4000)
+    size = path.stat().st_size
+
+    assert logsetup.trim_startup_log(path, over=10_000_000, keep=1000) is False
+    assert path.stat().st_size == size
+    assert logsetup.trim_startup_log(path, keep=1000) is True
+
+
+def test_an_inherited_append_handle_survives_the_trim(tmp_path) -> None:
+    """The reason this truncates in place instead of renaming.
+
+    The live watcher was handed this file by `watcherctl start` and cannot be
+    told about a replacement, so whatever it writes next has to keep landing in
+    the file that is still called `watcher.out` — and land at the end of it,
+    without a hole where the removed head used to be.
+    """
+    path = tmp_path / "watcher.out"
+    write_lines(path, 4000)
+
+    handle = path.open("a", encoding="utf-8")
+    try:
+        assert logsetup.trim_startup_log(path, keep=1000) is True
+        handle.write("still writing\n")
+    finally:
+        handle.close()
+
+    text = path.read_text(encoding="utf-8")
+    assert text.endswith("line 03999\nstill writing\n")
+    assert "\x00" not in text        # no sparse gap at the old offset
+
+
+def test_a_startup_log_that_cannot_be_rewritten_is_left_alone(
+        tmp_path, monkeypatch) -> None:
+    """Tidying a log is never worth failing a watcher start over."""
+    path = tmp_path / "watcher.out"
+    write_lines(path, 4000)
+    size = path.stat().st_size
+
+    real_open = builtins.open
+
+    def locked(file, mode="r", *args, **kwargs):
+        if str(file) == str(path) and "r+" in mode:
+            raise OSError("being read by another process")
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", locked)
+
+    assert logsetup.trim_startup_log(path, keep=1000) is False
+    assert path.stat().st_size == size
+
+
+def test_the_default_target_is_the_startup_log_in_the_log_directory(
+        tmp_path, monkeypatch) -> None:
+    """Called with no argument from `run_watcher`, so the default has to be
+    right — and has to be read at call time, or the tests write to the real one."""
+    monkeypatch.setattr(logsetup, "LOG_DIR", tmp_path)
+    path = tmp_path / "watcher.out"
+    write_lines(path, 4000)
+
+    assert logsetup.trim_startup_log(keep=1000) is True
+    assert path.stat().st_size <= 1000

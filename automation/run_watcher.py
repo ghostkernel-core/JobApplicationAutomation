@@ -38,7 +38,7 @@ from watcher import kb, matcher, poll, replies, store
 from watcher.builder import Builder
 from watcher.config import (RESTART_MARKER_PATH, ConfigWriteError, clock,
                             load_config, load_env, require_env, set_number)
-from watcher.logsetup import setup
+from watcher.logsetup import STARTUP_LOG_MAX_BYTES, setup, trim_startup_log
 from watcher.notifier import Notifier, format_kb_proposal, format_status
 
 log = logging.getLogger("watcher.run")
@@ -154,6 +154,16 @@ async def digest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         log.info("digest sent covering %d posting(s)", count)
     except Exception:
         log.exception("digest failed")
+
+
+async def startup_log_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Keep `logs/watcher.out` bounded inside a single long-lived run.
+
+    Startup trims it too; this is for the process that stays up for months and
+    would otherwise never get the chance.
+    """
+    if trim_startup_log(over=STARTUP_LOG_MAX_BYTES):
+        log.info("trimmed logs/watcher.out back to its tail")
 
 
 async def heartbeat_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -833,6 +843,10 @@ def build_app(notifier: Notifier) -> Application:
         # than leaving the config off by one day.
         queue.run_daily(kb_job, time=local_time(*config.kb_at),
                         days=((config.kb_weekday + 1) % 7,))
+    # Housekeeping, at an hour with nothing else on it and a minute nobody
+    # picked on purpose. Not configurable: how often a log file is tidied is not
+    # a decision anyone wants to be offered.
+    queue.run_daily(startup_log_job, time=local_time(4, 17))
     return app
 
 
@@ -895,6 +909,11 @@ def main(argv: list[str] | None = None) -> int:
         asyncio.run(notifier.send_digest())
         return 0
 
+    # A restart is the one moment nothing holds the startup log mid-write, so it
+    # is where the accumulated copy of every previous run gets cut back. Only on
+    # the service path: `--once` and `--digest` run in a terminal and have no
+    # business truncating a file the live watcher is appending to.
+    trim_startup_log()
     log.info("watcher starting — polling every %d min",
              notifier.config.interval_minutes)
     app = build_app(notifier)
