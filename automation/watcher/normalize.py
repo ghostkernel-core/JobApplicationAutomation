@@ -49,6 +49,20 @@ LEGAL_SUFFIXES = {
     "deutschland", "germany", "europe", "eu",
 }
 
+# The same legal forms written out in full. These cannot live in LEGAL_SUFFIXES
+# because that set is consulted per token and these are phrases; they are folded
+# away before tokenising instead. Jobsuche carries the registered name, so the
+# employer a company board calls `Example GmbH` arrives from there as
+# `Example Gesellschaft mit beschränkter Haftung` — the same firm, keyed
+# differently, which is one posting pinged about twice.
+LEGAL_PHRASES = re.compile(
+    r"\bgesellschaft\s+mit\s+beschraenkter\s+haftung\b"
+    r"|\bunternehmergesellschaft(?:\s+haftungsbeschraenkt)?\b"
+    r"|\boffene\s+handelsgesellschaft\b"
+    r"|\bkommanditgesellschaft(?:\s+auf\s+aktien)?\b"
+    r"|\bund\s+co\b",
+)
+
 # A run of single letters each followed by a dot: `B.V.`, `N.V.`, `S.A.`, `A.S.`.
 # Folded to `bv`, `nv`, … so they reach LEGAL_SUFFIXES as one token. Requiring at
 # least two groups is what keeps an ordinary sentence-ending initial out of it.
@@ -96,6 +110,9 @@ def company_key(name: str) -> str:
     text = strip_accents(name or "").casefold()
     text = DOTTED_ABBREV.sub(lambda m: m.group(0).replace(".", ""), text)
     text = re.sub(r"[^a-z0-9\s]", " ", text)
+    # Phrases first: the multi-word forms have to go before the text is split
+    # into tokens the suffix set can see.
+    text = LEGAL_PHRASES.sub(" ", text)
     tokens = [t for t in text.split() if t and t not in LEGAL_SUFFIXES]
     if not tokens:  # a name made entirely of suffixes — keep something
         tokens = text.split()
@@ -186,21 +203,45 @@ def canonical_url(url: str) -> str:
                        urlencode(sorted(query)), ""))
 
 
+#: A start or end tag with a real element name. Deliberately stricter than
+#: "contains a < and a >": `<5 years experience` and `a < b > c` are prose, and
+#: handing either to an HTML parser deletes the middle of the sentence without
+#: saying so.
+_TAG = re.compile(r"</?[a-zA-Z][a-zA-Z0-9-]*(?:\s[^<>]*)?/?>")
+
+#: How many strip-then-unescape rounds to run before accepting the result.
+#: Greenhouse serves HTML that has itself been entity-encoded, so a single
+#: round unescapes `&lt;p&gt;` into a live `<p>` and stops there — every
+#: Greenhouse body reached the scorer wrapped in its own markup, tag attributes
+#: and all. Two rounds settle that; the third only confirms nothing changed.
+#: Bounded rather than "until stable" because an input can be built to
+#: alternate for ever.
+_DECODE_PASSES = 3
+
+
+def _strip_tags(text: str) -> str:
+    if not _TAG.search(text):
+        return text
+    try:
+        from bs4 import BeautifulSoup  # imported lazily; only ATS HTML needs it
+
+        return BeautifulSoup(text, "html.parser").get_text("\n")
+    except Exception:  # noqa: BLE001 - a missing parser must not lose the body
+        return re.sub(r"<[^>]+>", " ", text)
+
+
 def to_text(value: str | None) -> str:
     """HTML (or plain text) to readable plain text, whitespace collapsed."""
     if not value:
         return ""
-    text = value
-    if "<" in text and ">" in text:
-        try:
-            from bs4 import BeautifulSoup  # imported lazily; only ATS HTML needs it
-
-            text = BeautifulSoup(text, "html.parser").get_text("\n")
-        except Exception:
-            text = re.sub(r"<[^>]+>", " ", text)
     import html as _html
 
-    text = _html.unescape(text)
+    text = value
+    for _ in range(_DECODE_PASSES):
+        decoded = _html.unescape(_strip_tags(text))
+        if decoded == text:
+            break
+        text = decoded
     text = text.replace("\xa0", " ")
     text = re.sub(r"[ \t]{2,}", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)

@@ -204,6 +204,16 @@ def fetch_personio(entry: dict[str, Any], timeout: int) -> list[Posting]:
             f"Personio feed for {token!r} is not XML — check the subdomain "
             f"(<token>.jobs.personio.de): {text[:120]!r}"
         ) from exc
+    # A wrong subdomain serves an HTML error page, and a tidy one parses as
+    # XML perfectly well — root `html`, no `position` elements, so the fetch
+    # would return an empty list and the source would read as "no openings"
+    # for as long as nobody checked. An empty board is `<workzag-jobs/>`, so
+    # the root tag tells the two apart without guessing.
+    if root.tag.lower() in {"html", "head", "body"}:
+        raise RuntimeError(
+            f"Personio feed for {token!r} is HTML, not a job feed — check the "
+            f"subdomain (<token>.jobs.personio.de): {text[:120]!r}"
+        )
     out = []
     for pos in root.iter("position"):
         def field(name: str) -> str:
@@ -257,9 +267,15 @@ def fetch_workday(entry: dict[str, Any], timeout: int) -> list[Posting]:
         for job in items:
             path = job.get("externalPath", "")
             location = job.get("locationsText", "")
+            # `bulletFields` carries the requisition id, but a board configured
+            # without them returns `[]` rather than omitting the key — and
+            # indexing that raised IndexError out of the middle of the loop,
+            # failing the whole source over one posting. The path is a fine
+            # fallback id: it is unique per posting and stable.
+            bullets = job.get("bulletFields") or [""]
             out.append(Posting(
                 source=_entry_key(entry), provider="workday",
-                source_job_id=str(job.get("bulletFields", [""])[0] or path),
+                source_job_id=str(bullets[0] or path),
                 url=f"{host}/{site}{path}",
                 company=entry.get("company", tenant),
                 title=job.get("title", ""),
