@@ -49,6 +49,20 @@ LEGAL_SUFFIXES = {
     "deutschland", "germany", "europe", "eu",
 }
 
+# The same legal forms written out in full. These cannot live in LEGAL_SUFFIXES
+# because that set is consulted per token and these are phrases; they are folded
+# away before tokenising instead. Jobsuche carries the registered name, so the
+# employer a company board calls `Example GmbH` arrives from there as
+# `Example Gesellschaft mit beschränkter Haftung` — the same firm, keyed
+# differently, which is one posting pinged about twice.
+LEGAL_PHRASES = re.compile(
+    r"\bgesellschaft\s+mit\s+beschraenkter\s+haftung\b"
+    r"|\bunternehmergesellschaft(?:\s+haftungsbeschraenkt)?\b"
+    r"|\boffene\s+handelsgesellschaft\b"
+    r"|\bkommanditgesellschaft(?:\s+auf\s+aktien)?\b"
+    r"|\bund\s+co\b",
+)
+
 # A run of single letters each followed by a dot: `B.V.`, `N.V.`, `S.A.`, `A.S.`.
 # Folded to `bv`, `nv`, … so they reach LEGAL_SUFFIXES as one token. Requiring at
 # least two groups is what keeps an ordinary sentence-ending initial out of it.
@@ -96,6 +110,9 @@ def company_key(name: str) -> str:
     text = strip_accents(name or "").casefold()
     text = DOTTED_ABBREV.sub(lambda m: m.group(0).replace(".", ""), text)
     text = re.sub(r"[^a-z0-9\s]", " ", text)
+    # Phrases first: the multi-word forms have to go before the text is split
+    # into tokens the suffix set can see.
+    text = LEGAL_PHRASES.sub(" ", text)
     tokens = [t for t in text.split() if t and t not in LEGAL_SUFFIXES]
     if not tokens:  # a name made entirely of suffixes — keep something
         tokens = text.split()

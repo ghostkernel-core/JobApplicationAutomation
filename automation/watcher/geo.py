@@ -272,10 +272,19 @@ def _key(value: str) -> str:
 # city key -> country code, and city key -> a display name
 CITY_COUNTRY: dict[str, str] = {}
 CITY_DISPLAY: dict[str, str] = {}
+#: Every alias key of a city -> the key of that city's canonical spelling.
+#: `city_key_of` and `expand_cities` both resolve through this, so the three
+#: spellings of one city share a key. Without it they do not: a `cities` list
+#: written as `Munich` keyed to `munich`, a board that said `München` keyed to
+#: `muenchen`, the two never compared equal, and the allow-list rejected the very
+#: posting it was written to keep — a filter discarding what it had in fact read
+#: correctly, which is the one outcome this layer is built to make impossible.
+CITY_CANONICAL: dict[str, str] = {}
 for _code, _entries in _CITY_SOURCE.items():
     for _entry in _entries:
         _aliases = [a.strip() for a in _entry.split("/") if a.strip()]
         _canonical = _aliases[0]
+        _canonical_key = _key(_canonical)
         for _alias in _aliases:
             _k = _key(_alias)
             if not _k:
@@ -286,6 +295,7 @@ for _code, _entries in _CITY_SOURCE.items():
             # city lookup anyway.
             CITY_COUNTRY.setdefault(_k, _code)
             CITY_DISPLAY.setdefault(_k, _canonical)
+            CITY_CANONICAL.setdefault(_k, _canonical_key or _k)
 
 COUNTRY_NAME_KEYS: dict[str, str] = {}
 for _code, _names in _COUNTRY_NAMES.items():
@@ -348,8 +358,15 @@ def expand(names: Iterable[str]) -> set[str]:
 
 
 def expand_cities(names: Iterable[str]) -> set[str]:
-    """Normalise a hand-written city list to lookup keys."""
-    return {_key(str(n)) for n in names or () if str(n).strip()}
+    """Normalise a hand-written city list to canonical lookup keys.
+
+    Resolving through `CITY_CANONICAL` is what lets the list be written in
+    whichever spelling the user thinks in, independently of the one the board
+    prints. Names not in the table keep their own key, so a typo narrows the
+    list by one city rather than matching something unintended.
+    """
+    keys = (_key(str(n)) for n in names or () if str(n).strip())
+    return {CITY_CANONICAL.get(k, k) for k in keys if k}
 
 
 def city_of(*fragments: object) -> str:
@@ -369,12 +386,18 @@ def city_of(*fragments: object) -> str:
 
 
 def city_key_of(*fragments: object) -> str:
-    """The lookup key for the detected city, for comparison against a config list."""
+    """The lookup key for the detected city, for comparison against a config list.
+
+    Canonical, not as-written: every spelling of one city returns the same key,
+    which is the half of the promise `expand_cities` cannot keep on its own.
+    """
     text = _key(" ".join(str(f) for f in fragments if f))
     if not text:
         return ""
     match = _CITY_RE.search(text)
-    return match.group(0) if match else ""
+    if not match:
+        return ""
+    return CITY_CANONICAL.get(match.group(0), match.group(0))
 
 
 def country_of(*fragments: object) -> str:

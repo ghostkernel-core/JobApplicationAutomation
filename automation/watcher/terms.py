@@ -80,11 +80,15 @@ _WINDOW = 70
 #:
 #: The German half cannot use word boundaries: the words that prove the context
 #: arrive welded to the language itself, as `Deutschkenntnisse` and
-#: `Sprachniveau`, so `\bkenntnisse\b` matches neither.
+#: `Sprachniveau`, so `\bkenntnisse\b` matches neither. It also needs the verb in
+#: every stem it appears in — `sprach`/`sprich` alone miss the infinitive, and
+#: "Sie sprechen fließend Deutsch" is one of the commonest ways a German posting
+#: states its language bar, so missing it reported no requirement at all.
 _LANGUAGE_CONTEXT = re.compile(
     r"\b(?:language|languages|speak\w*|spoken|written|fluen\w*|proficien\w*|"
     r"communicat\w*|level|native|[ABC][12])\b"
-    r"|kenntnisse|sprach|sprich|niveau|muttersprach|verhandlungssicher",
+    r"|kenntnisse|sprach|sprech|sprich|niveau|muttersprach|verhandlungssicher"
+    r"|fließend|fliessend",
     re.I,
 )
 
@@ -321,6 +325,7 @@ _LANGUAGE_FIXTURES: tuple[tuple[str, list[str]], ...] = (
     ("Grundkenntnisse in Deutsch von Vorteil", ["German basic (a plus)"]),
     ("Deutsch C1 zwingend erforderlich, Englisch fließend",
      ["German C1", "English fluent"]),
+    ("Sie sprechen fließend Deutsch", ["German fluent"]),
     ("Wir bieten ein gutes Gehalt. Deutschkenntnisse erforderlich.",
      ["German"]),
     # The optional marker belongs to the bullet above; German is not optional.

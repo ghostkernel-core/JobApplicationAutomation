@@ -183,10 +183,10 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--explain", action="store_true",
-                        help="show the active filters, fully expanded")
-    args = parser.parse_args(argv)
-    if args.explain or True:
-        return _explain()
+                        help="show the active filters, fully expanded — the "
+                             "default, and the only thing this CLI does")
+    parser.parse_args(argv)
+    return _explain()
 
 
 if __name__ == "__main__":
