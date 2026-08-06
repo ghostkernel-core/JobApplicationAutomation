@@ -370,7 +370,14 @@ def test_a_stop_reason_only_survives_alongside_something_to_say() -> None:
 
 @pytest.fixture()
 def scorer(monkeypatch):
-    """Stand in for the model, and record the prompts it was given."""
+    """Stand in for the model, and record the prompts it was given.
+
+    The digest and the knowledge base are stubbed alongside it. Both are read
+    from `rules/`, which is git-ignored and absent from a fresh checkout, and
+    `get_digest` regenerates through the CLI when it finds the cache stale —
+    so a test that reached the real one would either raise or spend five
+    minutes in a subprocess, depending on whose machine it ran on.
+    """
     state = type("S", (), {"responses": [], "prompts": []})()
 
     def fake_run_json(prompt, **kwargs):
@@ -381,6 +388,8 @@ def scorer(monkeypatch):
         return result
 
     monkeypatch.setattr(matcher, "run_json", fake_run_json)
+    monkeypatch.setattr(matcher.profile, "get_digest", lambda *a, **k: "D")
+    monkeypatch.setattr(matcher.profile, "get_kb", lambda *a, **k: "K")
     return state
 
 

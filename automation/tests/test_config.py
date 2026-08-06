@@ -347,12 +347,26 @@ def test_invalidate_forces_a_re_read_the_mtime_would_have_hidden(tmp_path) -> No
 
 
 def test_the_shipped_config_files_parse(caplog) -> None:
-    """A guard on the two files the watcher will not start without."""
+    """A guard on the two files the watcher will not start without.
+
+    `sources.toml` names the companies the owner is watching, so it is
+    git-ignored and a fresh checkout has only the example. Both are worth
+    parsing — the example is what a new install copies, and a typo in it breaks
+    that install's first poll — but only the real file can be asked whether
+    anything is still switched on. The example ships with every source
+    commented out on purpose.
+    """
+    real = config.SOURCES_PATH
+    path = real if real.exists() else real.parent / "sources.toml.example"
+
     with caplog.at_level(logging.ERROR, logger="watcher.config"):
         cfg = config.load_config()
-        sources = config.load_sources()
+        sources = reloader(path, config._parse_sources)()
+
     assert isinstance(cfg, Config)
-    assert sources.all_enabled(), "every source in sources.toml is switched off"
+    assert isinstance(sources, Sources)
+    if path == real:
+        assert sources.all_enabled(), "every source in sources.toml is off"
     assert "unreadable" not in caplog.text
 
 

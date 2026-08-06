@@ -98,6 +98,38 @@ def db(tmp_path, monkeypatch):
     return path
 
 
+# The real `_handle`, kept because the fixture below takes the name away for
+# every test. The section at the bottom calls it deliberately and directly.
+_real_handle = Builder._handle
+
+
+@pytest.fixture(autouse=True)
+def inert_worker(monkeypatch):
+    """Enforce this file's opening claim that nothing here spawns a real build.
+
+    The queue tests hand a job to a live worker, and a live worker's whole job
+    is to run a build — so they reach the real `_handle`, the real
+    `command_for`, and the real CLI unless something stops them. Nothing did.
+
+    That failure is not loud. `_handle` waits on `asyncio.to_thread`, and a task
+    parked in a thread cannot be cancelled: `asyncio.run` gets to the end of the
+    coroutine, tries to close the loop, and sits in `_cancel_all_tasks` waiting
+    for a task that will never come back. The suite stops with no output and no
+    failing test. It cost a CI job twenty minutes of silence, and it only ever
+    reproduced on the runner's Python — everywhere else the thread happened to
+    return before the loop closed, and the test merely looked a bit slow.
+
+    So the default `_handle` here does nothing at all. That is the honest double
+    for these tests: they assert on the queue's accounting, not on what the
+    worker does with a job. A test that wants build behaviour stubs `_handle`
+    with its own, which overrides this.
+    """
+    async def inert(self, job):
+        return None
+
+    monkeypatch.setattr(Builder, "_handle", inert)
+
+
 def posting(db_path, posting_id: str = "p1", *, company: str = "Acme",
             title: str = "Data Scientist") -> None:
     now = dt.datetime.now().isoformat(timespec="seconds")
@@ -1060,7 +1092,9 @@ def test_a_running_build_counts_as_ahead(db) -> None:
     async def scenario():
         worker = Builder(Notifier())
         worker._busy = True
-        return await worker.enqueue("p1", "")
+        ahead = await worker.enqueue("p1", "")
+        await worker.stop()
+        return ahead
 
     assert asyncio.run(scenario()) == 1
 
@@ -1200,7 +1234,12 @@ def test_recovery_is_not_reachable_from_an_ordinary_approval(db) -> None:
 # ===========================================================================
 
 def handle(worker: Builder, job: Job | None = None) -> None:
-    asyncio.run(worker._handle(job or Job("p1", "", 42, 1)))
+    """Run the real `_handle` — the one `inert_worker` replaces everywhere else.
+
+    Called directly rather than through the queue, so there is no worker task to
+    outlive the loop, and every test below stops the run before it can spawn.
+    """
+    asyncio.run(_real_handle(worker, job or Job("p1", "", 42, 1)))
 
 
 def test_a_posting_that_vanished_is_reported_rather_than_built(db) -> None:
