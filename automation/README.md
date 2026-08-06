@@ -363,6 +363,12 @@ source health), `state/profile_digest.md` (cache, regenerates when the canonical
 changes), `decisions.jsonl` (append-only audit of every notification and its outcome),
 `logs/watcher.log`, `logs/builds/`.
 
+Two log files, and only one of them is the log. `logs/watcher.log` is it: formatted, rotated
+at 5 MB with three backups, and what `watcherctl logs` reads. `logs/watcher.out` is the raw
+stdout and stderr of the windowed process, kept for the crash that happens before logging is
+configured and has nowhere else to go. It is a duplicate of everything else, so it is cut back
+to its last 200 KB on every restart and again if a single run ever pushes it past a megabyte.
+
 ## Where the boards are set
 
 Both tiers live in `sources.toml`.
