@@ -186,21 +186,45 @@ def canonical_url(url: str) -> str:
                        urlencode(sorted(query)), ""))
 
 
+#: A start or end tag with a real element name. Deliberately stricter than
+#: "contains a < and a >": `<5 years experience` and `a < b > c` are prose, and
+#: handing either to an HTML parser deletes the middle of the sentence without
+#: saying so.
+_TAG = re.compile(r"</?[a-zA-Z][a-zA-Z0-9-]*(?:\s[^<>]*)?/?>")
+
+#: How many strip-then-unescape rounds to run before accepting the result.
+#: Greenhouse serves HTML that has itself been entity-encoded, so a single
+#: round unescapes `&lt;p&gt;` into a live `<p>` and stops there — every
+#: Greenhouse body reached the scorer wrapped in its own markup, tag attributes
+#: and all. Two rounds settle that; the third only confirms nothing changed.
+#: Bounded rather than "until stable" because an input can be built to
+#: alternate for ever.
+_DECODE_PASSES = 3
+
+
+def _strip_tags(text: str) -> str:
+    if not _TAG.search(text):
+        return text
+    try:
+        from bs4 import BeautifulSoup  # imported lazily; only ATS HTML needs it
+
+        return BeautifulSoup(text, "html.parser").get_text("\n")
+    except Exception:  # noqa: BLE001 - a missing parser must not lose the body
+        return re.sub(r"<[^>]+>", " ", text)
+
+
 def to_text(value: str | None) -> str:
     """HTML (or plain text) to readable plain text, whitespace collapsed."""
     if not value:
         return ""
-    text = value
-    if "<" in text and ">" in text:
-        try:
-            from bs4 import BeautifulSoup  # imported lazily; only ATS HTML needs it
-
-            text = BeautifulSoup(text, "html.parser").get_text("\n")
-        except Exception:
-            text = re.sub(r"<[^>]+>", " ", text)
     import html as _html
 
-    text = _html.unescape(text)
+    text = value
+    for _ in range(_DECODE_PASSES):
+        decoded = _html.unescape(_strip_tags(text))
+        if decoded == text:
+            break
+        text = decoded
     text = text.replace("\xa0", " ")
     text = re.sub(r"[ \t]{2,}", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)

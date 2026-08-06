@@ -40,6 +40,12 @@
 /automation/sources.toml
 /automation/build_settings.json
 
+# Coverage output. CI reports from a fresh run; a stale local file only ever
+# disagrees with it.
+/automation/.coverage
+/automation/htmlcov/
+/automation/coverage.xml
+
 # Personal source and rendered documents kept under the generic master tree
 /master/*.docx
 /master/LaTeX/CV_*
