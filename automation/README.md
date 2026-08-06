@@ -893,6 +893,44 @@ Interactive runs behave the same way, through the same script — `CLAUDE.md` ("
 Fails Or Is Abandoned") tells the orchestrator to call it. Nothing about the cleanup is
 watcher-specific.
 
+## Tests
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests -q                        # offline, ~1 min
+.\.venv\Scripts\python.exe -m pytest tests --cov=watcher             # with coverage
+```
+
+The default run is offline and deterministic: no network, no browser, no clock. CI runs
+exactly that line plus `--cov-fail-under=90` on every push and pull request. The suite sits
+well above the floor; the gate is there so a module added without tests is caught in a PR
+rather than the first time it runs a build unsupervised at 3am.
+
+### Checking the boards for real
+
+Every payload mapping is pinned offline against recorded fixtures, which means the offline
+suite stays green forever after a provider changes its API. `-m live` is what notices:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests -m live                       # every source family
+.\.venv\Scripts\python.exe -m pytest tests -m "live and not live_browser"  # HTTP only
+```
+
+Each of the six ATS providers is probed against **several public boards and passes if any one
+works** — a single pinned tenant makes the check hostage to that one company switching ATS,
+and the question worth asking is whether the *provider's* shape still matches the fetcher.
+When one does fail, the message says to swap a token in
+`tests/test_live_endpoints.py` before touching the fetcher.
+
+`live_browser` is the second tier — hiring.cafe and StepStone, which need the shared
+Playwright context and sit behind bot management. Run these locally when a portal parks
+itself; that answers "did the endpoint move again?" directly, which is the first question
+worth asking.
+
+`.github/workflows/live.yml` runs both once a day, never on a pull request. The HTTP tier
+opens (or comments on) one `live-sources` issue when it fails. The browser tier is run for
+the log and its verdict ignored: from a GitHub runner's datacenter IP a refusal usually means
+bot management rather than a broken source, and believing it would mean an issue a day.
+
 ## Autostart
 
 A Task Scheduler "at logon" task running `py watcherctl.py start` (start-in set to this folder),

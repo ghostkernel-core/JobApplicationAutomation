@@ -1,0 +1,110 @@
+name: live sources
+
+# The offline suite pins every payload mapping against recorded fixtures, which
+# means it stays green forever after a provider changes its API. This is the
+# job that notices. It runs on its own schedule and never on a pull request, so
+# a board having a bad morning can neither block a merge nor go unnoticed.
+
+on:
+  schedule:
+    # Daily, off the hour and off the half hour — every repository that asks
+    # for "07:00" gets the same overloaded minute and the same queueing delay.
+    - cron: "41 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: live-sources
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sources:
+    runs-on: ubuntu-latest
+    # Never a required check: nothing here is under our control, so a red run
+    # is a prompt to look, not a verdict on the code.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install watcher dependencies
+        run: python -m pip install --quiet -r automation/requirements.txt
+
+      - name: HTTP sources
+        # The six ATS providers and the Jobsuche API. Plain JSON and XML over
+        # requests, no bot management, so a failure here is a real signal:
+        # either an endpoint moved or every board pinned for that provider did.
+        id: http
+        continue-on-error: true
+        working-directory: automation
+        # Explicit `shell: bash` for pipefail — the default shell would report
+        # tee's exit status and the step would pass however pytest ended.
+        shell: bash
+        run: >-
+          python -m pytest tests -q -m "live and not live_browser"
+          --no-header -p no:randomly
+          | tee "$RUNNER_TEMP/http.txt"
+
+      - name: Browser sources
+        # hiring.cafe and StepStone need a real browser and sit behind bot
+        # management. A datacenter IP being turned away says nothing about
+        # whether the source works from the watcher's own machine, so this step
+        # is run for the signal in the log and its verdict is not acted on.
+        # Debug a parked portal locally, where the answer means something.
+        id: browser
+        continue-on-error: true
+        working-directory: automation
+        shell: bash
+        run: |
+          python -m playwright install --with-deps chromium
+          python -m pytest tests -q -m live_browser --no-header -p no:randomly \
+            | tee "$RUNNER_TEMP/browser.txt"
+
+      - name: Report
+        # One open issue at a time, reopened and commented rather than
+        # duplicated — a provider that stays broken for a week should not leave
+        # seven identical issues behind.
+        if: steps.http.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="A live job source stopped answering"
+          body=$(
+            printf 'The scheduled live check failed. A provider has most likely\n'
+            printf 'changed its API, or every board pinned for it in\n'
+            printf '`automation/tests/test_live_endpoints.py` has moved.\n\n'
+            printf 'Run: %s\n\n' "$RUN_URL"
+            printf 'Reproduce locally:\n\n'
+            printf '    cd automation\n'
+            printf '    .venv/Scripts/python.exe -m pytest tests -m "live and not live_browser"\n\n'
+            printf 'HTTP sources:\n\n```\n%s\n```\n' \
+              "$(tail -c 3000 "$RUNNER_TEMP/http.txt" 2>/dev/null || echo '(no output)')"
+            if [ "${{ steps.browser.outcome }}" != "success" ]; then
+              printf '\nThe browser tier also failed. From a datacenter IP that is\n'
+              printf 'usually bot management rather than a broken source — check it\n'
+              printf 'locally before believing it.\n'
+            fi
+          )
+
+          existing=$(gh issue list --state open --label live-sources \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh label create live-sources --color B60205 \
+              --description "A scheduled live source check failed" 2>/dev/null || true
+            gh issue create --title "$title" --label live-sources --body "$body"
+          fi
+
+      - name: Fail the run if the HTTP tier failed
+        # After the issue exists, so the report is never lost to an early exit.
+        if: steps.http.outcome == 'failure'
+        run: exit 1
