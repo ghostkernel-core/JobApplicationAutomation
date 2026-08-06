@@ -138,21 +138,29 @@ jobs:
         working-directory: automation
         shell: bash
         run: |
-          set -uo pipefail
+          # `set +e` on purpose: the runner's shell arrives with -e, which would
+          # skip the report below on exactly the runs that need it most.
+          set +e
           # Output to a file rather than the step's pipe. A stray child process
           # that outlives pytest inherits that pipe and holds it open, and the
           # runner waits on the pipe, not on the process — so the step sits
           # there long after the suite has finished and reports nothing.
           #
-          # faulthandler_timeout dumps every thread's stack if one test runs
-          # long, and the outer timeout bounds the whole thing. Between them a
-          # wedged suite says where it wedged instead of going quiet.
-          timeout --signal=INT --kill-after=30s 12m \
-            python -m pytest tests -q -o faulthandler_timeout=180 \
+          # SIGABRT rather than SIGINT, with PYTHONFAULTHANDLER set: a Ctrl-C is
+          # only noticed between bytecodes, so it never arrives while the process
+          # is parked in a thread join or a socket read — which is where a hang
+          # lives. The abort dumps every thread's stack wherever it is, including
+          # during collection and interpreter shutdown, neither of which pytest's
+          # own per-test faulthandler_timeout covers.
+          PYTHONFAULTHANDLER=1 timeout --signal=ABRT --kill-after=30s 10m \
+            python -m pytest tests -q -o faulthandler_timeout=180 --durations=15 \
               --cov=watcher --cov-report=term-missing --cov-fail-under=90 \
               > pytest.log 2>&1
           code=$?
           cat pytest.log
+          if [ "$code" -eq 124 ] || [ "$code" -eq 134 ]; then
+            echo "::error::the suite did not finish inside its 10-minute budget"
+          fi
           exit $code
 
       - name: Validate template and example config files
