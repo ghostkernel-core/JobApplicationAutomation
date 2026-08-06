@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import runpy
 import subprocess
 
 import pytest
@@ -699,6 +700,16 @@ def test_no_arguments_shows_the_help_rather_than_doing_something(
     monkeypatch.setattr(matcher, "load_config", lambda: Cfg())
     assert matcher.main([]) == 1
     assert "--calibrate" in capsys.readouterr().out
+
+
+def test_the_verb_spelling_of_the_command_reaches_the_same_main(
+        monkeypatch) -> None:
+    """`python -m watcher.match` is documented in the README, so it has to
+    keep working even though the logic lives under the noun."""
+    monkeypatch.setattr(matcher, "main", lambda argv=None: 7)
+    with pytest.raises(SystemExit) as exit_code:
+        runpy.run_module("watcher.match", run_name="__main__")
+    assert exit_code.value.code == 7
 
 
 # ===========================================================================
