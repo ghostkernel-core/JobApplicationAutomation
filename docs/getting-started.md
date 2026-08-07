@@ -56,8 +56,8 @@ presented for your line-by-line confirmation before it moves on:
   languages, and an explicit **"may not be claimed"** list (certifications you do not hold,
   degrees started but not finished, tools only touched privately, seniority you have not held,
   work authorization you cannot support). The agent asks about this list rather than guessing.
-- `automation/sources.toml` — `title_allow`/`title_deny` set for *your* field, and an initial
-  `[[ats]]` board list for companies you name.
+- `automation/sources.toml` — `title_deny` and the portal `queries` set for *your* field, and
+  an initial `[[ats]]` board list for companies you name.
 - `rules/slices/_facts.md` — a compressed slice of the profile, generated from it.
 
 The agent is forbidden from inventing anything. Anything it cannot establish is left as a

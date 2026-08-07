@@ -8,9 +8,9 @@ Nothing in `scripts/`, `rules/`, `master/`, or `.claude/agents/` was changed for
 watcher is strictly a new caller of the pipeline described in `../CLAUDE.md`.
 
 ```
-poll sources → dedupe → prefilter (free) → score (haiku) → Telegram
-                                              ⟵ you reply "yes"
-                          dedupe vs folders + tracker → claude -p → "✅ Built · <path>"
+poll sources → dedupe → prefilter (free) → triage (haiku) → score (haiku) → Telegram
+                                                                ⟵ you reply "yes"
+                                dedupe vs folders + tracker → claude -p → "✅ Built · <path>"
 ```
 
 ## End to end
@@ -43,10 +43,19 @@ The numbers below are the shipped `config.toml`; `/status` prints the ones actua
       │  extracted and shown, not enforced
       │        └──► dropped, with a reason (`poll --dry-run` prints them)
       │
+      ├─ triage (haiku, batched): is this title worth reading, for this profile?
+      │  title + company + location only, no body, before anything is hydrated
+      │        └──► dropped — but only on a deliberate "drop"; anything it could
+      │             not judge is kept, so an outage widens the funnel, never
+      │             narrows it
+      │
       ├─ body under 800 chars? fetch the real ad and run the prefilter again
       │        └──► dropped — the hard blockers usually sit in the body, not the title
       │
       └──► stored in state/watch.db
+
+ every drop above is recorded in `drops` with the stage that made it, which is
+ what `[recall]` re-scores a sample of once a week
 ```
 
 The second prefilter pass matters more than it looks: StepStone and hiring.cafe both ship the
@@ -325,6 +334,7 @@ Underneath, the entrypoint is still directly usable, and every sub-command below
 | `-m watcher.triage --replay 30` | re-judge the last 30 stored postings against the profile and print a table, plus an acceptance-gate check against their stored scores; writes nothing |
 | `-m watcher.triage --backfill [--limit N] [--source KEY] [--dry-run]` | fetch, prefilter, and triage a fresh batch the way `poll` would, without storing the postings themselves — the deliberate way to work through more than one cycle's worth at once |
 | `-m watcher.triage --explain` | print the exact prompt a real call would send, no model call |
+| `-m watcher.recall` | re-score a sample of dropped postings and report the miss rate; `--plan` shows the sample without fetching, `--json` for the raw report |
 | `-m watcher.queries` | print the search terms each portal is currently polled with, and whether they came from `sources.toml` or the profile |
 | `-m watcher.queries --regenerate [--dry-run]` | write a fresh set from the profile digest now, without waiting for the digest to change |
 | `-m watcher.queries --check "Data Scientist Berlin"` | run one query string through the validator and say which rule it breaks |
@@ -488,6 +498,50 @@ python -m watcher.geo --expand EU DACH         # what a region name becomes
 python -m watcher.geo --resolve "Düsseldorf, Germany"
 python -m watcher.roles --title "Teamleiter Data Science"
 python -m watcher.poll --dry-run --show-filtered
+```
+
+### The gate that is not in sources.toml
+
+There is no `title_allow` any more. A hand-written substring list decided what was ever *seen*,
+ahead of the profile that decides what is worth applying to, and it was the narrowest gate in
+the pipeline: `ats:Roche` fetched 200 postings a cycle and stored none, ten of the fifteen
+company boards had stored nothing ever, and "Specialist Advanced Analytics" had no way through
+no matter how well the job fit. A substring list is a good way to say *never* and a poor way to
+say *only*, which is why `title_deny` survived and its opposite did not. A leftover
+`title_allow` key is ignored rather than rejected.
+
+`[triage]` in `config.toml` does that job instead, against the profile digest the matcher
+already scores with. It sees title, company and location only — never a description — and runs
+in one batch per cycle before anything is hydrated, which is what makes it cheap enough to put
+in front of everything.
+
+It **fails open**, and that is the whole design. A degraded batch, a malformed reply, a verdict
+that is not the exact string `drop` — all keep the posting. An outage widens the funnel and
+costs a few scored postings; it can never quietly narrow it. Only a deliberate `drop` drops.
+
+```powershell
+python -m watcher.triage --replay 30           # re-judge stored postings; writes nothing
+python -m watcher.triage --explain             # the exact prompt, no model call
+python -m watcher.triage --backfill --dry-run  # a fresh batch, without storing the postings
+```
+
+### What all of it threw away
+
+Every drop, at every stage, is recorded in `drops` with the stage that made it. `[recall]`
+re-scores a stratified sample of them once a week through the same matcher a stored posting
+goes through, and reports how many would have been worth a ping.
+
+It decides nothing — no verdicts, no postings, no config changes. The only column it writes is
+`drops.audited_at`, so the same row does not consume next week's sample as well.
+
+The denominator is kept honest on purpose. A dropped posting whose ad has since been taken
+down is reported as *no description available*, never as correctly dropped: a miss rate that
+counts unreadable postings as successes is a number that always looks good.
+
+```powershell
+python -m watcher.recall                       # run the audit now
+python -m watcher.recall --plan                # the sample it would draw; nothing fetched or scored
+python -m watcher.recall --json                # the report as JSON
 ```
 
 ## Replying

@@ -589,6 +589,102 @@ def test_a_posting_that_clears_every_rule_is_accepted() -> None:
 
 
 # ===========================================================================
+# prefilter — the stage vocabulary
+# ===========================================================================
+#
+# `stage` is what the weekly recall audit groups by and what the `drops` table
+# stores, so it is the only thing that says *why* discovery is throwing away
+# what it throws away. A rejection that arrives with an empty stage is invisible
+# to the audit; one that arrives with the wrong stage is worse, because it sends
+# whoever reads the report to fix a rule that is working.
+
+#: One rejecting construction per stage `check` can produce. Keyed by the stage
+#: it must report, so the mapping is both the parametrisation and the claim.
+REJECTIONS = {
+    "title": lambda: check(posting(title="")),
+    "age": lambda: check(posting(posted_at=dt.date.today() - dt.timedelta(days=90)),
+                         max_age_days=30),
+    "location": lambda: check(posting(location="Austin, Texas", country="US"),
+                              filters=loc(regions=("DACH",))),
+    "seniority": lambda: check(
+        posting(title="Working Student Machine Learning"),
+        filters=Filters(seniority=SeniorityFilter(deny=("intern",)))),
+    "blocker": lambda: check(
+        posting(description="A security clearance is required.")),
+    "experience": lambda: check(
+        posting(description="12+ years of experience required"),
+        filters=Filters(experience=ExperienceFilter(mode="filter", max_years=5))),
+}
+
+
+@pytest.mark.parametrize("stage", sorted(REJECTIONS))
+def test_every_rejecting_path_names_the_rule_that_rejected(stage) -> None:
+    result = REJECTIONS[stage]()
+    assert not result.accepted
+    assert result.stage == stage
+    assert result.stage in prefilter.STAGES
+
+
+def test_the_stage_list_has_no_entry_the_prefilter_cannot_produce() -> None:
+    """`STAGES` minus `triage` is exactly what `check` can return.
+
+    Both halves matter. A new rule that returns a stage nobody added to
+    `STAGES` breaks the audit's grouping; a stage left in `STAGES` after its
+    rule was deleted shows up in every report as a category that is always
+    empty, which reads as "that rule never fires" rather than "that rule is
+    gone". `triage` is the one deliberate exception — it shares this vocabulary
+    but is applied by `poll_once` after the free rules, not here.
+    """
+    assert set(REJECTIONS) == set(prefilter.STAGES) - {"triage"}
+    assert "triage" in prefilter.STAGES
+
+
+def test_an_accepted_posting_carries_no_stage() -> None:
+    # Empty is what `drops` never stores: a posting with a stage is a posting
+    # that was dropped, and the two must not be able to disagree.
+    assert check(posting()).stage == ""
+
+
+def test_an_out_of_region_posting_with_a_body_blocker_reports_the_geography() -> None:
+    """Rule order decides what a drop is *reported as*, not just whether it drops.
+
+    This posting trips two rules. Geography runs first and is the more useful
+    answer — "we do not hire in the US" is a policy, while "this one mentioned a
+    clearance" invites someone to go widening the blocker list over a posting
+    that was never in scope. The old order filed roughly fifty postings a cycle
+    under the wrong rule this way, which is the whole reason the order is now
+    pinned rather than incidental.
+    """
+    result = check(
+        posting(location="Austin, Texas", country="US",
+                description="Applicants must hold an active security clearance."),
+        filters=loc(regions=("DACH",)),
+    )
+    assert result.stage == "location"
+
+
+def test_geography_also_outranks_a_seniority_mismatch() -> None:
+    result = check(
+        posting(title="Working Student Machine Learning",
+                location="Austin, Texas", country="US"),
+        filters=Filters(location=LocationFilter(regions=("DACH",)),
+                        seniority=SeniorityFilter(deny=("intern",))),
+    )
+    assert result.stage == "location"
+
+
+def test_the_two_rules_that_need_a_description_stay_behind_the_free_ones() -> None:
+    # An aged-out posting is answered by its date alone; reading the body to
+    # find a blocker in it would be work spent on a posting already refused.
+    result = check(
+        posting(posted_at=dt.date.today() - dt.timedelta(days=90),
+                description="A security clearance is required."),
+        max_age_days=30,
+    )
+    assert result.stage == "age"
+
+
+# ===========================================================================
 # prefilter — the --explain CLI
 # ===========================================================================
 

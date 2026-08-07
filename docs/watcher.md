@@ -20,10 +20,17 @@ This file is hand-edited and git-ignored — your live copy never leaves your ma
 generated from `automation/sources.toml.example`, a template with everything commented out, so
 the committed version carries nobody's field or geography.
 
-**`[defaults] title_allow` / `title_deny`** is the free prefilter, and `title_allow` is the
-single most load-bearing setting: a posting must match one of its keywords to survive at all.
-Fill it with the roles you would actually apply to; put look-alike titles you never want
-(`intern`, `werkstudent`, `head of`, …) into `title_deny`.
+**`[defaults] title_deny`** is the free prefilter. Put look-alike titles you never want
+(`intern`, `werkstudent`, `head of`, …) into it. There is deliberately no `title_allow` any
+more: a hand-written substring list decided what was ever *seen*, ahead of the profile that
+decides what is worth applying to, and it was the narrowest gate in the pipeline —
+`ats:Roche` fetched 200 postings a cycle and stored none, ten of fifteen company boards had
+stored nothing ever, and a title like "Specialist Advanced Analytics" had no way through no
+matter how well the job fit. A substring list is a good way to say *never* and a poor way to
+say *only*, which is why only the deny half survived. Titles are now judged against your
+profile by `[triage]`, which reads the same digest the matcher scores with and fails open.
+A leftover `title_allow` key is ignored rather than rejected — delete it when you next edit
+the file.
 
 **`[filters.location]`** expresses geography at whatever grain suits — continents, regions
 (`EU`, `DACH`, `NORDICS`, …), ISO country codes or names, or cities — and the lists add up rather
@@ -81,12 +88,50 @@ no URL to configure, since each portal reads a different internal shape:
 | `hiringcafe` | Next.js `_next/data` endpoint, via the shared browser | yes | none — worldwide; geography is filtered by `[filters.location]` |
 | `stepstone` | the search page's preloaded state, via the same browser | yes | `location` → `/in-<slug>`; `"Deutschland"` covers the whole country |
 
-`queries` is verbatim search text per portal; broad is fine, since `title_allow` is stricter than
-any portal's own relevance ranking (a real run: 209 fetched, 92 kept). The two fragile portals
+`queries` is verbatim search text per portal, and broad is fine — nothing narrows a title
+before it is fetched, and relevance is judged against your profile by `[triage]` once the
+posting is in hand. Broad is not enough on its own, though: those few terms are the entire
+aperture of this half of the watcher, so a role you are qualified for that nobody thought to
+type is never fetched, and nothing reports its absence. `[queries]` in `config.toml` closes
+that by writing the terms from your profile instead — see
+[Generated search terms](#generated-search-terms) below. The two fragile portals
 share one persistent Playwright browser context, so a Cloudflare challenge solved once is reused
 rather than re-triggered every poll. Three consecutive failures disable a source and send
 exactly one notification — no retry loop; `python -m watcher.health --reset portal:stepstone`
 re-enables it.
+
+### Generated search terms
+
+`[queries]` in `config.toml` writes each portal's search terms from your profile digest
+instead of from `sources.toml`. One model call per profile edit, cached against the digest
+that produced it, so a poll cycle never pays for it.
+
+A bad generation narrows nothing. A generated set replaces a portal's hand-written list only
+when enough of it survives validation, and below two valid queries that portal keeps
+`sources.toml` verbatim. The fallback is per portal, because `arbeitsagentur` is asked for
+German and the other two for English and those halves fail independently.
+
+Validation is strict, because both failure modes are silent:
+
+- **No location, country, region, or work-arrangement word.** Every portal takes location as
+  its own field, so a city inside the query text double-filters and returns an empty page
+  that reads exactly like a quiet day.
+- **No boolean operators, quotes, brackets or wildcards.** A malformed query can 4xx a
+  fragile portal, and a structural failure *parks* the source with no automatic retry — one
+  unbalanced quote can take StepStone off the board until somebody reads a status page.
+- **Two to six words, at most 60 characters.** One word matches half the board; a sentence
+  is treated as an implicit AND of all its words and matches nothing.
+
+| command | what it does |
+|---|---|
+| `python -m watcher.queries` | the terms each portal is polled with now, and whether they came from `sources.toml` or your profile |
+| `python -m watcher.queries --regenerate [--dry-run]` | write a fresh set now, without waiting for the digest to change |
+| `python -m watcher.queries --check "Data Scientist Berlin"` | run one query through the validator and say which rule it breaks |
+| `python -m watcher.queries --explain` | the config, the cache key, and the prompt a real call would send — no model call |
+
+It is off by default and is the last switch to flip: it changes what is *fetched*, so it moves
+every downstream number at once. Turn it on alone, after `[triage]` and `[recall]` have had a
+week to settle, or there is no way to tell which change moved what.
 
 ### The one-sided-filter design principle
 
@@ -108,6 +153,28 @@ The score thresholds matter in particular: `notify_threshold` triggers an instan
 `digest_threshold` a line in the evening digest, and anything below that is stored silently
 (visible via `watcher.match --replay`). `python -m watcher.match --calibrate` scores postings you
 already applied to, to sanity-check wherever you set these.
+
+Three sections govern discovery — what is fetched, what survives, and how much of what was
+thrown away should have been kept.
+
+**`[triage]`** is the profile-derived gate that replaced `title_allow`. It judges title,
+company and location only, in batches, before a posting is ever hydrated or stored, and it
+**fails open**: anything it cannot judge — a degraded batch, a malformed reply, a verdict that
+is not the exact string `drop` — is kept. Only a deliberate `drop` drops. `--replay 30`
+re-judges the last 30 stored postings against their stored scores and writes nothing;
+`--explain` prints the prompt without a model call; `--backfill` works through more than one
+cycle's worth at once.
+
+**`[recall]`** is the weekly answer to "what did all of that throw away?". Every rejected
+posting is recorded with the stage that rejected it, and once a week a stratified sample is
+re-scored through the same matcher a stored posting goes through. It decides nothing — no
+verdicts, no postings, no config changes; the only thing it writes is `drops.audited_at`, so
+the same row does not consume next week's sample too. The denominator is kept honest: a
+posting it could not re-fetch is reported as *no description available*, never as correctly
+dropped. Off until the drop table has a week of real data in it, because a miss rate computed
+from a nearly empty table reads as a fact and is not one.
+
+**`[queries]`** is covered under [Generated search terms](#generated-search-terms) above.
 
 ## Changing settings while it runs
 

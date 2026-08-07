@@ -48,11 +48,14 @@ apply them verbatim, do not "improve" them.
    they have only touched privately rather than professionally, seniority they have not held,
    visa/relocation claims they cannot support. Read the drafted list back and get a yes.
 3. `automation/sources.toml` — from `automation/sources.toml.example`. Ask which job titles
-   they would actually apply to and which look-alike titles to exclude, then set `title_allow`
-   for **their** field (not the previous owner's). Set geography from where they can legally
-   work and are willing to work. Build an initial `[[ats]]` board list from companies they
-   name; run `python -m watcher.discover` from `automation/` to resolve ATS slugs, and confirm
-   each resolved slug with the user before keeping it.
+   they would actually apply to and which look-alike titles to exclude, then set the portal
+   `queries` and `title_deny` for **their** field (not the previous owner's). There is no
+   `title_allow`: what a posting has to *be* is judged against the profile by `[triage]`,
+   after it is fetched. The `queries` lists are only the aperture — a role they are qualified
+   for that nobody thought to type is never fetched at all, so err wide. Set geography from
+   where they can legally work and are willing to work. Build an initial `[[ats]]` board list
+   from companies they name; run `python -m watcher.discover` from `automation/` to resolve
+   ATS slugs, and confirm each resolved slug with the user before keeping it.
 4. `rules/slices/_facts.md` — condensed strictly from the profile you just drafted. Compression
    only: every line must be traceable to a confirmed profile line. No new facts, no rephrasing
    that strengthens a claim.
