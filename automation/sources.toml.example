@@ -162,9 +162,15 @@ max_years = 0
 #   stepstone       the search page's preloaded state, through the same context.
 #                   `location` becomes /in-<slug>; "Deutschland" is all of it.
 #
-# `queries` is the search text, verbatim, per portal. Broad is fine — the title
-# allow-list in [defaults] is what decides relevance, and it is stricter than
-# any of these three.
+# `queries` is the search text, verbatim, per portal. Broad is fine — nothing
+# narrows a title before it is fetched any more; relevance is judged against the
+# profile by [triage] in config.toml, after the posting is in hand.
+#
+# Broad is also not enough on its own. These few terms are the entire aperture
+# of this half of the watcher: a role the profile is qualified for that nobody
+# thought to type here is never fetched, and nothing reports its absence. Turn
+# on [queries] in config.toml to have them written from the profile instead,
+# and `py -m watcher.queries` to see which list is live.
 #
 # EXAMPLE — replace queries/location with your own search terms.
 # ---------------------------------------------------------------------------

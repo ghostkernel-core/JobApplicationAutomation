@@ -120,26 +120,43 @@ several. Two *unrelated* rows, with different start times, are the actual confli
 If two installs are genuinely meant to run independently, give each its own bot token from
 BotFather — see [Privacy and Security](./privacy-and-security.md).
 
-## No postings surviving the prefilter
+## No postings surviving discovery
 
 **Symptom:** `python -m watcher.poll --dry-run` (or a real poll) returns nothing, or far fewer
 postings than expected.
 
-**Cause:** almost always `[defaults] title_allow` in `automation/sources.toml` is narrower than
-intended — it is the single most load-bearing filter, and a posting must match one of its
-keywords to survive at all.
-
-**Fix:**
+**Cause:** one of three gates, and the fix differs for each. Find out which before changing
+anything — `--show-filtered` names the stage that dropped each posting.
 
 ```bash
-python -m watcher.poll --dry-run --show-filtered   # see what the prefilter actually dropped, and why
-python -m watcher.prefilter --explain              # every rule, fully expanded, against stored postings
+python -m watcher.poll --dry-run --show-filtered   # what was dropped, and by which stage
+python -m watcher.prefilter --explain              # every prefilter rule, fully expanded
+python -m watcher.triage --replay 30               # what triage would say about stored postings
+python -m watcher.queries                          # the search terms each portal is polled with
 ```
 
-Broaden `title_allow` with the role phrasings you would actually apply to. Remember every other
-filter in `sources.toml` is one-sided (see [The Watcher](./watcher.md)) — a posting is dropped
-only for a title mismatch, a resolved location outside your allow-list, or a denied seniority
-band, never for something the filter simply failed to read.
+**Dropped at `location`, `seniority` or `blocker`** — that is the prefilter, and the setting
+is in `[filters.location]` or `[defaults] title_deny` in `automation/sources.toml`. Every one
+of those filters is one-sided (see [The Watcher](./watcher.md)): a posting is dropped only for
+a *resolved* location outside your allow-list or a denied seniority band, never for something
+the filter simply failed to read.
+
+**Dropped at `triage`** — the profile-derived gate is judging your titles as off-target.
+`--replay 30` prints its verdicts against the stored scores, which is the honest way to see
+whether it is wrong or you are. If it is wrong, the fix is in
+`rules/00-canonical-profile.md`, not in a keyword list: triage reads the same digest the
+matcher scores with, so a profile that undersells a skill narrows discovery and scoring
+together.
+
+**Nothing was fetched at all** — then no gate is at fault and the search terms are. The few
+terms in each portal's `queries` are the entire aperture of that half of the watcher, so a
+role you are qualified for that nobody thought to type is never fetched and nothing reports
+its absence. Add the phrasings by hand, or turn on `[queries]` in `config.toml` to have them
+written from your profile.
+
+There is deliberately no `title_allow` any more. If you are following older notes, the
+answer to "broaden the allow-list" is now "there is nothing to broaden" — a leftover key is
+ignored rather than rejected, and `[triage]` does that job against your profile instead.
 
 ## Postings stop arriving after a scoring outage
 
