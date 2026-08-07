@@ -55,11 +55,13 @@ HC_ENTRY = {"name": "hiringcafe", "queries": ["data scientist"]}
 @pytest.fixture
 def hc(monkeypatch):
     """Stub the browser and let a test script the pages hiring.cafe returns."""
-    state = {"build_id": "BUILD123", "pages": [], "asked": [],
-             "texts": {}, "raises": None}
+    state = {"build_id": "BUILD123", "title": "Hiring Cafe", "pages": [],
+             "asked": [], "texts": {}, "raises": None}
 
-    monkeypatch.setattr(browser, "evaluate",
-                        lambda *a, **k: state["build_id"])
+    # The fetcher reads the title alongside the build id, so that a page with
+    # neither can say which of the two reasons it had.
+    monkeypatch.setattr(browser, "evaluate", lambda *a, **k: {
+        "buildId": state["build_id"], "title": state["title"]})
 
     def json_api(site, url, payload=None, **kwargs):
         state["asked"].append(url)
@@ -106,8 +108,28 @@ def test_hiringcafe_says_so_when_the_page_shape_changed(hc) -> None:
     """A missing build id must raise, not silently poll a broken URL."""
     hc["build_id"] = None
 
-    with pytest.raises(RuntimeError, match="__NEXT_DATA__"):
+    with pytest.raises(RuntimeError, match="page shape has changed"):
         hiringcafe.fetch(HC_ENTRY, 10)
+
+
+@pytest.mark.parametrize("title", [
+    "Vercel Security Checkpoint",
+    "Vercel Sicherheitskontrollpunkt",   # the site is localised
+    "Just a moment...",
+])
+def test_hiringcafe_tells_a_bot_challenge_from_a_redesign(hc, title) -> None:
+    """The two look identical from here and want opposite things.
+
+    A challenge clears on its own; a redesign is a code change in the fetcher.
+    Naming both and committing to neither meant opening the site by hand at the
+    moment it was failing to find out which.
+    """
+    hc["build_id"] = None
+    hc["title"] = title
+
+    with pytest.raises(RuntimeError, match="bot challenge served") as caught:
+        hiringcafe.fetch(HC_ENTRY, 10)
+    assert "page shape" not in str(caught.value)
 
 
 def test_hiringcafe_says_so_when_the_payload_lost_its_props(hc) -> None:

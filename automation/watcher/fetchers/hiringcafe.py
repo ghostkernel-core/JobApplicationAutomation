@@ -116,19 +116,46 @@ def fetch(entry: dict[str, Any], timeout: int) -> list[Posting]:
     return out
 
 
+#: What the page calls itself while it is holding a bot check in front of the
+#: app. Vercel's wording, matched loosely because only the distinctive half is
+#: stable — it is localised, so the German run of this says "Sicherheitskontrollpunkt".
+_CHALLENGE_MARKERS = ("security checkpoint", "sicherheitskontrollpunkt",
+                      "just a moment", "attention required")
+
+
 def _build_id(timeout: int) -> str:
-    """Read the deploy's build id out of the live page."""
-    build_id = browser.evaluate(
+    """Read the deploy's build id out of the live page.
+
+    The page title comes back with it because a missing build id has two very
+    different causes and the log used to name both and commit to neither. A
+    challenge clears on its own and wants nothing from anybody; a shape change is
+    a code fix in this file. Reading the title costs nothing and tells them
+    apart, which otherwise takes opening the site by hand at the moment it is
+    failing — the state that made this worth the two extra lines.
+    """
+    got = browser.evaluate(
         SITE,
-        "() => window.__NEXT_DATA__ && window.__NEXT_DATA__.buildId",
+        """() => ({
+            buildId: window.__NEXT_DATA__ && window.__NEXT_DATA__.buildId,
+            title: document.title || "",
+        })""",
         timeout=timeout,
-    )
-    if not build_id:
+    ) or {}
+
+    build_id = got.get("buildId")
+    if build_id:
+        return str(build_id)
+
+    title = str(got.get("title") or "").strip()
+    if any(mark in title.casefold() for mark in _CHALLENGE_MARKERS):
         raise RuntimeError(
-            "hiring.cafe: no __NEXT_DATA__.buildId — the page shape changed "
-            "or a challenge was served"
+            f"hiring.cafe: bot challenge served ({title!r}) — no build id to "
+            "read. Usually clears itself; nothing to fix here."
         )
-    return str(build_id)
+    raise RuntimeError(
+        f"hiring.cafe: no __NEXT_DATA__.buildId and no challenge page "
+        f"(title {title!r}) — the site's page shape has changed"
+    )
 
 
 def _page(build_id: str, query: str, page: int, timeout: int) -> dict[str, Any]:
