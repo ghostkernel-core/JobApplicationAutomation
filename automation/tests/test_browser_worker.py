@@ -32,10 +32,17 @@ from watcher.fetchers import browser
 
 @pytest.fixture(autouse=True)
 def no_leftover_worker():
-    """Each test starts and ends with no browser thread of its own."""
+    """Each test starts and ends with no browser thread of its own.
+
+    `_WARMED` is module-level and the `inline` fixture never starts a worker to
+    tear down, so it has to be cleared here or one test's warm silently
+    suppresses the next one's.
+    """
     browser.close()
+    browser._WARMED.clear()
     yield
     browser.close()
+    browser._WARMED.clear()
 
 
 @pytest.fixture
@@ -473,3 +480,235 @@ def test_page_text_carries_on_when_the_selector_never_appears(inline) -> None:
     inline(page)
 
     assert len(browser.page_text("https://x/job/1", wait_selector="div.ad")) == 500
+
+
+# --------------------------------------------------------------------------
+# surviving a browser that died
+# --------------------------------------------------------------------------
+
+class TargetClosedError(Exception):
+    """Named for what Playwright raises.
+
+    `playwright.sync_api` exports only `Error` and `TimeoutError`, so there is
+    no real type to import and catch — the module matches on the name and the
+    message, and this stands in for the real thing.
+    """
+
+
+class FakeBrowserProcess:
+    def __init__(self, connected: bool = True) -> None:
+        self._connected = connected
+
+    def is_connected(self) -> bool:
+        return self._connected
+
+
+class FakeContext:
+    def __init__(self, name: str = "ctx", process=None) -> None:
+        self.name = name
+        self.browser = process
+        self.handlers: dict = {}
+        self.closed = False
+
+    def set_default_timeout(self, _ms) -> None:
+        pass
+
+    def on(self, event, handler) -> None:
+        self.handlers[event] = handler
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _relaunching_state(monkeypatch, first, *rest):
+    """A worker state holding `first`, with `rest` queued for relaunches."""
+    pending = list(rest)
+
+    def open_context(state):
+        if state.get("context") is None:
+            state["context"] = pending.pop(0)
+        return state["context"]
+
+    monkeypatch.setattr(browser, "_open_context", open_context)
+    return {"playwright": None, "context": first, "dead": False}, pending
+
+
+def test_a_dead_context_is_torn_down_and_relaunched(monkeypatch, tmp_path) -> None:
+    """The handle outlives the process, so a populated cache proves nothing."""
+    dead = FakeContext("dead", FakeBrowserProcess(connected=False))
+    fresh = FakeContext("fresh", FakeBrowserProcess(connected=True))
+    _install_playwright(monkeypatch, FakePlaywright(context=fresh))
+    monkeypatch.setattr(browser, "browser_profile_dir", lambda: tmp_path)
+    state = {"playwright": None, "context": dead}
+
+    assert browser._open_context(state) is fresh
+    assert dead.closed
+
+
+def test_a_live_context_is_still_reused(monkeypatch, tmp_path) -> None:
+    """The invariant the liveness check must not cost: relaunching per poll
+    would re-trigger the Cloudflare challenge every 30 minutes, which is the
+    entire reason the profile is persistent."""
+    live = FakeContext("live", FakeBrowserProcess(connected=True))
+    playwright = FakePlaywright()
+    _install_playwright(monkeypatch, playwright)
+    monkeypatch.setattr(browser, "browser_profile_dir", lambda: tmp_path)
+    state = {"playwright": None, "context": live}
+
+    assert browser._open_context(state) is live
+    assert not live.closed
+    assert playwright.launch_kwargs == {}
+
+
+def test_a_context_that_exposes_no_browser_counts_as_alive() -> None:
+    """A persistent context need not expose `.browser`. Reading that as death
+    would relaunch on every poll — the failure this fix must not introduce."""
+    assert browser._context_is_dead({"context": FakeContext("persistent")}) is False
+
+
+def test_a_browser_that_went_away_while_idle_is_noticed(
+        monkeypatch, tmp_path) -> None:
+    """The actual outage: Chromium died between two polls, with nothing in
+    flight to raise and 30 minutes before anyone asked again."""
+    context = FakeContext("ctx", FakeBrowserProcess(connected=True))
+    _install_playwright(monkeypatch, FakePlaywright(context=context))
+    monkeypatch.setattr(browser, "browser_profile_dir", lambda: tmp_path)
+    state: dict = {"playwright": None, "context": None}
+    browser._open_context(state)
+
+    context.handlers["close"]()
+
+    assert browser._context_is_dead(state) is True
+
+
+def test_a_job_that_hits_a_dead_browser_relaunches_and_retries(monkeypatch) -> None:
+    """Every job here is a read, so running one twice is safe."""
+    state, _pending = _relaunching_state(
+        monkeypatch, FakeContext("first"), FakeContext("second"))
+    seen: list[str] = []
+
+    def job(ctx):
+        seen.append(ctx.name)
+        if ctx.name == "first":
+            raise TargetClosedError(
+                "Target page, context or browser has been closed")
+        return f"ran on {ctx.name}"
+
+    assert browser._run_job(state, job) == "ran on second"
+    assert seen == ["first", "second"]
+
+
+def test_an_ordinary_failure_does_not_relaunch(monkeypatch) -> None:
+    """Retrying everything would double the cost of every real error."""
+    state, pending = _relaunching_state(
+        monkeypatch, FakeContext("first"), FakeContext("second"))
+    seen: list[str] = []
+
+    def job(ctx):
+        seen.append(ctx.name)
+        raise RuntimeError("HTTP 500 from the search endpoint")
+
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        browser._run_job(state, job)
+
+    assert seen == ["first"]
+    assert len(pending) == 1  # nothing was relaunched
+
+
+def test_a_retry_that_fails_again_surfaces_the_second_error(monkeypatch) -> None:
+    """One retry, not a loop."""
+    state, _pending = _relaunching_state(
+        monkeypatch, FakeContext("first"), FakeContext("second"))
+    seen: list[str] = []
+
+    def job(ctx):
+        seen.append(ctx.name)
+        if ctx.name == "first":
+            raise TargetClosedError("target closed")
+        raise RuntimeError("still broken")
+
+    with pytest.raises(RuntimeError, match="still broken"):
+        browser._run_job(state, job)
+
+    assert seen == ["first", "second"]
+
+
+def test_a_launch_that_just_failed_is_not_attempted_again(
+        monkeypatch, tmp_path) -> None:
+    """One poll issues ~50 hydration calls. Without the cooldown, a machine
+    whose browser cannot start pays 50 launch attempts for one failure."""
+    _install_playwright(monkeypatch,
+                        FakePlaywright(launch_error=RuntimeError("no display")))
+    monkeypatch.setattr(browser, "browser_profile_dir", lambda: tmp_path)
+    state: dict = {"playwright": None, "context": None}
+
+    with pytest.raises(browser.BrowserUnavailable, match="no display"):
+        browser._open_context(state)
+
+    second = FakePlaywright(launch_error=RuntimeError("no display"))
+    _install_playwright(monkeypatch, second)
+
+    with pytest.raises(browser.BrowserUnavailable, match="no display"):
+        browser._open_context(state)
+
+    assert second.launch_kwargs == {}
+
+
+def test_the_launch_cooldown_expires(monkeypatch, tmp_path) -> None:
+    """A cooldown, not a latch — a browser that comes back must be picked up."""
+    _install_playwright(monkeypatch,
+                        FakePlaywright(launch_error=RuntimeError("no display")))
+    monkeypatch.setattr(browser, "browser_profile_dir", lambda: tmp_path)
+    monkeypatch.setattr(browser, "RELAUNCH_COOLDOWN_S", 0)
+    state: dict = {"playwright": None, "context": None}
+
+    with pytest.raises(browser.BrowserUnavailable):
+        browser._open_context(state)
+
+    recovered = FakeContext("recovered")
+    _install_playwright(monkeypatch, FakePlaywright(context=recovered))
+
+    assert browser._open_context(state) is recovered
+
+
+def test_the_site_is_not_re_warmed_inside_the_ttl(inline) -> None:
+    """hiring.cafe issues 12 calls a poll and paid a page load plus a fixed
+    1500ms wait on every one of them."""
+    page = inline(FakeApiPage(FakeResponse(body="{}")))
+
+    browser.json_api("https://x/", "https://x/api")
+    browser.json_api("https://x/", "https://x/api")
+
+    assert page.visited == ["https://x/"]
+
+
+def test_an_expired_warm_is_done_again(inline, monkeypatch) -> None:
+    monkeypatch.setattr(browser, "WARM_TTL_S", 0)
+    page = inline(FakeApiPage(FakeResponse(body="{}")))
+
+    browser.json_api("https://x/", "https://x/api")
+    browser.json_api("https://x/", "https://x/api")
+
+    assert page.visited == ["https://x/", "https://x/"]
+
+
+def test_a_relaunched_context_is_warmed_again(inline) -> None:
+    """Whatever was warm belonged to the context that just went away."""
+    page = inline(FakeApiPage(FakeResponse(body="{}")))
+    browser.json_api("https://x/", "https://x/api")
+
+    browser._shutdown({"context": None, "playwright": None})
+    browser.json_api("https://x/", "https://x/api")
+
+    assert page.visited == ["https://x/", "https://x/"]
+
+
+def test_a_dead_browser_does_not_park_the_source() -> None:
+    """`poll.py` parks a source only on `StructuralError`. A browser outage is
+    infrastructure, not a shape change, so it must stay eligible for the
+    cooldown probe that brings the source back without anyone noticing. Load-
+    bearing and otherwise untested, which is how a refactor would lose it."""
+    from watcher.fetchers.base import StructuralError
+
+    assert issubclass(browser.BrowserUnavailable, RuntimeError)
+    assert not issubclass(browser.BrowserUnavailable, StructuralError)
