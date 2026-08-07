@@ -44,8 +44,10 @@ from typing import Any, Mapping
 from . import matcher, store
 from .config import Config, load_config
 from .fetchers import hydrate
+from .fetchers import browser
+from .fetchers.base import get_text, session
 from .logsetup import force_utf8, setup
-from .normalize import Posting
+from .normalize import Posting, to_text
 
 log = logging.getLogger("watcher.recall")
 
@@ -199,22 +201,60 @@ def _posting_from_drop(row: sqlite3.Row) -> Posting:
     )
 
 
+def _from_public_page(url: str, timeout: int) -> str:
+    """The posting's own public page as text — a plain GET, then a render.
+
+    Most boards serve the description in the HTML (Greenhouse, Personio), so
+    the cheap request answers first. Ashby and friends render theirs in the
+    browser, and for those the GET comes back as an empty shell that is *not*
+    an error — it is simply short, which is why the fallback triggers on
+    length rather than on an exception.
+    """
+    if not url:
+        return ""
+    try:
+        text = to_text(get_text(session(), url, timeout)).strip()
+    except Exception as exc:  # noqa: BLE001 — a dead link is one row, not a failure
+        log.info("plain fetch of %s failed — %s: %s", url,
+                 type(exc).__name__, exc)
+        text = ""
+    if len(text) >= MIN_BODY_CHARS:
+        return text
+    try:
+        return browser.page_text(url, timeout=timeout).strip()
+    except Exception as exc:  # noqa: BLE001
+        log.info("could not render %s — %s: %s", url, type(exc).__name__, exc)
+        return text
+
+
 def _body_for(row: sqlite3.Row, timeout: int) -> str:
     """Re-fetch one dropped posting's description, or "" if it has gone.
+
+    Two routes, because a drop row deliberately keeps no description. The
+    providers that need a second request per posting stored a `detail_url` and
+    are re-fetched through the same hydrator the poller uses. The ones that
+    inline the body in their list response — Greenhouse, Ashby and Personio,
+    which between them are over a third of this table — stored no `detail_url`
+    at all, so for those the only surviving pointer at the text is the public
+    URL. Without this second route the audit could not hydrate any of them and
+    reported 39 of its first 40 rows as `no_body`: technically honest, and
+    useless.
 
     Never raises. A 404 here is the *expected* case for anything older than a
     few weeks — the posting was filled or withdrawn — and it must cost this
     one row rather than the audit.
     """
     posting = _posting_from_drop(row)
-    if not posting.detail_url:
-        return ""
-    try:
-        return hydrate(posting, timeout) or ""
-    except Exception as exc:  # noqa: BLE001 — one dead link is not a failure
-        log.info("could not re-fetch %s — %s: %s", row["title"],
-                 type(exc).__name__, exc)
-        return ""
+    if posting.detail_url:
+        try:
+            body = (hydrate(posting, timeout) or "").strip()
+        except Exception as exc:  # noqa: BLE001 — one dead link is not a failure
+            log.info("could not re-fetch %s — %s: %s", row["title"],
+                     type(exc).__name__, exc)
+            body = ""
+        if len(body) >= MIN_BODY_CHARS:
+            return body
+    return _from_public_page(row["canonical_url"] or row["url"], timeout)
 
 
 def _row_for(row: sqlite3.Row, body: str) -> matcher._RowLike:

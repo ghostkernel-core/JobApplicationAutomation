@@ -50,6 +50,14 @@ def no_network(monkeypatch):
                         lambda *a, **k: pytest.fail("run_json was not patched"))
     monkeypatch.setattr(matcher.profile, "get_digest", lambda *a, **k: "DIGEST")
     monkeypatch.setattr(matcher.profile, "get_kb", lambda: "KB")
+    # The public-page fallback is a second and a third way out to the network.
+    # Default them to "the page is gone", which is what every test asserting
+    # `no_body` means, rather than to a failure — the fallback runs on every
+    # row whose hydrator came back short, so making it fail loudly would just
+    # mean patching it in every test in the file.
+    monkeypatch.setattr(recall, "get_text", lambda *a, **k: "")
+    monkeypatch.setattr(recall, "session", lambda: None)
+    monkeypatch.setattr(recall.browser, "page_text", lambda *a, **k: "")
 
 
 def config(**recall_overrides) -> Config:
@@ -250,6 +258,105 @@ def test_miss_rate_is_over_scored_not_over_sampled(db, monkeypatch):
     assert report.would_ping == 1
     assert report.miss_rate == pytest.approx(1 / report.scored)
     assert len(ids) == 10
+
+
+# --------------------------------------------------------------------------
+# audit — the two routes back to a description
+# --------------------------------------------------------------------------
+
+def no_detail_urls(db) -> None:
+    """Strip the stored `detail_url`, the way most of the live table is.
+
+    Greenhouse, Ashby and Personio inline the description in their list
+    response, so the poller never records a detail URL for them — and between
+    them they are over a third of the drops table.
+    """
+    with store.connect(db) as conn:
+        conn.execute("UPDATE drops SET detail_url = NULL")
+
+
+def test_a_drop_with_no_detail_url_is_scored_from_its_public_page(
+        db, monkeypatch):
+    """The defect this second route exists for: the first live audit hydrated
+    1 of its 40 rows and called the other 39 `no_body` — honest, and useless.
+
+    `hydrate` is deliberately left on the autouse backstop that fails when
+    called: with no detail_url there is nothing to hand it, and reaching it
+    anyway would be a request no provider can answer.
+    """
+    seed(db, 6)
+    no_detail_urls(db)
+    monkeypatch.setattr(recall, "get_text", lambda *a, **k: f"<div>{BODY}</div>")
+    scores(monkeypatch, lambda i: 10)
+
+    report = recall.audit(config())
+
+    assert report.scored == 6
+    assert report.no_body == 0
+
+
+def test_a_shell_page_falls_through_to_the_browser(db, monkeypatch):
+    """Ashby serves an empty shell over a 200, not an error — so the fallback
+    has to trigger on length rather than on an exception."""
+    seed(db, 6)
+    no_detail_urls(db)
+    monkeypatch.setattr(recall, "get_text",
+                        lambda *a, **k: "<html><body><div id=root></div></body></html>")
+    monkeypatch.setattr(recall.browser, "page_text", lambda *a, **k: BODY)
+    scores(monkeypatch, lambda i: 10)
+
+    report = recall.audit(config())
+
+    assert report.scored == 6
+    assert report.no_body == 0
+
+
+def test_the_public_page_is_tried_after_a_hydrator_returns_a_teaser(
+        db, monkeypatch):
+    """A stored detail_url is not proof the hydrator still answers with a body.
+    The public page is tried *after* it, not instead of it."""
+    seed(db, 6)
+    monkeypatch.setattr(recall, "hydrate", lambda *a, **k: "too short")
+    monkeypatch.setattr(recall, "get_text", lambda *a, **k: BODY)
+    scores(monkeypatch, lambda i: 10)
+
+    assert recall.audit(config()).scored == 6
+
+
+def test_a_row_whose_every_route_raises_is_no_body_not_a_crash(db, monkeypatch):
+    """A 404 is the *expected* case for anything older than a few weeks — the
+    posting was filled or withdrawn. It costs that row, never the audit."""
+    def boom(*a, **k):
+        raise RuntimeError("410 Gone")
+
+    seed(db, 5)
+    monkeypatch.setattr(recall, "hydrate", boom)
+    monkeypatch.setattr(recall, "get_text", boom)
+    monkeypatch.setattr(recall.browser, "page_text", boom)
+    monkeypatch.setattr(matcher, "run_json",
+                        lambda *a, **k: pytest.fail("nothing was scorable"))
+
+    report = recall.audit(config())
+
+    assert report.sampled == 5
+    assert report.no_body == 5
+    assert report.scored == 0
+
+
+def test_a_drop_with_no_url_left_is_no_body_without_a_request(db, monkeypatch):
+    """Nothing to fetch is an unknown, not a fetch of the empty string."""
+    seed(db, 6)
+    with store.connect(db) as conn:
+        conn.execute("UPDATE drops SET detail_url = NULL, url = '', "
+                     "canonical_url = ''")
+    monkeypatch.setattr(recall, "get_text",
+                        lambda *a, **k: pytest.fail("fetched an empty URL"))
+    monkeypatch.setattr(recall.browser, "page_text",
+                        lambda *a, **k: pytest.fail("rendered an empty URL"))
+    monkeypatch.setattr(matcher, "run_json",
+                        lambda *a, **k: pytest.fail("nothing was scorable"))
+
+    assert recall.audit(config()).no_body == 6
 
 
 # --------------------------------------------------------------------------
