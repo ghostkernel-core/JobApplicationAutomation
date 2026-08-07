@@ -904,6 +904,14 @@ A folder hit blocks a rebuild only when both `<file_prefix> - CV.pdf` and
 `<file_prefix> - Cover Letter.pdf` (`<file_prefix>` from `identity.toml`) are present; otherwise the build proceeds and the
 message says it is rebuilding over an incomplete attempt.
 
+The tracker's `Application Folder` column holds a path relative to the workspace root, and it is
+resolved against the *current* root when read. That matters because the check asks the filesystem:
+a row still naming the drive the workspace used to live on looks like a folder with no PDFs, so a
+finished application stops blocking a rebuild. The same rule covers `builds.folder`,
+`builds.log_path` and `questions.folder` in `state/watch.db` — see `scripts/workspace_paths.py`,
+and `scripts/normalize_stored_paths.py` to repair a store written before it (stop the watcher
+first; the script refuses the database half while it is up).
+
 **A decline is not final.** It lands in **Targeted**, next to the approval it answers, and ends
 with an override:
 

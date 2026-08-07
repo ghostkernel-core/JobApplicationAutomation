@@ -20,16 +20,16 @@ pipeline (CLAUDE.md step 10).
 from __future__ import annotations
 
 import datetime as dt
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import REPO_ROOT, load_identity
+# FOLDER_RE / YEAR_RE are "2026-07-24 - AI Engineer" and "2026". They live in
+# `scripts/workspace_paths.py` because the cleanup script matches the same two
+# shapes, and a deliverable folder that two modules disagree about is one
+# neither of them can clean up.
+from .config import (FOLDER_RE as FOLDER_PATTERN, REPO_ROOT,
+                     YEAR_RE as YEAR_DIR, load_identity, to_absolute)
 from .normalize import company_key, title_similarity
-
-# "2026-07-24 - AI Engineer"
-FOLDER_PATTERN = re.compile(r"^(\d{4}-\d{2}-\d{2})\s*-\s*(.+)$")
-YEAR_DIR = re.compile(r"^(19|20)\d{2}$")
 
 
 @dataclass(frozen=True)
@@ -121,9 +121,18 @@ def _scan_tracker(company: str, title: str, cutoff: dt.date, ratio: float,
                 similarity = title_similarity(title, position)
                 if similarity >= ratio:
                     folder_idx = col.get("Application Folder")
-                    folder = ""
+                    raw = ""
                     if folder_idx is not None and folder_idx < len(row):
-                        folder = str(row[folder_idx] or "")
+                        raw = str(row[folder_idx] or "")
+                    # The column stores a workspace-relative path; everything
+                    # downstream of here wants a real one. `missing_documents`
+                    # asks the filesystem, `builder.locate_output` calls
+                    # `.is_dir()`, and `Outcome.folder` is eventually handed to
+                    # `cleanup_application.py --folder`, which resolves against
+                    # the process cwd and would refuse a relative value. So the
+                    # conversion belongs here, at the one point the value
+                    # enters the program, rather than at each of its uses.
+                    folder = str(to_absolute(raw, root)) if raw else ""
                     hits.append(ExistingApplication(
                         company=str(raw_company), title=position,
                         applied_on=applied if isinstance(applied, dt.date) else None,

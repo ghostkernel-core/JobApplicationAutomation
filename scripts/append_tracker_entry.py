@@ -32,10 +32,10 @@ from pathlib import Path
 # when the parent has none — see scripts/no_console.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import no_console  # noqa: E402
+from workspace_paths import ROOT, to_relative  # noqa: E402
 
 from openpyxl import load_workbook
 
-ROOT = Path(__file__).resolve().parent.parent
 MAKER = ROOT / "scripts" / "make_application_tracker.py"
 
 # header -> CLI value key. Only headers actually present in the sheet are written,
@@ -108,7 +108,10 @@ def main() -> int:
         "next_action": args.next_action,
         "follow_up": parse_date(args.follow_up),
         "salary": args.salary,
-        "folder": args.folder,
+        # Callers pass the absolute path `scaffold.py` printed; the column
+        # keeps the workspace-relative form, so the row survives the workspace
+        # being moved, cloned, or read on another OS.
+        "folder": to_relative(args.folder),
         "notes": args.notes,
     }
 

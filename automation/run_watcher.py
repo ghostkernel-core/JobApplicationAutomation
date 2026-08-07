@@ -46,7 +46,7 @@ from watcher import kb, matcher, normalize, poll, replies, store
 from watcher.builder import Builder
 from watcher.config import (AUTOMATION_DIR, RESTART_MARKER_PATH,
                             ConfigWriteError, clock, load_config, load_env,
-                            require_env, set_number)
+                            require_env, set_number, to_absolute)
 from watcher.logsetup import STARTUP_LOG_MAX_BYTES, setup, trim_startup_log
 from watcher.notifier import Notifier, format_kb_proposal, format_status
 
@@ -200,8 +200,11 @@ async def question_expiry_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     for question in stale:
         cleaned = ""
         if question["folder"]:
+            # Stored relative to the workspace root; `clean_up` hands it to
+            # `cleanup_application.py --folder`, which resolves against the
+            # process cwd and would refuse a relative value.
             cleaned = await asyncio.to_thread(
-                builder_mod.clean_up, question["folder"],
+                builder_mod.clean_up, str(to_absolute(question["folder"])),
                 f"unanswered for {QUESTION_TTL_DAYS} days")
         with store.connect() as conn:
             store.close_question(conn, question["id"], "")
@@ -471,7 +474,8 @@ async def _answer_question(message, question, text: str,
         folder = question["folder"] or ""
         if folder:
             cleaned = await asyncio.to_thread(
-                builder_mod.clean_up, folder, "the stop-and-ask was declined")
+                builder_mod.clean_up, str(to_absolute(folder)),
+                "the stop-and-ask was declined")
         with store.connect() as conn:
             store.close_question(conn, question["id"], text)
         log.info("question %s declined: %s", question["id"], label)
@@ -1319,7 +1323,8 @@ async def on_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         cleaned = ""
         if question["folder"]:
             cleaned = await asyncio.to_thread(
-                builder_mod.clean_up, question["folder"], "cancelled by the user")
+                builder_mod.clean_up, str(to_absolute(question["folder"])),
+                "cancelled by the user")
         with store.connect() as conn:
             store.close_question(conn, question["id"], "/cancel")
         await message.reply_html(

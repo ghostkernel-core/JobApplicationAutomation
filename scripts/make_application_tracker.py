@@ -27,7 +27,8 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
-ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workspace_paths import ROOT, to_relative  # noqa: E402
 
 MAX_ROWS = 500  # rows pre-armed with validation/formulas
 
@@ -128,7 +129,7 @@ def discover_applications(year_dir: Path) -> list[dict]:
                     "date": dt.date.fromisoformat(m.group(1)),
                     "company": company_dir.name,
                     "role": m.group(2),
-                    "folder": str(app_dir),
+                    "folder": to_relative(app_dir),
                 }
             )
     rows.sort(key=lambda r: (r["date"], r["company"], r["role"]))
