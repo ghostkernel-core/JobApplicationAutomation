@@ -32,11 +32,13 @@ import pytest
 
 from watcher import poll as poll_module
 from watcher import store
+from watcher import triage as triage_module
 from watcher.config import Config, SourceDefaults, Sources
 from watcher.fetchers import SourceNotImplemented
 from watcher.fetchers.base import StructuralError
 from watcher.normalize import Posting
 from watcher.poll import TEASER_CHARS, PollReport, SourceCounts, poll_once
+from watcher.triage import TriageReport
 
 BODY = "Python, SQL and PyTorch. Remote-friendly, permanent. " * 30
 TEASER = "We are hiring a data scientist in Cologne. "        # ~43 chars
@@ -416,6 +418,134 @@ def test_the_body_is_rechecked_because_the_blockers_live_in_it(db, boards,
     assert report.stored == 0
     assert report.filtered == 1
     assert report.filtered_out[0][1] == "explicit hard blocker"
+    assert report.filtered_out[0][2] == "blocker"
+
+
+# --------------------------------------------------------------------------
+# triage: phase 2, outside any open connection
+# --------------------------------------------------------------------------
+
+def _fake_triage(decisions: dict[str, str], *, deferred: set[str] = frozenset(),
+                 report: TriageReport | None = None):
+    """A stand-in for triage.triage_postings that never opens a connection or
+    calls a model — poll_once's own wiring is what these tests exercise, not
+    triage.py's internals (covered by test_triage.py)."""
+    def fake(postings, config, persist=True):
+        results = {}
+        for p in postings:
+            if p.fingerprint in deferred:
+                continue
+            results[p.fingerprint] = {"decision": decisions.get(p.fingerprint, "keep"),
+                                      "why": "test"}
+        return results, report or TriageReport(judged=len(results))
+    return fake
+
+
+def test_triage_disabled_by_default_is_never_called(db, boards, monkeypatch) -> None:
+    boards["ats:Alpha"] = [posting("ats:Alpha", "1")]
+    monkeypatch.setattr(triage_module, "triage_postings", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("triage must not run when disabled")))
+
+    report = poll_once(config=Config(), sources=sources("Alpha"))
+    assert report.stored == 1
+    assert report.triaged == 0
+
+
+def test_a_triage_drop_is_filtered_not_stored(db, boards, monkeypatch) -> None:
+    p = posting("ats:Alpha", "1")
+    boards["ats:Alpha"] = [p]
+    monkeypatch.setattr(triage_module, "triage_postings",
+                        _fake_triage({p.fingerprint: "drop"}))
+
+    report = poll_once(config=Config(triage={"enabled": True}),
+                       sources=sources("Alpha"))
+
+    assert report.stored == 0
+    assert report.filtered == 1
+    assert report.filtered_out[0][2] == "triage"
+    assert report.triaged == 1
+    assert report.triage_dropped == 0  # triage_postings' own report, unfaked here
+
+
+def test_a_triage_keep_survives_to_be_hydrated_and_stored(db, boards,
+                                                           monkeypatch) -> None:
+    p = posting("ats:Alpha", "1")
+    boards["ats:Alpha"] = [p]
+    monkeypatch.setattr(triage_module, "triage_postings",
+                        _fake_triage({p.fingerprint: "keep"}))
+
+    report = poll_once(config=Config(triage={"enabled": True}),
+                       sources=sources("Alpha"))
+
+    assert report.stored == 1
+    assert report.filtered == 0
+
+
+def test_a_deferred_posting_is_neither_filtered_nor_stored(db, boards,
+                                                            monkeypatch) -> None:
+    """Past triage_max_per_cycle, triage_postings returns no entry at all for
+    a posting — left alone entirely so the next cycle re-offers it, rather
+    than counted as filtered or forced through unjudged."""
+    p = posting("ats:Alpha", "1")
+    boards["ats:Alpha"] = [p]
+    monkeypatch.setattr(triage_module, "triage_postings",
+                        _fake_triage({}, deferred={p.fingerprint}))
+
+    report = poll_once(config=Config(triage={"enabled": True}),
+                       sources=sources("Alpha"))
+
+    assert report.stored == 0
+    assert report.filtered == 0
+    assert report.new_postings == []
+    with store.connect(db) as conn:
+        assert conn.execute("SELECT COUNT(*) c FROM postings").fetchone()["c"] == 0
+
+
+def test_no_triage_flag_skips_triage_even_when_enabled(db, boards,
+                                                        monkeypatch) -> None:
+    boards["ats:Alpha"] = [posting("ats:Alpha", "1")]
+    monkeypatch.setattr(triage_module, "triage_postings", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("must not be called with no_triage=True")))
+
+    report = poll_once(config=Config(triage={"enabled": True}),
+                       sources=sources("Alpha"), no_triage=True)
+    assert report.stored == 1
+
+
+def test_triage_only_stops_before_hydrate_and_store(db, boards, bodies,
+                                                     monkeypatch) -> None:
+    p = posting("ats:Alpha", "1", description=TEASER,
+               detail_url="https://example.test/detail/1")
+    boards["ats:Alpha"] = [p]
+    bodies["1"] = RuntimeError("must not be called")
+    monkeypatch.setattr(triage_module, "triage_postings",
+                        _fake_triage({p.fingerprint: "keep"}))
+
+    report = poll_once(config=Config(triage={"enabled": True}),
+                       sources=sources("Alpha"), triage_only=True)
+
+    assert report.new_postings == []
+    assert report.stored == 0
+
+
+def test_a_dry_run_triage_drop_still_persists_nothing(db, boards,
+                                                       monkeypatch) -> None:
+    p = posting("ats:Alpha", "1")
+    boards["ats:Alpha"] = [p]
+    seen_persist = {}
+
+    def fake(postings, config, persist=True):
+        seen_persist["value"] = persist
+        return {p.fingerprint: {"decision": "drop", "why": "test"}}, TriageReport(judged=1)
+
+    monkeypatch.setattr(triage_module, "triage_postings", fake)
+
+    report = poll_once(dry_run=True, config=Config(triage={"enabled": True}),
+                       sources=sources("Alpha"))
+
+    assert seen_persist["value"] is False
+    assert report.stored == 0
+    assert report.filtered == 1
 
 
 # --------------------------------------------------------------------------
