@@ -758,9 +758,14 @@ class _BuildConfig:
     kb_enabled = False
     kb_hour = 10
     kb_weekday = 6
+    recall_enabled = False
+    recall_hour = 20
+    recall_weekday = 6
+    triage_drop_retention_days = 90
     digest_at = (digest_hour, watcher_config.DIGEST_MINUTE)
     heartbeat_at = (heartbeat_hour, watcher_config.HEARTBEAT_MINUTE)
     kb_at = (kb_hour, watcher_config.KB_MINUTE)
+    recall_at = (recall_hour, watcher_config.RECALL_MINUTE)
 
 
 class _BuildNotifier:

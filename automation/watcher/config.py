@@ -118,6 +118,7 @@ TOPIC_KINDS: tuple[str, ...] = (
 DIGEST_MINUTE = 5
 HEARTBEAT_MINUTE = 15
 KB_MINUTE = 25
+RECALL_MINUTE = 35
 
 
 def browser_profile_dir() -> Path:
@@ -216,6 +217,7 @@ class Config:
     build: dict[str, Any] = field(default_factory=dict)
     kb: dict[str, Any] = field(default_factory=dict)
     triage: dict[str, Any] = field(default_factory=dict)
+    recall: dict[str, Any] = field(default_factory=dict)
 
     def _num(self, section_name: str, section: dict[str, Any], key: str,
              default: _Number, cast: Callable[[str], _Number] = int) -> _Number:
@@ -559,6 +561,56 @@ class Config:
     def triage_drop_retention_days(self) -> int:
         return self._num("triage", self.triage, "drop_retention_days", 90)
 
+    # --- recall audit --------------------------------------------------------
+    @property
+    def recall_enabled(self) -> bool:
+        """Default False, for the same reason `triage_enabled` is.
+
+        The audit re-scores real postings through the live matcher, which
+        means model calls. A bare `Config()` in a test must not be able to
+        start one, so the on switch lives in config.toml.
+        """
+        return bool(self.recall.get("enabled", False))
+
+    @property
+    def recall_weekday(self) -> int:
+        """0 = Monday, per `datetime.date.weekday()`. Sunday by default, an
+        hour after the kb proposal — both are weekly reviews and reading them
+        together is the point."""
+        return self._num("recall", self.recall, "weekday", 6)
+
+    @property
+    def recall_hour(self) -> int:
+        return self._num("recall", self.recall, "hour", 20)
+
+    @property
+    def recall_at(self) -> tuple[int, int]:
+        """(hour, minute) the weekly recall audit runs at, local time."""
+        return self.recall_hour, RECALL_MINUTE
+
+    @property
+    def recall_sample_size(self) -> int:
+        """How many drops one audit re-scores.
+
+        The whole cost of the audit is here: 40 postings hydrated and scored
+        through the real matcher, once a week. Raising it buys a tighter
+        estimate of the miss rate and nothing else.
+        """
+        return self._num("recall", self.recall, "sample_size", 40)
+
+    @property
+    def recall_lookback_days(self) -> int:
+        """Only drops last seen inside this window are counted when sizing the
+        sample — a stage that stopped rejecting anything a month ago should not
+        keep claiming a share of this week's budget."""
+        return self._num("recall", self.recall, "lookback_days", 7)
+
+    @property
+    def recall_min_drops(self) -> int:
+        """Below this many drops in the window there is nothing to measure, and
+        a miss rate computed from four postings would read as a fact."""
+        return self._num("recall", self.recall, "min_drops", 20)
+
 
 @dataclass(frozen=True)
 class SourceDefaults:
@@ -772,6 +824,7 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         build=raw.get("build", {}),
         kb=raw.get("kb", {}),
         triage=raw.get("triage", {}),
+        recall=raw.get("recall", {}),
     )
 
 

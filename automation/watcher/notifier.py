@@ -254,6 +254,66 @@ def format_kb_proposal(proposal: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+#: Misses named individually in the recall message. Beyond this the count is
+#: still right; only the list is trimmed, because the message goes to a phone.
+RECALL_TOP_MISSES = 5
+
+
+def format_recall_audit(report: Any) -> str:
+    """The weekly miss rate, as the one number and then where it came from.
+
+    The per-stage table is not detail — it is the finding. "2 of 40 drops
+    would have pinged" says something is miscalibrated; only the split says
+    *what*, and the answers are opposite: misses concentrated in `triage`
+    mean the prompt is too eager, misses in `location` mean the geography
+    config is wrong and no prompt change will help.
+
+    A `<pre>` block for the same reason `_source_funnel_lines` uses one —
+    Telegram's default font is proportional and the columns only mean
+    anything lined up.
+
+    Ends by saying nothing was written. The message reads like a list of
+    postings, and a list of postings in this chat has always been something
+    to reply to; this one is not.
+    """
+    scored = int(getattr(report, "scored", 0) or 0)
+    pinged = int(getattr(report, "would_ping", 0) or 0)
+    rate = round((pinged / scored) * 100) if scored else 0
+
+    lines = [
+        f"🔎 <b>Recall audit</b> — {report.sampled} of {report.population:,} "
+        f"drops re-scored",
+        f"   would have pinged: <b>{pinged}</b> ({rate}%)  ·  "
+        f"would have made the digest: {report.would_digest}",
+    ]
+    if report.no_body:
+        lines.append(f"   no description available: {report.no_body}")
+
+    rows = [(stage, counts) for stage, counts in report.by_stage.items()
+            if counts.get("sampled")]
+    if rows:
+        rows.sort(key=lambda item: (-item[1]["sampled"], item[0]))
+        width = min(max((len(stage) for stage, _ in rows), default=6), 12)
+        table = [f"{stage[:width].ljust(width)}  {counts['sampled']:>4} → "
+                 f"{counts['pinged']}" for stage, counts in rows]
+        lines += ["", "<b>By stage (sampled → would have pinged):</b>",
+                  "<pre>" + _escape("\n".join(table)) + "</pre>"]
+
+    misses = list(report.misses or [])
+    if misses:
+        lines += ["", "<b>Top misses:</b>"]
+        for miss in misses[:RECALL_TOP_MISSES]:
+            lines.append(
+                f"   <b>{miss['score']}</b>  {_escape(str(miss['company']))} — "
+                f"{_escape(str(miss['title']))}   "
+                f"<i>[{_escape(str(miss['stage']))}]</i>")
+        if len(misses) > RECALL_TOP_MISSES:
+            lines.append(f"   <i>+{len(misses) - RECALL_TOP_MISSES} more</i>")
+
+    lines += ["", "<i>Nothing was written.</i>"]
+    return "\n".join(lines)
+
+
 def format_targeted(company: str, title: str, url: str, score: int | None,
                     note: str, when: dt.datetime | None = None) -> str:
     """An approved posting, written into the Targeted Build topic as a record.

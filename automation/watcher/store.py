@@ -485,10 +485,18 @@ def sample_drops(conn: sqlite3.Connection, stage: str, limit: int) -> list[sqlit
     rules just rejected, not on a verdict made under a profile or filter
     config that has since changed. `mark_drop_audited` is what keeps a
     sampled row from being drawn again next week.
+
+    The random tiebreak is load-bearing, not cosmetic. `touch_drops` stamps
+    one timestamp across a whole poll cycle, and every drop still in a feed is
+    touched every cycle — so `last_seen_at` holds two distinct values across
+    three thousand rows, and sorting on it alone falls through to insertion
+    order. Insertion order is source order, so the first audit drew 39 of its
+    40 rows from a single company's Greenhouse board: stratified perfectly
+    across the stages, and drawn from one provider inside each of them.
     """
     return list(conn.execute(
         "SELECT * FROM drops WHERE stage = ? AND audited_at IS NULL "
-        "ORDER BY last_seen_at DESC LIMIT ?", (stage, limit)))
+        "ORDER BY last_seen_at DESC, RANDOM() LIMIT ?", (stage, limit)))
 
 
 def mark_drop_audited(conn: sqlite3.Connection, drop_id: str,

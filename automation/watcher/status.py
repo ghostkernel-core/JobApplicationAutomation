@@ -294,18 +294,37 @@ def print_behaviour(config: Config) -> None:
           f"within {config.duplicate_lookback_days} days",
           env_note("build", "duplicate_title_ratio"))
 
+    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+            "Saturday", "Sunday"]
+
     rule("WEEKLY KB PASS")
     if not config.kb_enabled:
         field("enabled", "no")
-        return
-    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
-            "Saturday", "Sunday"]
-    weekday = days[config.kb_weekday % 7]
-    field("runs", f"{weekday} {clock(config.kb_at)} local, model {config.kb_model}",
-          env_note("kb", "weekday"))
-    field("needs", f"≥ {config.kb_min_decisions} new decisions, "
-          f"looks back over {config.kb_lookback}", env_note("kb", "min_decisions"))
-    field("applies changes", "only on an explicit yes in Telegram")
+    else:
+        field("runs", f"{days[config.kb_weekday % 7]} {clock(config.kb_at)} "
+              f"local, model {config.kb_model}", env_note("kb", "weekday"))
+        field("needs", f"≥ {config.kb_min_decisions} new decisions, "
+              f"looks back over {config.kb_lookback}",
+              env_note("kb", "min_decisions"))
+        field("applies changes", "only on an explicit yes in Telegram")
+
+    rule("WEEKLY RECALL AUDIT")
+    if not config.recall_enabled:
+        field("enabled", "no")
+    else:
+        field("runs", f"{days[config.recall_weekday % 7]} "
+              f"{clock(config.recall_at)} local",
+              env_note("recall", "weekday"))
+        field("re-scores", f"{config.recall_sample_size} drop(s) per audit, "
+              f"stratified across the stages that rejected them",
+              env_note("recall", "sample_size"))
+        field("needs", f"≥ {config.recall_min_drops} drop(s) in the last "
+              f"{config.recall_lookback_days} days",
+              env_note("recall", "min_drops"))
+        field("writes", "nothing — no verdicts, no postings, no config")
+    field("drop rows kept", f"{config.triage_drop_retention_days} days, "
+          f"pruned daily at 04:29",
+          env_note("triage", "drop_retention_days"))
 
 
 # --------------------------------------------------------------------------

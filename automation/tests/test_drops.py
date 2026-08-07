@@ -73,6 +73,46 @@ def test_sample_drops_orders_newest_first(db, monkeypatch):
     assert [r["id"] for r in rows] == [fp_new, fp_old]
 
 
+def test_sample_drops_does_not_fall_through_to_insertion_order(db):
+    """The tie case is the *normal* case, and it used to pick one provider.
+
+    `touch_drops` stamps one timestamp across a whole poll cycle and every
+    drop still in a feed is touched every cycle, so in the live table three
+    thousand rows carry two distinct `last_seen_at` values. Sorting on that
+    alone leaves SQLite free to return rowid order — insertion order, which is
+    source order — and the first real audit drew 39 of its 40 rows from one
+    company's Greenhouse board.
+
+    Ten draws of one row from fifty identically-stamped rows landing on the
+    same row every time is what that bug looks like; the odds of the fixed
+    version doing it are 50^-9.
+    """
+    with store.connect(db) as conn:
+        for i in range(50):
+            drop(conn, str(i), stage="title")
+        conn.execute("UPDATE drops SET last_seen_at = '2026-08-08T00:00:46'")
+
+    with store.connect(db) as conn:
+        drawn = {store.sample_drops(conn, "title", limit=1)[0]["id"]
+                 for _ in range(10)}
+    assert len(drawn) > 1, "the sample is pinned to one row of fifty equal ones"
+
+
+def test_sample_drops_still_prefers_a_genuinely_newer_row(db):
+    """The random tiebreak must not become a random sample: where the stamps
+    do differ, the newest row is still the one worth spending the budget on."""
+    with store.connect(db) as conn:
+        for i in range(20):
+            fp = drop(conn, str(i), stage="title")
+            conn.execute("UPDATE drops SET last_seen_at = ? WHERE id = ?",
+                         ("2020-01-01T00:00:00", fp))
+        fp_new = drop(conn, "new", stage="title")
+
+    with store.connect(db) as conn:
+        for _ in range(5):
+            assert store.sample_drops(conn, "title", limit=1)[0]["id"] == fp_new
+
+
 def test_a_never_audited_drop_has_no_score(db):
     with store.connect(db) as conn:
         fp = drop(conn, "1", stage="title")
