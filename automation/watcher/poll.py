@@ -95,9 +95,19 @@ class PollReport:
     already_known: int = 0
     filtered: int = 0
     stored: int = 0
+    #: Postings triage actually judged this cycle (excludes suppressed
+    #: repeats and postings deferred past triage_max_per_cycle). Zero
+    #: whenever triage is disabled, skipped with --no-triage, or nothing
+    #: survived the deterministic phase.
+    triaged: int = 0
+    triage_dropped: int = 0
+    triage_degraded: int = 0
+    triage_deferred: int = 0
     by_source: dict[str, SourceCounts] = field(default_factory=dict)
     new_postings: list[Posting] = field(default_factory=list)
-    filtered_out: list[tuple[Posting, str]] = field(default_factory=list)
+    #: (posting, reason, stage) — stage is one of prefilter.STAGES, including
+    #: "triage" for a drop made by the LLM gate rather than a deterministic rule.
+    filtered_out: list[tuple[Posting, str, str]] = field(default_factory=list)
     errors: dict[str, str] = field(default_factory=dict)
     newly_disabled: list[str] = field(default_factory=list)
     # (source, error) — parked sources get the error in the alert, because the
@@ -122,6 +132,8 @@ class PollReport:
             f"filtered {self.filtered}",
             f"new {self.stored}",
         ]
+        if self.triaged:
+            parts.append(f"triaged {self.triaged} (dropped {self.triage_dropped})")
         if self.errors:
             parts.append(f"errors {len(self.errors)}")
         if self.pending:
@@ -215,14 +227,48 @@ def _collect(sources: Sources, config: Config, conn, only: str | None,
     return postings
 
 
+def _record_filtered(report: PollReport, posting: Posting, reason: str,
+                     stage: str, conn, dry_run: bool) -> None:
+    """Count a rejected posting and, unless dry_run, persist the drop.
+
+    Every rejecting path funnels through here — deterministic or triage —
+    so `filtered_out` and the `drops` table never fall out of step. `conn`
+    is `None` for a triage drop: `triage_postings` already wrote its row
+    itself, in its own short connection, before poll_once ever sees the
+    result, so this call only updates the in-memory report.
+    """
+    report.filtered += 1
+    report.source(posting.source).filtered += 1
+    report.filtered_out.append((posting, reason, stage))
+    if conn is not None and not dry_run:
+        store.record_drop(conn, posting, stage, reason)
+
+
 def poll_once(dry_run: bool = False, only: str | None = None,
               config: Config | None = None, sources: Sources | None = None,
+              no_triage: bool = False, triage_only: bool = False,
               ) -> PollReport:
+    """Fetch, filter, triage, and store — in three phases, deliberately.
+
+    Phase 1 (deterministic rules) and phase 3 (hydrate/re-check/store) each
+    hold their own short-lived connection. Phase 2 (triage) holds none at
+    all: it is a batch of model calls that can run for minutes, and a write
+    transaction left open across that is what produced "database is locked"
+    against the matcher running the same minute. `triage_postings` opens and
+    closes its own connections internally, once per batch, so the drop rows
+    it writes are never blocked on — or blocking — anything else in poll_once.
+
+    Re-checking after hydration never triages again: hydration changes the
+    description, not title/company/location, the only fields triage reads.
+    """
     config = config or load_config()
     sources = sources or load_sources()
     report = PollReport()
     store.init_db()
 
+    # Phase 1 — deterministic rules, inside one short connection. Re-run
+    # every cycle rather than suppressed, so a config edit changes what a
+    # posting scores against immediately.
     with store.connect() as conn:
         raw = _collect(sources, config, conn, only, report,
                        include_disabled=dry_run)
@@ -249,15 +295,49 @@ def poll_once(dry_run: bool = False, only: str | None = None,
             batch_loose.add(posting.loose_key)
             candidates.append(posting)
 
+        survivors: list[Posting] = []
         for posting in candidates:
             verdict = check(posting, sources.defaults, config.max_age_days,
                             sources.filters)
             if not verdict.accepted:
-                report.filtered += 1
-                report.source(posting.source).filtered += 1
-                report.filtered_out.append((posting, verdict.reason))
+                _record_filtered(report, posting, verdict.reason, verdict.stage,
+                                 conn, dry_run)
                 continue
+            survivors.append(posting)
 
+    # Phase 2 — triage, outside any open connection. Judges title/company/
+    # location only, before a posting is ever hydrated.
+    if survivors and config.triage_enabled and not no_triage:
+        from . import triage  # deferred: triage.py imports PollReport from here
+
+        results, triage_report = triage.triage_postings(
+            survivors, config, persist=not dry_run)
+        report.triaged = triage_report.judged
+        report.triage_dropped = triage_report.dropped
+        report.triage_degraded = triage_report.degraded
+        report.triage_deferred = triage_report.deferred
+
+        judged, survivors = survivors, []
+        for posting in judged:
+            verdict = results.get(posting.fingerprint)
+            if verdict is None:
+                # Deferred past triage_max_per_cycle — left untouched, not
+                # filtered and not stored, so the next cycle re-offers it.
+                continue
+            if verdict["decision"] == "drop":
+                _record_filtered(report, posting, verdict["why"], "triage",
+                                 None, dry_run)
+                continue
+            survivors.append(posting)
+
+    if triage_only:
+        return report
+
+    # Phase 3 — hydrate, re-check, store. A fresh connection: phase 2 may
+    # have spent minutes in model calls, and nothing here should hold a
+    # lock across that.
+    with store.connect() as conn:
+        for posting in survivors:
             # Only now is it worth paying for a description.
             if posting.detail_url and len(posting.description) < TEASER_CHARS:
                 try:
@@ -269,9 +349,8 @@ def poll_once(dry_run: bool = False, only: str | None = None,
             recheck = check(posting, sources.defaults, config.max_age_days,
                             sources.filters)
             if not recheck.accepted:
-                report.filtered += 1
-                report.source(posting.source).filtered += 1
-                report.filtered_out.append((posting, recheck.reason))
+                _record_filtered(report, posting, recheck.reason, recheck.stage,
+                                 conn, dry_run)
                 continue
 
             report.new_postings.append(posting)
@@ -294,19 +373,28 @@ def main(argv: list[str] | None = None) -> int:
                         help="fetch and filter, but write nothing to the database")
     parser.add_argument("--source", help="limit to one source, e.g. ats:Bayer")
     parser.add_argument("--show-filtered", action="store_true",
-                        help="also list postings the prefilter rejected, with reasons")
+                        help="also list postings the prefilter/triage rejected, "
+                             "with their stage and reason")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--no-triage", action="store_true",
+                       help="skip the triage gate; every deterministic survivor "
+                            "goes straight to hydrate/store")
+    group.add_argument("--triage-only", action="store_true",
+                       help="run phases 1-2 and stop — nothing is hydrated or "
+                            "stored, only filtered/triaged and reported")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args(argv)
 
     setup(logging.DEBUG if args.verbose else logging.INFO)
-    report = poll_once(dry_run=args.dry_run, only=args.source)
+    report = poll_once(dry_run=args.dry_run, only=args.source,
+                       no_triage=args.no_triage, triage_only=args.triage_only)
 
     for posting in report.new_postings:
         print(f"  NEW  {posting.summary()}")
         print(f"       {posting.canonical_url}")
     if args.show_filtered:
-        for posting, reason in report.filtered_out:
-            print(f"  skip {posting.summary()}  [{reason}]")
+        for posting, reason, stage in report.filtered_out:
+            print(f"  skip {posting.summary()}  [{stage}: {reason}]")
     for key, message in report.errors.items():
         print(f"  FAIL {key}: {message}")
     for key, message in report.newly_parked:
