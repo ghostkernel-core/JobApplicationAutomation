@@ -519,7 +519,13 @@ class Config:
 @dataclass(frozen=True)
 class SourceDefaults:
     countries: tuple[str, ...]
-    title_allow: tuple[str, ...]
+    #: There is deliberately no `title_allow`. A hand-written substring list
+    #: decided what was ever *seen*, ahead of the profile that decides what is
+    #: worth applying to, and it was never measured: `ats:Roche` fetched 200
+    #: postings a cycle and stored none, ten of fifteen boards had stored
+    #: nothing ever, and a title like "Specialist Advanced Analytics" had no way
+    #: through. `title_deny` stays — a substring is a fine way to say never, and
+    #: a poor way to say only.
     title_deny: tuple[str, ...]
 
 
@@ -856,7 +862,9 @@ def _parse_sources(raw: dict[str, Any]) -> Sources:
     return Sources(
         defaults=SourceDefaults(
             countries=tuple(defaults.get("countries", [])),
-            title_allow=tuple(s.lower() for s in defaults.get("title_allow", [])),
+            # A `title_allow` left in an existing sources.toml is ignored
+            # rather than rejected: the file is hand-edited and the key going
+            # quiet must not stop the watcher. `watcherctl status` says so.
             title_deny=tuple(s.lower() for s in defaults.get("title_deny", [])),
         ),
         ats=tuple(raw.get("ats", [])),

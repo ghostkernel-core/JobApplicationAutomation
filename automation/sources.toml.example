@@ -31,15 +31,20 @@
 # EXAMPLE — replace with your own countries.
 countries = []
 
-# A posting must match one of these to survive the free prefilter.
-# EXAMPLE — replace with your own role keywords.
-title_allow = [
-    # "machine learning", "ml engineer",
-    # "data scientist", "data science",
-    # "software engineer",
-]
+# There is no title allow-list any more. A hand-written substring list decided
+# what was ever *seen*, ahead of the profile that decides what is worth applying
+# to, and it was the narrowest gate in the pipeline: ats:Roche fetched 200
+# postings a cycle and stored none of them, ten of the fifteen company boards had
+# stored nothing ever, and a title like "Specialist Advanced Analytics" had no
+# way through no matter how well the job fit. Titles are now judged against the
+# profile by [triage] in config.toml, which reads the same digest the matcher
+# scores with and fails open.
+#
+# A `title_allow` key left here is ignored, not an error — delete it when you
+# next edit this file.
 
-# ...and match none of these.
+# A posting must match none of these. A substring is a good way to say never and
+# a poor way to say only, which is why this half survived.
 # EXAMPLE — replace with your own exclusions.
 title_deny = [
     # "intern", "praktikum", "werkstudent", "working student", "trainee",
