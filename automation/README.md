@@ -584,12 +584,27 @@ Reply to the message that asked, or just send your answer here if only one is op
 🛠 Builds in flight
 • Bayer — Data Scientist · running
 
-📨 Pinged, never answered (4)
+📨 Pinged, never answered (4, last 7 days)
 • Merck — ML Engineer
 …
+
+12 older ping(s) aged out after 7 days and are no longer listed. Nothing was deleted.
 ```
 
 The numbers under the first block are what `/cancel <n>` takes.
+
+The third block only reaches back a week. A posting pinged a month ago and never replied to is
+not a decision still outstanding — it is one already made by silence, and listing it forever
+turned the one section that should be short into the longest: it had reached 149 entries, which
+is the same as not having the list. The count of what aged out is still reported, because the
+difference between "you are on top of it" and "you stopped reading a month ago" is worth one
+line.
+
+Nothing is written or deleted when a ping ages out. It is a display filter, not a sweep — an
+"expired" decision row would record a choice you never made, and `rehydrate --rescore-before`
+deliberately leaves anything already decided alone, so writing one would put every aged-out
+posting permanently out of reach of a rescore after a profile change. That is exactly when you
+would want it back.
 
 ### /build
 
