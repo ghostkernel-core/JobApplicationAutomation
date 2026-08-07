@@ -175,3 +175,30 @@ min_decisions = 5
 # How many decisions.jsonl entries the proposal may look at.
 lookback = 60
 timeout_seconds = 180
+
+[recall]
+# The weekly miss-rate audit. Re-scores a stratified sample of what discovery
+# threw away — through the same matcher a stored posting goes through — and
+# reports how many would have been worth a ping. It decides nothing: no
+# verdicts, no postings, no config changes. Only `drops.audited_at` is written,
+# so the same row does not consume next week's sample as well.
+#
+# Off until the drop table has a week of real data in it; a miss rate computed
+# from a nearly empty table reads as a fact and is not one.
+enabled = false
+# 0 = Monday ... 6 = Sunday, hour in 24h local time. An hour after the kb
+# proposal on the same evening: both are weekly reviews of how the filters are
+# aimed, and they are meant to be read together.
+weekday = 6
+hour = 20
+# Postings re-scored per audit. This is the entire cost of the feature: 40
+# hydrations and 40 scored postings, once a week. Raising it buys a tighter
+# estimate of the miss rate and nothing else.
+sample_size = 40
+# Only drops last seen inside this window are counted when sizing the sample. A
+# stage that stopped rejecting anything a month ago should not keep claiming a
+# share of this week's budget.
+lookback_days = 7
+# Below this many drops in the window there is nothing worth measuring and no
+# message is sent.
+min_drops = 20

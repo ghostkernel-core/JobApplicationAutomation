@@ -90,11 +90,16 @@ class _Config:
     kb_enabled = True
     kb_hour = 10
     kb_weekday = 6  # Sunday by `date.weekday()`; run_daily counts it as 0
+    recall_enabled = True
+    recall_hour = 20
+    recall_weekday = 6
+    triage_drop_retention_days = 90
     # Paired the way the real Config pairs them, not hardcoded: these stubs
     # exist to keep `build_app` off the disk, not to restate the schedule.
     digest_at = (digest_hour, config.DIGEST_MINUTE)
     heartbeat_at = (heartbeat_hour, config.HEARTBEAT_MINUTE)
     kb_at = (kb_hour, config.KB_MINUTE)
+    recall_at = (recall_hour, config.RECALL_MINUTE)
 
 
 class _Queue:
@@ -155,8 +160,9 @@ def test_the_daily_jobs_are_registered_with_aware_times(monkeypatch) -> None:
     """
     app = _build(monkeypatch)
 
-    assert len(app.job_queue.daily) == 5, (
-        "digest, heartbeat, kb, the startup-log trim, and question expiry")
+    assert len(app.job_queue.daily) == 7, (
+        "digest, heartbeat, kb, the recall audit, the startup-log trim, "
+        "question expiry, and the drops prune")
     for when in app.job_queue.daily:
         assert when.tzinfo is not None, (
             "run_daily was handed a naive time — JobQueue reads that as UTC")
@@ -182,6 +188,25 @@ def test_the_registered_times_match_the_config(monkeypatch) -> None:
     slots = {(when.hour, when.minute) for when in app.job_queue.daily}
     assert (19, 5) in slots
     assert (9, 15) in slots
+
+
+def test_the_recall_audit_is_off_unless_config_turns_it_on(monkeypatch) -> None:
+    """It costs 40 hydrations and 40 scored postings a week. A watcher that
+    never asked for that must not start paying it on upgrade."""
+    monkeypatch.setattr(_Config, "recall_enabled", False)
+    app = _build(monkeypatch)
+    slots = {(when.hour, when.minute) for when in app.job_queue.daily}
+    assert (20, 35) not in slots
+
+
+def test_the_drops_prune_runs_whether_or_not_anyone_is_auditing(
+        monkeypatch) -> None:
+    """`drops` is written by the prefilter on every cycle regardless, so the
+    table needs aging out even where the recall audit is switched off."""
+    monkeypatch.setattr(_Config, "recall_enabled", False)
+    app = _build(monkeypatch)
+    slots = {(when.hour, when.minute) for when in app.job_queue.daily}
+    assert (4, 29) in slots
 
 
 # --------------------------------------------------------------------------

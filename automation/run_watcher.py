@@ -42,13 +42,14 @@ from telegram.ext import (Application, CommandHandler, ContextTypes,
                           MessageHandler, filters)
 
 from watcher import builder as builder_mod
-from watcher import kb, matcher, normalize, poll, replies, store
+from watcher import kb, matcher, normalize, poll, recall, replies, store
 from watcher.builder import Builder
 from watcher.config import (AUTOMATION_DIR, RESTART_MARKER_PATH,
                             ConfigWriteError, clock, load_config, load_env,
                             require_env, set_number, to_absolute)
 from watcher.logsetup import STARTUP_LOG_MAX_BYTES, setup, trim_startup_log
-from watcher.notifier import Notifier, format_kb_proposal, format_status
+from watcher.notifier import (Notifier, format_kb_proposal, format_recall_audit,
+                              format_status)
 
 log = logging.getLogger("watcher.run")
 
@@ -260,6 +261,60 @@ async def kb_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     kb.save_pending(proposal, message_id)
     log.info("kb: proposed %d rule(s), awaiting approval",
              len(proposal["proposals"]))
+
+
+async def recall_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Weekly: re-score a sample of what discovery threw away, and report it.
+
+    Sent to General rather than to a posting topic, and through `send_notice`
+    rather than `send`: nothing here is a posting to act on. The message is a
+    measurement of the filters, and the one action it can prompt — loosening a
+    rule — is the user's, in config.toml.
+
+    Unlike `kb_job` there is no proposal and no pending state, because there is
+    nothing to approve: the audit writes no verdicts, no postings, and no
+    config. It touches `drops.audited_at` and stops.
+    """
+    notifier: Notifier = context.application.bot_data["notifier"]
+    config = notifier.config
+    if not config.recall_enabled:
+        return
+    try:
+        report = await asyncio.to_thread(recall.audit, config)
+    except Exception:
+        log.exception("recall audit failed")
+        return
+    if report is None:
+        log.info("recall: not enough drops to measure this week")
+        return
+
+    await notifier.send_notice(format_recall_audit(report))
+    log.info("recall: %d sampled, %d would have pinged",
+             report.sampled, report.would_ping)
+
+
+async def drops_prune_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Age out drop rows for postings that have left every feed.
+
+    The table grows by roughly a poll's worth of rejections a cycle and is only
+    ever read by the recall audit, so without this it becomes the largest thing
+    in the database within a couple of months and slows every write with it.
+
+    Retention is measured from `last_seen_at`, which every cycle refreshes for
+    anything still being fetched — so a live posting is never expired out from
+    under the suppression that keeps it from being re-judged. Only one that
+    genuinely stopped appearing ages out.
+    """
+    notifier: Notifier = context.application.bot_data["notifier"]
+    days = notifier.config.triage_drop_retention_days
+    try:
+        with store.connect() as conn:
+            removed = store.prune_drops(conn, days)
+    except Exception:
+        log.exception("pruning drops failed")
+        return
+    if removed:
+        log.info("pruned %d drop row(s) not seen in %d days", removed, days)
 
 
 # --------------------------------------------------------------------------
@@ -1557,6 +1612,14 @@ def build_app(notifier: Notifier) -> Application:
         # than leaving the config off by one day.
         queue.run_daily(kb_job, time=local_time(*config.kb_at),
                         days=((config.kb_weekday + 1) % 7,))
+    if config.recall_enabled:
+        # Same 0 = Monday convention and the same shift as `kb_job` above.
+        # Defaults put it an hour after the kb proposal, on the same evening:
+        # both are weekly reviews of how well the filters are aimed, and
+        # reading "here is what we threw away" beside "here is what to add to
+        # the rules" is the point.
+        queue.run_daily(recall_job, time=local_time(*config.recall_at),
+                        days=((config.recall_weekday + 1) % 7,))
     # Housekeeping, at an hour with nothing else on it and a minute nobody
     # picked on purpose. Not configurable: how often a log file is tidied is not
     # a decision anyone wants to be offered.
@@ -1564,6 +1627,10 @@ def build_app(notifier: Notifier) -> Application:
     # Same reasoning, same quiet hour: a question nobody answered is holding a
     # folder open, and something has to be the thing that eventually lets go.
     queue.run_daily(question_expiry_job, time=local_time(4, 23))
+    # Unconditional, unlike `recall_job`: `drops` is written by the prefilter
+    # whether or not anybody is auditing it, so the table needs aging out even
+    # in a watcher that never runs an audit.
+    queue.run_daily(drops_prune_job, time=local_time(4, 29))
     return app
 
 
