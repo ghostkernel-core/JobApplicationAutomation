@@ -241,6 +241,28 @@ def test_hiringcafe_never_pages_past_its_own_ceiling(hc) -> None:
     assert len(hc["asked"]) == hiringcafe.MAX_PAGES
 
 
+HC_TWO_QUERIES = {"name": "hiringcafe",
+                  "queries": ["data scientist", "ml engineer"]}
+
+
+def test_hiringcafe_keeps_the_queries_that_worked_when_one_fails(hc) -> None:
+    """Four queries run per poll. Letting the first bad one abort the rest
+    throws away three working searches and reports the source as down."""
+    hc["pages"] = [RuntimeError("HTTP 502"), _hc_page([HC_HIT])]
+
+    postings = hiringcafe.fetch(HC_TWO_QUERIES, 10)
+
+    assert len(postings) == 1
+
+
+def test_hiringcafe_fails_only_when_every_query_failed(hc) -> None:
+    """Nothing came back at all, so the source really is unhealthy."""
+    hc["pages"] = [RuntimeError("HTTP 502"), RuntimeError("HTTP 502")]
+
+    with pytest.raises(RuntimeError, match="HTTP 502"):
+        hiringcafe.fetch(HC_TWO_QUERIES, 10)
+
+
 def test_hiringcafe_search_urls_are_the_pages_a_person_can_open(hc) -> None:
     [(query, url)] = hiringcafe.search_urls(HC_ENTRY)
 

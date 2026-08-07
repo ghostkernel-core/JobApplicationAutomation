@@ -97,13 +97,23 @@ def fetch(entry: dict[str, Any], timeout: int) -> list[Posting]:
     queries = entry.get("queries") or []
     source = f"portal:{entry.get('name', 'hiringcafe')}"
 
+    # A missing build id aborts the whole source on purpose: no query can run
+    # without it, so there is nothing partial to salvage.
     build_id = _build_id(timeout)
     seen: set[str] = set()
     out: list[Posting] = []
+    failures: list[str] = []
 
     for query in queries:
         for page in range(MAX_PAGES):
-            props = _page(build_id, query, page, timeout)
+            try:
+                props = _page(build_id, query, page, timeout)
+            except Exception as exc:  # noqa: BLE001
+                # One query failing must not cost the others; health is only
+                # marked bad below if every one of them failed.
+                failures.append(f"{query!r} p{page}: {exc}")
+                break
+
             hits = props.get("ssrHits") or []
             for hit in hits:
                 posting = _posting(hit, source)
@@ -113,6 +123,11 @@ def fetch(entry: dict[str, Any], timeout: int) -> list[Posting]:
                 out.append(posting)
             if props.get("ssrIsLastPage") or not hits:
                 break
+
+    if failures and not out:
+        raise RuntimeError("; ".join(failures[:3]))
+    if failures:
+        log.warning("hiring.cafe: %d partial failures (%s)", len(failures), failures[0])
     return out
 
 

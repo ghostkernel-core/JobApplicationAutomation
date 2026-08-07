@@ -6,12 +6,21 @@ a real browser's TLS fingerprint, headers, and cookies — `requests` gets a
 challenge page. So the request is issued *from inside* the page via
 `page.request.post()`, which reuses the context's cookies and identity.
 
-Two things make this bearable rather than a maintenance sink:
+Three things make this bearable rather than a maintenance sink:
 
 **One persistent context, reused.** `state/browser/` holds the profile, so a
 challenge solved on Monday is still solved on Friday. Launching a fresh browser
 per poll would re-trigger the challenge every 30 minutes and look exactly like
 the bot it is.
+
+**A dead browser heals itself.** That cached context is a Python handle, and it
+outlives the Chromium process behind it. When that process died in an idle
+window between two polls, the cache stayed populated, every later `new_page()`
+raised, and nothing but restarting the watcher cleared it — both portals share
+the context, so one death burned two independent health budgets in lockstep and
+took the two most productive sources down for seven consecutive cycles. So the
+cache is checked for liveness before it is handed out, and a job whose browser
+dies under it relaunches and retries once.
 
 **Playwright is a soft dependency.** The import is lazy and failure is an
 ordinary source failure, so a machine without Playwright installed runs the ATS
@@ -31,6 +40,7 @@ import atexit
 import logging
 import queue
 import threading
+import time
 from typing import Any
 
 from ..config import browser_profile_dir
@@ -39,6 +49,22 @@ from .base import USER_AGENT
 log = logging.getLogger("watcher.fetch.browser")
 
 LAUNCH_TIMEOUT_MS = 60_000
+
+#: After a launch fails, how long before another is attempted. One poll issues
+#: ~50 hydration calls; without this, each of them spawns its own Chromium
+#: launch attempt on a machine where the browser cannot start.
+RELAUNCH_COOLDOWN_S = 60
+
+#: How long an origin stays warm. Cookies live in the persistent profile, so
+#: the navigation only has to run often enough to keep a session fresh — not
+#: once per call, which is what made hiring.cafe reload its homepage 12 times
+#: and burn ~18s of fixed waits every poll.
+WARM_TTL_S = 600
+
+#: origin -> monotonic timestamp of its last warm. Only the single owning
+#: worker thread ever reads or writes this, so it needs no lock — which is not
+#: obvious from the type, hence the note.
+_WARMED: dict[str, float] = {}
 
 # Playwright's sync API is greenlet-based and bound to the thread that created
 # it: touching a context from any other thread raises "Cannot switch to a
@@ -68,15 +94,84 @@ class BrowserUnavailable(RuntimeError):
     """Playwright is not installed, or the browser would not start."""
 
 
+# Playwright 1.62 exports only `Error` and `TimeoutError` from `sync_api`, so
+# there is no `TargetClosedError` to catch by type — and importing from
+# `playwright._impl` to get one would make this module's import hard, which the
+# docstring above exists to prevent. Match on the type *name* and the message
+# instead: both are stable, and a false positive costs one wasted relaunch.
+_DISCONNECT_TYPES = ("TargetClosedError", "BrowserClosedError")
+_DISCONNECT_MARKERS = (
+    "target page, context or browser has been closed",
+    "browser has been closed",
+    "target closed",
+    "connection closed",
+    "browser closed",
+)
+
+
+def _is_disconnect(exc: BaseException) -> bool:
+    """Whether an exception means the browser process is gone."""
+    if type(exc).__name__ in _DISCONNECT_TYPES:
+        return True
+    text = str(exc).casefold()
+    return any(marker in text for marker in _DISCONNECT_MARKERS)
+
+
+def _context_is_dead(state: dict[str, Any]) -> bool:
+    """Whether the cached context still has a browser behind it.
+
+    Two signals, because neither is enough on its own. The `close` event fires
+    when the browser goes away while nothing is being asked of it — the case
+    that stranded the watcher for seven poll cycles — but Playwright's sync API
+    only dispatches events when it is called into, so it can lag. The
+    `is_connected()` probe catches what the flag missed.
+
+    A persistent context may expose no `.browser` at all; that is not evidence
+    of death, so it falls back to the flag rather than forcing a relaunch every
+    single poll (which would re-trigger the Cloudflare challenge every 30
+    minutes — exactly what the persistent profile exists to avoid).
+    """
+    if state.get("context") is None:
+        return False
+    if state.get("dead"):
+        return True
+    try:
+        owner = getattr(state["context"], "browser", None)
+        if owner is None:
+            return False
+        return not owner.is_connected()
+    except Exception:  # noqa: BLE001 - an unusable handle is a dead one
+        return True
+
+
 def _open_context(state: dict[str, Any]):
-    """The shared persistent context, launched on first use.
+    """The shared persistent context, launched on first use and after a death.
 
     Only ever called on the worker thread, so everything it creates belongs to
     that thread for good.
     """
     if state["context"] is not None:
-        return state["context"]
+        if not _context_is_dead(state):
+            return state["context"]
+        # The handle outlives the process it points at, so without this the
+        # cache stays populated and every later `new_page()` raises — forever.
+        log.warning("browser context is gone — relaunching")
+        _shutdown(state)
 
+    failed_at = state.get("launch_failed_at")
+    if failed_at is not None and time.monotonic() - failed_at < RELAUNCH_COOLDOWN_S:
+        raise BrowserUnavailable(state.get("launch_error") or "browser launch failed")
+
+    try:
+        return _launch(state)
+    except BrowserUnavailable as exc:
+        state["launch_failed_at"] = time.monotonic()
+        state["launch_error"] = str(exc)
+        raise
+
+
+def _launch(state: dict[str, Any]):
+    """Start a fresh persistent context and record it on `state`."""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
@@ -112,6 +207,16 @@ def _open_context(state: dict[str, Any]):
     context.set_default_timeout(LAUNCH_TIMEOUT_MS)
     state["playwright"] = playwright
     state["context"] = context
+    state["dead"] = False
+    state["launch_failed_at"] = state["launch_error"] = None
+
+    # Set the flag the moment the browser goes away, so a death during the 30
+    # minutes between polls is already known by the time the next one asks.
+    # Guarded because the fakes in the tests are not full contexts.
+    register = getattr(context, "on", None)
+    if register is not None:
+        register("close", lambda *_args: state.__setitem__("dead", True))
+
     log.info("browser context started at %s", profile)
     return context
 
@@ -119,6 +224,9 @@ def _open_context(state: dict[str, Any]):
 def _shutdown(state: dict[str, Any]) -> None:
     context, playwright = state["context"], state["playwright"]
     state["context"] = state["playwright"] = None
+    state["dead"] = False
+    # Whatever was warm belonged to the context being torn down.
+    _WARMED.clear()
     for closer in (getattr(context, "close", None), getattr(playwright, "stop", None)):
         if closer is None:
             continue
@@ -128,9 +236,33 @@ def _shutdown(state: dict[str, Any]) -> None:
             pass
 
 
+def _run_job(state: dict[str, Any], func):
+    """Run one job, relaunching and retrying once if the browser died under it.
+
+    The liveness check in `_open_context` runs before a job starts, so it can
+    do nothing for a browser that dies *during* one. Every job in this module
+    is a read — `goto`, `evaluate`, and a search `GET`/`POST` — so running one
+    twice changes nothing on the far side, which is what makes a retry safe
+    here and would not make it safe somewhere that writes.
+
+    Only a context that was *already cached* is retried. If one launched for
+    this very job reports itself closed, relaunching into the same fault would
+    just double the cost of every real error.
+    """
+    cached = state.get("context") is not None
+    try:
+        return func(_open_context(state))
+    except Exception as exc:  # noqa: BLE001
+        if not cached or not _is_disconnect(exc):
+            raise
+        log.warning("browser died mid-job (%s) — relaunching and retrying once", exc)
+        _shutdown(state)
+        return func(_open_context(state))
+
+
 def _serve(work: queue.Queue) -> None:
     """The worker loop. Owns the Playwright objects from birth to shutdown."""
-    state: dict[str, Any] = {"playwright": None, "context": None}
+    state: dict[str, Any] = {"playwright": None, "context": None, "dead": False}
     try:
         while True:
             job = work.get()
@@ -138,7 +270,7 @@ def _serve(work: queue.Queue) -> None:
                 return
             func, box, done = job
             try:
-                box["value"] = func(_open_context(state))
+                box["value"] = _run_job(state, func)
             except BaseException as exc:  # noqa: BLE001 - relayed to the caller
                 box["error"] = exc
             finally:
@@ -195,14 +327,26 @@ atexit.register(close)
 
 
 def _warm(page, url: str) -> None:
-    """Load the real site once so the context holds its cookies.
+    """Load the real site so the context holds its cookies — at most once per
+    `WARM_TTL_S`.
 
     An XHR to a search endpoint from a context that has never visited the site
     has no session cookie and no Referer that makes sense, which is the fastest
-    possible way to be challenged.
+    possible way to be challenged. That argues for warming, not for warming on
+    every single call: the cookies live in the persistent profile and the
+    request sets `Origin`/`Referer` explicitly, so a second warm inside the TTL
+    buys a page load and a fixed 1500ms wait and nothing else. hiring.cafe
+    issues 12 calls a poll and paid that 12 times. StepStone's `evaluate` path
+    has never warmed at all and has never been challenged for it, which is the
+    evidence that per-call warming was over-cautious rather than load-bearing.
     """
+    now = time.monotonic()
+    last = _WARMED.get(url)
+    if last is not None and now - last < WARM_TTL_S:
+        return
     page.goto(url, wait_until="domcontentloaded")
     page.wait_for_timeout(1500)
+    _WARMED[url] = now
 
 
 def json_api(
