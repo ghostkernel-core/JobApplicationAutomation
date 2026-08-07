@@ -542,13 +542,24 @@ class Config:
 
     @property
     def triage_batch_size(self) -> int:
-        """Small on purpose: the prompt is dominated by the profile digest,
-        not by per-posting content, since triage never sees a description."""
-        return self._num("triage", self.triage, "batch_size", 200)
+        """Sized against measured latency, which tracks the item count.
+
+        The docstring here used to argue that batching was nearly free — the
+        prompt is dominated by the profile digest, not by per-posting content,
+        since triage never sees a description — and defaulted to 200. That is
+        true of the input and beside the point: one JSON verdict is *generated*
+        per posting, so a batch costs roughly 2.7s an item. 200 of them cannot
+        finish inside any sane ceiling, and because triage fails open, every
+        timed-out batch degraded to unsure and the gate passed everything
+        without saying so. Keep this small enough that a batch finishes well
+        inside `triage_timeout`.
+        """
+        return self._num("triage", self.triage, "batch_size", 25)
 
     @property
     def triage_timeout(self) -> int:
-        return self._num("triage", self.triage, "timeout_seconds", 120)
+        """Per attempt; `run_json` retries once, so a timeout costs 2x this."""
+        return self._num("triage", self.triage, "timeout_seconds", 180)
 
     @property
     def triage_max_per_cycle(self) -> int:

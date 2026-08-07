@@ -480,20 +480,44 @@ def main(argv: list[str] | None = None) -> int:
                   f"unsure {report.by_decision['unsure']}"
                   f"{f', {report.degraded} degraded' if report.degraded else ''}")
 
-            at_risk = []
+            # The gate's population is the stored >=65 band, and its claim is
+            # that triage kept all of it. A degraded posting was never judged,
+            # so it is evidence of nothing — counting it as "did not come back
+            # drop" is how this gate certified a run in which every one of 300
+            # postings timed out and no decision was made at all. Absence of a
+            # drop and absence of a verdict have to read differently here.
+            band = 0          # postings with a stored score >= 65
+            at_risk = []      # ... that triage would drop
+            uncovered = []    # ... that triage never actually judged
             for row, posting in zip(rows, postings):
-                verdict = results.get(posting.fingerprint)
                 verdict_row = stored.get(row["id"])
-                if (verdict and verdict["decision"] == "drop"
-                        and verdict_row and verdict_row["score"] >= 65):
+                if not (verdict_row and verdict_row["score"] >= 65):
+                    continue
+                band += 1
+                verdict = results.get(posting.fingerprint)
+                if not verdict or verdict.get("degraded"):
+                    uncovered.append((row, verdict_row["score"]))
+                elif verdict["decision"] == "drop":
                     at_risk.append((row, verdict_row["score"]))
+
             if at_risk:
-                print(f"\nWARNING: {len(at_risk)} posting(s) scored >=65 would be "
-                      f"dropped by triage — the acceptance gate expects zero:")
+                print(f"\nGATE FAILED: {len(at_risk)} posting(s) scored >=65 would be "
+                      f"dropped by triage — the gate expects zero:")
                 for row, score in at_risk:
                     print(f"  {score:>3}  {row['company']} — {row['title']}")
-            else:
-                print("\nacceptance gate: no stored score >=65 came back drop.")
+                return 1
+            if not band:
+                print("\nGATE INCONCLUSIVE: no replayed posting has a stored score "
+                      ">=65, so there was nothing to certify.")
+                return 1
+            if uncovered:
+                print(f"\nGATE INCONCLUSIVE: {len(uncovered)} of {band} posting(s) "
+                      f"scoring >=65 were never judged (degraded), so this run says "
+                      f"nothing about them. Fix the degradation and re-run — see the "
+                      f"log for why the batch failed.")
+                return 1
+            print(f"\nacceptance gate passed: all {band} posting(s) scoring >=65 were "
+                  f"judged, none came back drop.")
         return 0
 
     if args.backfill:

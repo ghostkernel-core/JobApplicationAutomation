@@ -279,3 +279,114 @@ def test_empty_input_returns_empty_without_touching_the_database(db, monkeypatch
 
     assert results == {}
     assert report.judged == 0
+
+
+# --------------------------------------------------------------------------
+# --replay: the acceptance gate must not certify a run it did not measure
+# --------------------------------------------------------------------------
+#
+# The gate's claim is "triage keeps everything the scorer rated >= 65". It got
+# that claim from counting drops, which quietly makes "no verdict at all" look
+# like "not a drop". A live replay of 300 postings then timed out on every
+# batch, degraded all 300 to unsure, and the gate printed a pass — certifying a
+# run in which no decision had been made about anything.
+
+
+def _stored(conn, job_id: str, score: int) -> Posting:
+    """A posting in the DB with a matcher score, as --replay expects to find."""
+    post = posting(job_id)
+    store.insert_posting(conn, post)
+    store.save_verdict(conn, post.fingerprint,
+                       {"score": score, "verdict": "strong", "why": [],
+                        "gaps": [], "stop_and_ask": False, "stop_reason": ""},
+                       "haiku")
+    return post
+
+
+def _replay(monkeypatch, decisions: dict[str, dict], cfg=None):
+    """Run `--replay 10` with triage's answers stubbed to `decisions`."""
+    monkeypatch.setattr(triage, "load_config", lambda *a, **k: cfg or config())
+    monkeypatch.setattr(
+        triage, "score_batch",
+        lambda batch, *a, **k: {p.fingerprint: decisions[p.fingerprint]
+                                for p in batch})
+    return triage.main(["--replay", "10"])
+
+
+def test_a_fully_degraded_replay_does_not_pass_the_gate(db, monkeypatch, capsys):
+    """The run that motivated this: every batch timed out, nothing was judged."""
+    with store.connect(db) as conn:
+        posts = [_stored(conn, str(i), 80) for i in range(3)]
+
+    code = _replay(monkeypatch, {p.fingerprint: {
+        "decision": "unsure", "why": "timed out", "degraded": True}
+        for p in posts})
+
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "GATE INCONCLUSIVE" in out
+    assert "3 of 3" in out
+    assert "acceptance gate passed" not in out
+
+
+def test_one_degraded_posting_in_the_band_is_enough_to_withhold_the_pass(
+        db, monkeypatch, capsys):
+    with store.connect(db) as conn:
+        kept = [_stored(conn, str(i), 80) for i in range(3)]
+        lost = _stored(conn, "9", 80)
+
+    decisions = {p.fingerprint: {"decision": "keep", "why": ""} for p in kept}
+    decisions[lost.fingerprint] = {"decision": "unsure", "why": "timed out",
+                                   "degraded": True}
+    code = _replay(monkeypatch, decisions)
+
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "1 of 4" in out
+
+
+def test_a_drop_in_the_band_fails_the_gate_outright(db, monkeypatch, capsys):
+    with store.connect(db) as conn:
+        keep = _stored(conn, "1", 70)
+        drop = _stored(conn, "2", 88)
+
+    code = _replay(monkeypatch, {
+        keep.fingerprint: {"decision": "keep", "why": ""},
+        drop.fingerprint: {"decision": "drop", "why": "not a fit"},
+    })
+
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "GATE FAILED" in out
+    assert " 88  Acme" in out
+
+
+def test_a_clean_replay_passes_and_says_what_it_covered(db, monkeypatch, capsys):
+    with store.connect(db) as conn:
+        band = [_stored(conn, str(i), 70 + i) for i in range(3)]
+        below = _stored(conn, "9", 40)
+
+    decisions = {p.fingerprint: {"decision": "keep", "why": ""} for p in band}
+    # Below the band, so a drop here is not the gate's business.
+    decisions[below.fingerprint] = {"decision": "drop", "why": "wrong field"}
+    code = _replay(monkeypatch, decisions)
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "acceptance gate passed: all 3 posting(s)" in out
+
+
+def test_a_replay_with_nothing_in_the_band_certifies_nothing(
+        db, monkeypatch, capsys):
+    # Every posting scored below 65, so a pass here would mean only that the
+    # sample was uninformative — which is not the same as triage being safe.
+    with store.connect(db) as conn:
+        posts = [_stored(conn, str(i), 40) for i in range(3)]
+
+    code = _replay(monkeypatch, {p.fingerprint: {"decision": "keep", "why": ""}
+                                 for p in posts})
+
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "GATE INCONCLUSIVE" in out
+    assert "nothing to certify" in out

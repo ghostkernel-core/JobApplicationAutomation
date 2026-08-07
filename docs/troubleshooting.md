@@ -148,6 +148,23 @@ whether it is wrong or you are. If it is wrong, the fix is in
 matcher scores with, so a profile that undersells a skill narrows discovery and scoring
 together.
 
+Read the exit code, not just the table. `--replay` ends in one of three states, and only the
+first says anything about whether triage is safe:
+
+| line | exit | what it means |
+|---|---|---|
+| `acceptance gate passed` | 0 | postings you scored >=65 were judged, and triage kept all of them |
+| `GATE FAILED` | 1 | triage would drop a posting the matcher rated >=65 — it is too aggressive |
+| `GATE INCONCLUSIVE` | 1 | nothing was certified: the batch degraded, or nothing in the sample scored >=65 |
+
+The inconclusive case is the one worth knowing about, because triage **fails open**: a batch
+that times out degrades every posting in it to `unsure`, which keeps them all. That is correct
+behaviour and it is also invisible — the watcher runs, the log fills, and the gate is doing
+nothing. If `--replay` reports postings that "were never judged (degraded)", triage is not
+gating anything in production. Check `logs/watcher.log` for `failed to triage`; a batch that
+cannot finish inside `[triage] timeout_seconds` is the usual cause, and the fix is a smaller
+`batch_size`, not a longer timeout.
+
 **Nothing was fetched at all** — then no gate is at fault and the search terms are. The few
 terms in each portal's `queries` are the entire aperture of that half of the watcher, so a
 role you are qualified for that nobody thought to type is never fetched and nothing reports
