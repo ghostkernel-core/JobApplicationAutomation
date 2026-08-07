@@ -97,9 +97,10 @@ CREATE TABLE IF NOT EXISTS score_attempts (
 -- the drop. Suppression (`known_drops`) only matches within the current key, so
 -- editing the canonical profile or approving a kb rule re-judges the backlog
 -- exactly once rather than trusting a verdict the profile has since outgrown.
--- `stage` shares its vocabulary with `prefilter.STAGES` even though only
--- "triage" is written here today, so one table can hold every rejection this
--- system ever wants to record without a second schema.
+-- `stage` shares its vocabulary with `prefilter.STAGES` — every deterministic
+-- rule writes here too, alongside "triage" — so one table holds every
+-- rejection this system makes, and `recall.py`'s audit can sample across all
+-- of them rather than only the LLM gate.
 CREATE TABLE IF NOT EXISTS drops (
     id             TEXT PRIMARY KEY,
     loose_key      TEXT NOT NULL,
@@ -475,6 +476,62 @@ def touch_drops(conn: sqlite3.Connection, ids: Iterable[str]) -> None:
             f"WHERE id IN ({placeholders})",
             [now, *chunk],
         )
+
+
+def sample_drops(conn: sqlite3.Connection, stage: str, limit: int) -> list[sqlite3.Row]:
+    """Up to `limit` never-audited drops for one stage, newest first.
+
+    Newest first so `recall.py`'s weekly budget is spent on what the current
+    rules just rejected, not on a verdict made under a profile or filter
+    config that has since changed. `mark_drop_audited` is what keeps a
+    sampled row from being drawn again next week.
+    """
+    return list(conn.execute(
+        "SELECT * FROM drops WHERE stage = ? AND audited_at IS NULL "
+        "ORDER BY last_seen_at DESC LIMIT ?", (stage, limit)))
+
+
+def mark_drop_audited(conn: sqlite3.Connection, drop_id: str,
+                      score: int | None) -> None:
+    """Record a recall audit's re-score against a drop, so it is never sampled again.
+
+    `score` is `None` when the audit could not hydrate or score the posting at
+    all — still marked audited, since re-drawing a posting that has left every
+    feed would only waste next week's budget the same way.
+    """
+    conn.execute("UPDATE drops SET audited_at = ?, audit_score = ? WHERE id = ?",
+                (_now(), score, drop_id))
+
+
+def drop_counts(conn: sqlite3.Connection, since: str | None = None) -> dict[str, int]:
+    """How many drop rows exist per stage, optionally only those last seen since a date.
+
+    `recall.py` sizes its stratified sample against this — proportional-to-
+    volume sampling needs the volume first — and it is what a `/status`
+    breakdown or `notifier.format_recall_audit` shows per stage.
+    """
+    sql = "SELECT stage, COUNT(*) c FROM drops"
+    params: list[object] = []
+    if since:
+        sql += " WHERE last_seen_at >= ?"
+        params.append(since)
+    sql += " GROUP BY stage"
+    return {row["stage"]: row["c"] for row in conn.execute(sql, params)}
+
+
+def prune_drops(conn: sqlite3.Connection, retention_days: int) -> int:
+    """Delete drop rows not seen in `retention_days` — the posting has left
+    every source's feed entirely, not merely cooled off.
+
+    A posting still being fetched keeps getting `record_drop` (deterministic)
+    or `touch_drops` (suppressed triage repeat) every cycle, which is what
+    keeps `last_seen_at` moving. Purely housekeeping: suppression itself is
+    keyed on `digest_key`, not on age, so a live posting's drop row is never
+    expired out from under an unchanged profile — only a posting that
+    genuinely stopped appearing ages out.
+    """
+    cutoff = (dt.date.today() - dt.timedelta(days=retention_days)).isoformat()
+    return conn.execute("DELETE FROM drops WHERE last_seen_at < ?", (cutoff,)).rowcount
 
 
 # --------------------------------------------------------------------------
