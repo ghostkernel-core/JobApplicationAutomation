@@ -513,10 +513,13 @@ say *only*, which is why `title_deny` survived and its opposite did not. A lefto
 `[triage]` in `config.toml` does that job instead, against the profile digest the matcher
 already scores with. It sees title, company and location only — never a description — and runs
 in small batches before anything is hydrated, which is what makes it cheap enough to put in
-front of everything. `batch_size` is measured, not guessed: latency rises faster than the item
-count, so a batch of 25 costs 4.5× a batch of 10 and clears fewer postings per minute. Batches
-run one after another, so a size that overruns `timeout_seconds` does not slow the cycle down —
-it degrades the whole batch.
+front of everything. `batch_size` is measured, not guessed. Timed against live postings, cost is
+close to linear in the item count at about 1.9s each with almost no fixed overhead (10 items in
+20s, 50 in 128s, 100 in 189s), so a bigger batch buys no throughput — it only puts more postings
+behind a single timeout. Latency also varies a lot between identical calls: one 25-item batch
+took 92s where that rate predicts 49s, which is why `timeout_seconds` is set to roughly double
+the typical duration rather than just above it. Batches run one after another, so a size that
+overruns the ceiling does not slow the cycle down — it degrades the whole batch.
 
 It **fails open**, and that is the whole design. A degraded batch, a malformed reply, a verdict
 that is not the exact string `drop` — all keep the posting. An outage widens the funnel and

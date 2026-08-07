@@ -168,9 +168,10 @@ cycle's worth at once.
 Failing open has a blind spot: triage that fails *every* batch keeps everything, which is
 indistinguishable from triage that is working. `--replay` is the check, and it exits non-zero
 when it could not certify the run — including when the batch degraded and therefore judged
-nothing. Keep `batch_size` where a batch finishes well inside `timeout_seconds`; the cost of
-a batch is superlinear in its item count, so a bigger one is both slower per posting and more
-likely to time out.
+nothing. Keep `batch_size` where a batch finishes well inside `timeout_seconds`. Measured, the
+cost of a batch is close to linear in its item count — about 1.9s a posting, with almost no
+fixed overhead — so a bigger batch is no faster per posting and only puts more of them behind
+one timeout.
 
 **`[recall]`** is the weekly answer to "what did all of that throw away?". Every rejected
 posting is recorded with the stage that rejected it, and once a week a stratified sample is

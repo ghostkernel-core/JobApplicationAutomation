@@ -41,15 +41,17 @@ enabled = true
 model = "haiku"
 # Measured, not guessed. The first version of this said "small on purpose —
 # the prompt is dominated by the profile digest, not by per-posting content"
-# and then set 200, which is true of the input and irrelevant: the cost is one
-# JSON verdict generated per posting, so wall time tracks the item count at
-# roughly 2.7s each. 200 items is ~9 minutes and could never finish inside a
-# 120s ceiling, so every batch timed out, every posting degraded to unsure,
-# and the gate silently passed everything for as long as it was enabled.
-# Timed against live postings (batch/elapsed): 10/20s, 25/92s, 50/128s.
-# Throughput is flat across those sizes, so a bigger batch buys nothing and
-# only raises the chance of losing the whole batch to one timeout. 25 keeps a
-# call near 90s at its worst, which the ceiling below doubles.
+# and then set 200, which is true of the input and beside the point: the cost
+# is one JSON verdict *generated* per posting, so wall time tracks the item
+# count at roughly 1.9s each. 200 items is over six minutes and could never
+# finish inside a 120s ceiling, so every batch timed out, every posting
+# degraded to unsure, and the gate silently passed everything for as long as
+# it was enabled.
+# Timed against live postings (batch/elapsed): 10/20s, 25/92s, 50/128s,
+# 100/189s — near-linear, with almost no fixed overhead. Throughput is
+# therefore flat across sizes, so a bigger batch buys nothing and only puts
+# more postings behind one timeout. 25 is one slow call of ~90s, which the
+# ceiling below doubles.
 batch_size = 25
 # Per attempt, and `run_json` retries once — a batch that times out costs two
 # of these before it degrades.
@@ -60,9 +62,10 @@ timeout_seconds = 180
 # single cycle thousands of first-time candidates; `watcher.triage --backfill`
 # is the deliberate, one-time way to work through a backlog that size instead.
 # A ceiling, not the expected load: the busiest cycle on record handed triage
-# 300. At ~2.7s per posting that is ~14 minutes, which fits the 30-minute
-# interval; a cycle that actually hit 600 would take ~27 and leave almost no
-# margin, so lower this rather than raise it if cycles start running long.
+# 300. At ~1.9s per posting that is ~10 minutes, comfortably inside the
+# 30-minute interval; a cycle that actually hit 600 would take ~19 and leave
+# little margin for a slow run, so lower this rather than raise it if cycles
+# start running long.
 max_per_cycle = 600
 # How long a drop row is kept before it is eligible for pruning. Purely a
 # housekeeping figure — suppression itself is keyed on the profile digest, not

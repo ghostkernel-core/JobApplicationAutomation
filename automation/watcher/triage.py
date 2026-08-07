@@ -54,6 +54,16 @@ log = logging.getLogger("watcher.triage")
 
 DECISIONS = ("keep", "drop", "unsure")
 
+# The paragraph beginning "The test is" is not padding. Without it the model
+# reads the profile, sees it is dominated by AI/ML, and quietly swaps the drop
+# test for a relevance test — "no ML signal in the title, therefore drop". The
+# first honest `--replay 100` caught it doing exactly that to three postings the
+# scorer had rated 68, 68 and 72: a "Software Engineer II", a "Software Engineer
+# - Backend", and a "Data Analyst*in Claims", each dropped with a `why` that
+# said, in so many words, that the title was not about machine learning. Every
+# one of those is a technical role one specialisation away, which the paragraph
+# above it already calls out as never a drop — so the rule was stated and lost
+# anyway. Naming the wrong test is what makes it stick.
 _SYSTEM = """\
 You are the first, cheapest filter in a pipeline that later reads full job \
 postings for one candidate. You see only a title, a company, and a location — \
@@ -76,6 +86,14 @@ profession entirely — nursing, accounting, skilled trades, legal, sales, and \
 the like — never a technical role that is merely one seniority level or one \
 specialisation away from the profile. If a technical role could plausibly be \
 adjacent, that is not a drop.
+
+The test is "is this a different profession?", never "does this title match \
+the candidate's specialisation?". Those two come apart on exactly the titles \
+that matter. A bare "Software Engineer", "Backend Engineer", or "Data Analyst" \
+says nothing either way about specialisation, which makes it unsure. That a \
+title does not mention AI, ML, or data science is not a reason to drop it — it \
+is the ordinary case for a title this short, and the description settles it \
+downstream for free.
 
 unsure means there is not enough here to be sure either way: a generic or \
 ambiguous title, an unfamiliar company, a role that could go either way. An \
@@ -501,8 +519,11 @@ def main(argv: list[str] | None = None) -> int:
                     at_risk.append((row, verdict_row["score"]))
 
             if at_risk:
-                print(f"\nGATE FAILED: {len(at_risk)} posting(s) scored >=65 would be "
-                      f"dropped by triage — the gate expects zero:")
+                # With the denominator, because "3 dropped" reads as a rounding
+                # error and "3 of 24" reads as the 12% of the band it actually
+                # is. The other two verdicts already carry theirs.
+                print(f"\nGATE FAILED: {len(at_risk)} of {band} posting(s) scoring "
+                      f">=65 would be dropped by triage — the gate expects zero:")
                 for row, score in at_risk:
                     print(f"  {score:>3}  {row['company']} — {row['title']}")
                 return 1

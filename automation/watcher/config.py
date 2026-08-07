@@ -548,8 +548,9 @@ class Config:
         prompt is dominated by the profile digest, not by per-posting content,
         since triage never sees a description — and defaulted to 200. That is
         true of the input and beside the point: one JSON verdict is *generated*
-        per posting, so a batch costs roughly 2.7s an item. 200 of them cannot
-        finish inside any sane ceiling, and because triage fails open, every
+        per posting, so a batch costs roughly 1.9s an item, near-linearly and
+        with almost no fixed overhead. 200 of them cannot finish inside any
+        sane ceiling, and because triage fails open, every
         timed-out batch degraded to unsure and the gate passed everything
         without saying so. Keep this small enough that a batch finishes well
         inside `triage_timeout`.

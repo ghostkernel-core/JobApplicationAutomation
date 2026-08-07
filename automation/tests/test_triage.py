@@ -127,6 +127,25 @@ def test_prompt_carries_title_company_location_never_a_description():
     assert "SECRET-BODY-TEXT" not in prompt
 
 
+def test_the_prompt_disarms_the_relevance_test_that_caused_real_drops():
+    """The drop bar is "different profession", not "matches my specialisation".
+
+    A prompt that only states the first gets read as the second: shown a
+    profile dominated by AI/ML, the model dropped a "Software Engineer II", a
+    "Software Engineer - Backend" and a "Data Analyst*in Claims" — scored 72,
+    68 and 68 by the matcher that reads their descriptions — each because the
+    title said nothing about machine learning. The paragraph naming the wrong
+    test is the fix, so losing it silently is a regression this asserts on.
+    """
+    prompt = triage.build_prompt([], "DIGEST", "KB")
+
+    assert "is this a different profession?" in prompt
+    assert "does this title match" in prompt
+    # A short generic title is the definition of unsure, and the absence of an
+    # AI/ML word in one is explicitly not evidence of anything.
+    assert "not a reason to drop" in prompt
+
+
 # --------------------------------------------------------------------------
 # triage_postings: persistence, suppression, and the cap
 # --------------------------------------------------------------------------
@@ -358,6 +377,9 @@ def test_a_drop_in_the_band_fails_the_gate_outright(db, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert code == 1
     assert "GATE FAILED" in out
+    # The share of the band, not a bare count: one drop out of two in the band
+    # is a very different report from one out of fifty.
+    assert "1 of 2" in out
     assert " 88  Acme" in out
 
 
