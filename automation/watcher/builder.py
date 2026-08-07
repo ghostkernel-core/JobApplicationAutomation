@@ -66,6 +66,8 @@ INTERRUPTED = "interrupted"
 # canonical profile does not carry, and all the user was told is that two PDFs
 # were missing.
 NEEDS_DECISION = "needs_decision"
+# Stopped by the user with `/cancel`, not by anything that went wrong.
+CANCELLED = "cancelled"
 
 #: How many turn-ending messages are kept as a build's closing words. The
 #: orchestrator ends a turn every time it hands off to background subagents, so
@@ -90,6 +92,39 @@ class Job:
     note: str
     reply_message_id: int | None
     build_id: int
+    # Set when this job continues a run that stopped to ask. `answer` is the
+    # user's reply, verbatim; `resume_session` is the CLI session it belongs to,
+    # empty when that session is gone and the answer has to start a fresh build.
+    # `resume_log` is that session's own log, which is where the steps it already
+    # finished are recorded — without it the continuation's checklist starts
+    # blank and stays blank for everything the first half did.
+    answer: str = ""
+    resume_session: str = ""
+    resume_log: str = ""
+    # Set by an explicit "yes anyway" to a duplicate decline. The check is not
+    # re-run — the user has already seen its verdict and overruled it.
+    override_duplicate: bool = False
+
+    @property
+    def is_answer(self) -> bool:
+        return bool(self.answer)
+
+
+@dataclass
+class RunResult:
+    """What one call to the CLI came back with.
+
+    A tuple until it needed a fourth and fifth field. `session_id` is the one
+    that earns the class: it is read off the event stream for every run and
+    matters only for the runs that stop without finishing, which is exactly
+    when a positional tuple would have been extended and mis-unpacked.
+    """
+
+    ok: bool = False
+    detail: str = ""
+    closing: str = ""
+    session_id: str = ""
+    log_file: Path | None = None
 
 
 @dataclass
@@ -123,6 +158,18 @@ def build_prompt(url: str, note: str) -> str:
     return f"{url}\n{note}".strip()
 
 
+def answer_prompt(answer: str) -> str:
+    """The user's reply to a question the run stopped to ask, and nothing more.
+
+    Separate from `build_prompt`, and deliberately just as bare. This message
+    continues an existing session: the run already holds `CLAUDE.md`, the Match
+    Brief, the Research Note and the folder it created, so anything added here
+    would be a second copy of context the model already has — and the first one
+    to go stale.
+    """
+    return (answer or "").strip()
+
+
 # --------------------------------------------------------------------------
 # spawning
 # --------------------------------------------------------------------------
@@ -132,20 +179,26 @@ def _slug(text: str, limit: int = 40) -> str:
     return (cleaned[:limit] or "build").lower()
 
 
-def log_path_for(company: str, title: str, attempt: int = 1) -> Path:
+def log_path_for(company: str, title: str, attempt: int = 1,
+                 suffix: str = "") -> Path:
     """Where one build attempt writes its NDJSON transcript.
 
     The attempt suffix is not cosmetic: the timestamp only resolves to the
     second, and the log is opened for writing, so two attempts that started
     close together would otherwise have the second overwrite the first — losing
     exactly the transcript of the failure that caused the retry.
+
+    `suffix` marks a run that is not a plain first attempt — currently only
+    `answer`, for a session resumed with a reply to its own question.
     """
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    suffix = "" if attempt <= 1 else f"-retry{attempt - 1}"
-    return BUILD_LOG_DIR / f"{stamp}-{_slug(company, 24)}-{_slug(title)}{suffix}.log"
+    tail = "" if attempt <= 1 else f"-retry{attempt - 1}"
+    if suffix:
+        tail = f"-{_slug(suffix, 12)}{tail}"
+    return BUILD_LOG_DIR / f"{stamp}-{_slug(company, 24)}-{_slug(title)}{tail}.log"
 
 
-def command_for(config: Config) -> list[str]:
+def command_for(config: Config, resume: str = "") -> list[str]:
     # Re-render the settings file from its template first. It is generated, and
     # its content depends on where this clone sits, so this is what makes an
     # edited template — or a workspace that has been moved since the file was
@@ -168,6 +221,11 @@ def command_for(config: Config) -> list[str]:
         "--permission-mode", "bypassPermissions",
         "--output-format", "stream-json", "--verbose",
     ]
+    if resume:
+        # Continue the run that stopped to ask instead of starting a new one.
+        # The session already holds CLAUDE.md, the Match Brief and the folder,
+        # which is the whole reason an answer is cheap to deliver this way.
+        cmd += ["--resume", resume]
     if BUILD_SETTINGS_PATH.exists():
         cmd += ["--settings", str(BUILD_SETTINGS_PATH)]
     else:
@@ -283,13 +341,20 @@ def is_transient(detail: str) -> bool:
 
 async def _spawn(prompt: str, config: Config, log_file: Path,
                  on_event: Callable[[dict], None] | None = None,
-                 ) -> tuple[bool, str, str]:
-    """Run one build. Returns (ok, detail, closing).
+                 resume: str = "",
+                 on_session: Callable[[str], None] | None = None,
+                 ) -> RunResult:
+    """Run one build, or continue one with `resume`.
 
-    `closing` is the last few things the run said before it stopped, and is
-    only of interest when it stopped without writing an application — see
+    `RunResult.closing` is the last few things the run said before it stopped,
+    and is only of interest when it stopped without writing an application — see
     `NEEDS_DECISION`. It is read from the same result events as `detail`, so it
     costs nothing to collect and is discarded on every ordinary run.
+
+    `RunResult.session_id` is what makes a stop-and-ask answerable: the CLI puts
+    it on the `system`/`init` event and repeats it on every `result`, and passing
+    it back as `--resume` continues this exact run rather than starting a second
+    one that knows nothing about the folder this one created.
 
     The NDJSON stream is written through to the log line by line rather than
     buffered, so a hung build can be inspected while it is still hung.
@@ -300,8 +365,12 @@ async def _spawn(prompt: str, config: Config, log_file: Path,
     build whose stdout stops being read. Anything it raises is logged and
     swallowed: a defect in progress reporting must not cost anyone an
     application.
+
+    `on_session` fires once, as soon as the id is known, so a build that is later
+    killed or times out is still resumable — waiting for the return value would
+    mean losing the id in exactly the cases where it is worth most.
     """
-    cmd = command_for(config)
+    cmd = command_for(config, resume=resume)
     # no_console: the watcher is detached under pythonw and has no console, so
     # without this the CLI — a .CMD, hence cmd.exe — opens a window and keeps it
     # in front of whatever you are doing for the whole build.
@@ -317,10 +386,11 @@ async def _spawn(prompt: str, config: Config, log_file: Path,
 
     detail = ""
     ok = False
+    session = ""
     turns: list[str] = []
 
     async def pump() -> None:
-        nonlocal detail, ok
+        nonlocal detail, ok, session
         assert process.stdout is not None
         with log_file.open("w", encoding="utf-8") as handle:
             handle.write(f"$ {' '.join(cmd)}\ncwd: {REPO_ROOT}\n\n{prompt}\n\n---\n")
@@ -332,6 +402,16 @@ async def _spawn(prompt: str, config: Config, log_file: Path,
                 event = _parse_event(line)
                 if not event:
                     continue
+                found = str(event.get("session_id") or "")
+                if found and found != session:
+                    # Last one wins: a resumed run reports the id it is
+                    # continuing under, which is the one to store for next time.
+                    session = found
+                    if on_session is not None:
+                        try:
+                            on_session(session)
+                        except Exception:
+                            log.exception("session hook failed; build continues")
                 if event.get("type") == "result":
                     ok = not event.get("is_error", False)
                     detail = "" if ok else _result_detail(event)
@@ -354,8 +434,13 @@ async def _spawn(prompt: str, config: Config, log_file: Path,
         await asyncio.wait_for(asyncio.gather(pump(), process.wait()), timeout)
     except asyncio.TimeoutError:
         _kill_tree(process.pid)
-        return (False, f"timed out after {config.build_timeout_minutes} min",
-                _closing_words(turns))
+        return RunResult(
+            ok=False,
+            detail=f"timed out after {config.build_timeout_minutes} min",
+            closing=_closing_words(turns),
+            session_id=session,
+            log_file=log_file,
+        )
     except (Exception, asyncio.CancelledError):
         # Anything that stops us reading stdout strands the CLI: it blocks on a
         # pipe nobody drains and sits there until the machine reboots. Kill the
@@ -369,7 +454,28 @@ async def _spawn(prompt: str, config: Config, log_file: Path,
     if process.returncode != 0:
         note = f"exit {process.returncode}"
         detail = f"{detail} ({note})" if detail else note
-    return ok and process.returncode == 0, detail, _closing_words(turns)
+    return RunResult(
+        ok=ok and process.returncode == 0,
+        detail=detail,
+        closing=_closing_words(turns),
+        session_id=session,
+        log_file=log_file,
+    )
+
+
+# A `--resume` that names a session the CLI no longer has. Worth telling apart
+# from every other failure: it is the one where retrying the same way is
+# guaranteed to fail again, and starting fresh is guaranteed to work.
+_NO_SESSION = re.compile(
+    r"no conversation found|session .{0,40}not found|invalid session|"
+    r"could not (?:find|resume) session|unknown session",
+    re.IGNORECASE,
+)
+
+
+def session_is_gone(detail: str) -> bool:
+    """Whether a failed resume failed because the session itself is missing."""
+    return bool(detail) and bool(_NO_SESSION.search(detail))
 
 
 async def _lines(stream: asyncio.StreamReader, handle) -> AsyncIterator[bytes]:
@@ -569,11 +675,17 @@ def _fit(text: str, log_file: Path) -> str:
 
 
 def duplicate_message(label: str, existing: dedupe.ExistingApplication) -> str:
+    """A decline the user can overrule, not a verdict.
+
+    The match is a similarity score, so it is sometimes wrong — and when it is,
+    the cost is a missed application that nobody ever sees. Saying how to build
+    it anyway turns that silent loss into one reply.
+    """
     when = existing.applied_on.isoformat() if existing.applied_on else "an unknown date"
     where = relative(existing.folder) if existing.folder else "logged in the tracker"
     return (f"⚠️ <b>Duplicate</b> · {label}\n"
             f"Already applied {when} — {_escape(where)}\n"
-            f"<i>Nothing was built.</i>")
+            f"<i>Nothing was built. Reply \"yes anyway\" to build it regardless.</i>")
 
 
 def _doc_list(documents: tuple[str, ...]) -> str:
@@ -640,9 +752,10 @@ def result_message(label: str, outcome: Outcome, log_file: Path) -> str:
         lines = [f"⏸ <b>Stopped to ask</b> · {label}"]
         if outcome.detail:
             lines.append(_escape(outcome.detail))
-        lines.append("<i>Nothing was drafted. Reply here with what you want "
-                     "done, or approve the posting again once the profile "
-                     "covers it.</i>")
+        lines.append("<i>Nothing was drafted yet, and the folder is being kept "
+                     "while this is open. Answer in this topic — as a reply or "
+                     "a plain message — and the run picks up where it stopped. "
+                     "Say \"no\" to drop it.</i>")
         return _fit("\n\n".join(lines), log_file)
 
     # Anything short of DONE has been cleaned up by now, so the folder path and
@@ -727,6 +840,18 @@ class _ProgressReporter:
         if self.tracker.feed(event):
             self._bump.set()
 
+    def prime(self, path: Path) -> None:
+        """Start the checklist from what an earlier session of this run did.
+
+        Only a resumed build has one. A log that has been moved or deleted is not
+        worth a word to the user and certainly not worth a failed build — the
+        checklist simply starts where it would have anyway.
+        """
+        try:
+            self.tracker.prime(path)
+        except OSError as exc:
+            log.info("no earlier checklist for %s: %s", path.name, exc)
+
     async def stop(self, status: str) -> None:
         """Stop refreshing and leave the final checklist in place."""
         task, self._task = self._task, None
@@ -805,6 +930,11 @@ class Builder:
         # anything arriving now; qsize alone would report an empty queue while a
         # build is running.
         self._busy = False
+        # The in-flight build, so `/cancel` has something to cancel, and whether
+        # its cancellation was asked for — a user cancel and the loop shutting
+        # down arrive as the same exception and must not be settled the same way.
+        self._current: asyncio.Task | None = None
+        self._cancelled = False
 
     @property
     def config(self) -> Config:
@@ -899,7 +1029,8 @@ class Builder:
     # -- api ---------------------------------------------------------------
 
     async def enqueue(self, posting_id: str, note: str,
-                      reply_message_id: int | None = None) -> int:
+                      reply_message_id: int | None = None,
+                      override_duplicate: bool = False) -> int:
         """Accept a job. Returns how many builds are ahead of it.
 
         The count is what the caller needs to decide whether to acknowledge at
@@ -907,11 +1038,46 @@ class Builder:
         when nothing is ahead that announcement lands a second later and a
         separate "Queued …" is the same news twice. Only a non-zero count says
         something the worker's own message will not.
+
+        `override_duplicate` is an explicit "yes anyway" to a decline the user
+        has already read. The check is not re-run — they have seen its verdict
+        and overruled it, and running it again could only reach the same answer.
         """
         ahead = self._queue.qsize() + (1 if self._busy else 0)
         with store.connect() as conn:
             build_id = store.queue_build(conn, posting_id)
-        await self._queue.put(Job(posting_id, note, reply_message_id, build_id))
+        await self._queue.put(Job(posting_id, note, reply_message_id, build_id,
+                                  override_duplicate=override_duplicate))
+        self._ensure_worker()
+        return ahead
+
+    async def answer(self, question, text: str) -> int:
+        """Continue the run that asked `question` with the user's reply.
+
+        Queued like any other job so it takes its turn behind whatever is
+        building — a resumed run spawns the same CLI, in the same workspace, and
+        two of those at once is exactly what the queue exists to prevent.
+
+        The session id comes from the question rather than from the build row so
+        that a question written before the session was known still answers
+        cleanly: `_attempt` falls back to a fresh build with the answer as its
+        note, and says so.
+        """
+        session = ""
+        posting_id = question["posting_id"]
+        try:
+            session = question["session_id"] or ""
+        except (IndexError, KeyError):
+            session = ""
+        ahead = self._queue.qsize() + (1 if self._busy else 0)
+        with store.connect() as conn:
+            build_id = store.queue_build(conn, posting_id)
+            # The asking build's log, so the continuation's checklist can start
+            # from what that half of the run already did rather than from zero.
+            earlier = store.build_log_path(conn, question["build_id"])
+        await self._queue.put(Job(
+            posting_id, "", question["message_id"], build_id,
+            answer=text, resume_session=session, resume_log=earlier))
         self._ensure_worker()
         return ahead
 
@@ -919,14 +1085,75 @@ class Builder:
     def pending(self) -> int:
         return self._queue.qsize()
 
+    async def cancel_current(self) -> bool:
+        """Stop the build that is running now. Returns whether there was one.
+
+        The task is cancelled rather than the process killed directly: `_spawn`
+        already kills the CLI and its latexmk children on the way out (see the
+        `CancelledError` branch there), so cancelling the task is what makes the
+        process cleanup happen. `_cancelled` tells the worker this was asked for
+        rather than the loop shutting down, which are otherwise the same
+        exception.
+        """
+        task = self._current
+        if task is None or task.done():
+            return False
+        self._cancelled = True
+        task.cancel()
+        return True
+
+    def drop_queued(self, posting_id: str = "") -> Job | None:
+        """Remove a not-yet-started job from the queue, and return it.
+
+        With no `posting_id`, the job that would have started next goes. That is
+        what `/cancel` wants when nothing is running: the queue has no visible
+        handles, so "the next one" is the only thing a user can name without
+        one, and it is the one they just queued by mistake.
+
+        `asyncio.Queue` has no removal, so this drains and refills — safe here
+        because the worker only ever takes from the queue between builds and
+        this runs on the same loop, so no `get` can interleave.
+        """
+        kept: list[Job] = []
+        dropped: Job | None = None
+        while True:
+            try:
+                job = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            self._queue.task_done()
+            if dropped is None and (not posting_id
+                                    or job.posting_id == posting_id):
+                dropped = job
+                with store.connect() as conn:
+                    store.finish_build(conn, job.build_id, CANCELLED,
+                                       detail="dropped from the queue")
+                continue
+            kept.append(job)
+        for job in kept:
+            self._queue.put_nowait(job)
+        return dropped
+
     # -- worker ------------------------------------------------------------
 
     async def _run_forever(self) -> None:
         while True:
             job = await self._queue.get()
             self._busy = True
+            self._cancelled = False
             try:
-                await self._handle(job)
+                # A task rather than a bare await, so `/cancel` has something to
+                # cancel. Awaiting `_handle` inline left the in-flight build with
+                # no handle at all, and the only way to stop one was to kill the
+                # watcher.
+                self._current = asyncio.create_task(self._handle(job))
+                await self._current
+            except asyncio.CancelledError:
+                if not self._cancelled:
+                    # The loop is shutting down, not the build being stopped.
+                    raise
+                log.info("build cancelled by the user: %s", job.posting_id)
+                await self._settle_cancelled(job)
             except Exception:
                 # One bad build must not take the worker down with it, or every
                 # later approval silently queues behind a dead task.
@@ -937,8 +1164,40 @@ class Builder:
                 await self._reply(job, "❌ <b>Build failed</b>\nSee watcher.log.",
                                   topic="failed_build")
             finally:
+                self._current = None
                 self._busy = False
                 self._queue.task_done()
+
+    async def _settle_cancelled(self, job: Job) -> None:
+        """Record and tidy after a build the user stopped.
+
+        `_finish` never runs on this path, so everything it would have done —
+        closing the build row, erasing the half-application — has to happen
+        here. A cancelled build leaves the same debris as a failed one, and the
+        same rule applies: a folder with no PDFs reads as an application already
+        sent.
+        """
+        with store.connect() as conn:
+            row = store.get_posting(conn, job.posting_id)
+        company = row["company"] if row else ""
+        title = row["title"] if row else ""
+        label = f"<b>{_escape(company)}</b> — {_escape(title)}"
+
+        cleaned = ""
+        if company and title:
+            outcome = await asyncio.to_thread(
+                locate_output, company, title, self.config)
+            if outcome.folder:
+                cleaned = await asyncio.to_thread(
+                    clean_up, outcome.folder, "cancelled by the user")
+        with store.connect() as conn:
+            store.finish_build(conn, job.build_id, CANCELLED, detail=cleaned)
+        await self._reply(
+            job,
+            f"🛑 <b>Cancelled</b> · {label}\n"
+            + (f"🧹 {_escape(cleaned)}" if cleaned
+               else "<i>Nothing was left behind.</i>"),
+            topic="failed_build")
 
     async def _reply(self, job: Job, text: str,
                      topic: str = "processing_build") -> int | None:
@@ -951,14 +1210,31 @@ class Builder:
 
         Returns the message id, which only the opener has any use for: it is the
         message the live checklist then edits for the rest of the build.
+
+        Every message is recorded against its posting, which is what makes it a
+        valid reply target: `run_watcher._resolve` reads `notifications` to work
+        out which posting a reply is about, so a build report that was never
+        recorded got the user "that message isn't one of mine" — including the
+        one that ended by asking them to reply. The kind is `build` rather than
+        `instant` or `digest` precisely so this cannot be mistaken for having
+        pinged the posting (see `store.PING_KINDS`).
         """
-        return await self.notifier.send(text, reply_to=job.reply_message_id,
-                                        topic=topic)
+        message_id = await self.notifier.send(text, reply_to=job.reply_message_id,
+                                              topic=topic)
+        if message_id:
+            try:
+                with store.connect() as conn:
+                    store.record_notification(conn, job.posting_id,
+                                              self.notifier.chat_id,
+                                              message_id, kind="build")
+            except Exception:  # noqa: BLE001 — the report itself already landed
+                log.exception("could not record build message %s", message_id)
+        return message_id
 
     async def _attempt(self, job: Job, company: str, title: str, url: str,
                        label: str,
                        reporter: "_ProgressReporter | None" = None,
-                       ) -> tuple[bool, str, str, Path]:
+                       ) -> RunResult:
         """Run the build, retrying only if the far end was briefly unwell.
 
         A 503 from the API — or from a gateway in front of it — can land on the
@@ -988,33 +1264,70 @@ class Builder:
 
         Each attempt gets its own log file; the returned one is the last, which
         is the one whose failure is being reported.
-        """
-        prompt = build_prompt(url, job.note)
-        attempts = self.config.build_retries + 1
-        log_file = log_path_for(company, title)
 
-        for attempt in range(1, attempts + 1):
-            log_file = log_path_for(company, title, attempt)
+        An answer to a stop-and-ask runs through the same loop, with the reply as
+        the prompt and `--resume` pointing at the session that asked. If that
+        session has gone, one fresh build is started with the answer as its note
+        — the run has to begin again, but the user's decision is not lost.
+        """
+        answering = job.is_answer
+        prompt = answer_prompt(job.answer) if answering else build_prompt(url, job.note)
+        resume = job.resume_session if answering else ""
+        suffix = "answer" if answering else ""
+        attempts = self.config.build_retries + 1
+        log_file = log_path_for(company, title, suffix=suffix)
+
+        def remember(session_id: str) -> None:
+            with store.connect() as conn:
+                store.set_build_session(conn, job.build_id, session_id)
+
+        attempt = 0
+        while attempt < attempts:
+            attempt += 1
+            log_file = log_path_for(company, title, attempt, suffix=suffix)
             with store.connect() as conn:
                 store.mark_build_running(conn, job.build_id, str(log_file))
 
-            log.info("build start: %s — %s (attempt %d/%d)",
-                     company, title, attempt, attempts)
+            log.info("build start: %s — %s (attempt %d/%d)%s",
+                     company, title, attempt, attempts,
+                     f", resuming {resume}" if resume else "")
             if reporter is not None:
                 reporter.begin_attempt(attempt, attempts)
             try:
-                ok, detail, closing = await _spawn(
+                run = await _spawn(
                     prompt, self.config, log_file,
-                    on_event=reporter.feed if reporter is not None else None)
+                    on_event=reporter.feed if reporter is not None else None,
+                    resume=resume, on_session=remember)
             except Exception:
                 # Route a crash into the ordinary failure path rather than up to
                 # the worker's catch-all, which knows no company and so cannot
                 # clean up.
                 log.exception("build crashed: %s — %s", company, title)
-                return False, "the build crashed, see watcher.log", "", log_file
+                return RunResult(ok=False,
+                                 detail="the build crashed, see watcher.log",
+                                 log_file=log_file)
 
-            if ok or attempt == attempts or not is_transient(detail):
-                return ok, detail, closing, log_file
+            if not run.ok and resume and session_is_gone(run.detail):
+                # The session the question belongs to is gone — usually because
+                # the CLI's history was pruned. Retrying the resume can only fail
+                # the same way, so start over once with the answer as the note.
+                # This does not spend a retry: nothing was attempted, and the
+                # fresh build deserves the same budget any other build gets.
+                log.warning("session %s is gone — rebuilding with the answer as "
+                            "a note: %s — %s", resume, company, title)
+                await self._reply(
+                    job,
+                    f"↩️ <b>That session has expired</b> · {label}\n"
+                    "<i>Starting a fresh build with your answer as the "
+                    "instruction.</i>")
+                prompt = build_prompt(url, job.answer)
+                resume = ""
+                suffix = ""
+                attempt -= 1
+                continue
+
+            if run.ok or attempt == attempts or not is_transient(run.detail):
+                return run
 
             # Ask the disk before spending another half hour. `_finish` runs the
             # same check and salvages what it finds, so this only decides whether
@@ -1024,28 +1337,28 @@ class Builder:
                 locate_output, company, title, self.config)
             if done.status == DONE:
                 log.info("documents already complete — not retrying %s: %s — %s",
-                         detail, company, title)
-                return ok, detail, closing, log_file
+                         run.detail, company, title)
+                return run
 
             if done.folder:
                 # Erase the half-application before the next attempt, so the two
                 # cannot end up side by side under slightly different names.
                 await asyncio.to_thread(clean_up, done.folder,
-                                        f"retrying after {detail}")
+                                        f"retrying after {run.detail}")
 
             delay = self.config.build_retry_delay_seconds
             log.warning("transient failure (%s) — retrying in %ds: %s — %s",
-                        detail, delay, company, title)
+                        run.detail, delay, company, title)
             await self._reply(
                 job,
-                f"🔁 <b>Retrying</b> · {label}\n{_escape(detail)}\n"
+                f"🔁 <b>Retrying</b> · {label}\n{_escape(run.detail)}\n"
                 f"<i>Attempt {attempt + 1} of {attempts}, in {delay}s. "
                 "The partial folder was removed first.</i>",
             )
             await asyncio.sleep(delay)
 
         # for-else territory; unreachable while attempts >= 1.
-        return False, "no build attempt ran", "", log_file
+        return RunResult(ok=False, detail="no build attempt ran", log_file=log_file)
 
     async def _announce_ready(self, job: Job, company: str, title: str,
                               label: str) -> bool:
@@ -1108,18 +1421,51 @@ class Builder:
         company, title, url = row["company"], row["title"], row["url"]
         label = f"<b>{_escape(company)}</b> — {_escape(title)}"
 
-        existing, partial = check_duplicate(company, title, self.config)
+        # An answer continues a run that has already been through this check, and
+        # an explicit "yes anyway" has already overruled it. Neither is worth
+        # asking twice.
+        existing, partial = (None, "")
+        if not job.is_answer and not job.override_duplicate:
+            existing, partial = check_duplicate(company, title, self.config)
         if existing is not None:
+            # Logged, because the silence was half of why a declined build read
+            # as one that never started: nothing reached watcher.log at all, so
+            # the only trace was a Telegram message in a topic the user was not
+            # watching.
+            log.info("declined as a duplicate: %s — %s (%s)",
+                     company, title, existing.describe())
             with store.connect() as conn:
                 store.finish_build(conn, job.build_id, DUPLICATE,
                                    folder=existing.folder,
                                    detail=existing.describe())
-            await self._reply(job, duplicate_message(label, existing))
+            # Targeted, not Processing: this is a decision waiting on the user,
+            # and the same topic their approval was in. Sending it to Processing
+            # put the answer to "yes" in a topic nobody reads for answers.
+            message_id = await self._reply(job, duplicate_message(label, existing),
+                                           topic="targeted_build")
+            if message_id:
+                with store.connect() as conn:
+                    store.ask_question(
+                        conn, job.build_id, job.posting_id,
+                        store.QUESTION_DUPLICATE, self.notifier.chat_id,
+                        message_id,
+                        thread_id=self.config.topic_for("targeted_build"),
+                        question=f"Already applied — {existing.describe()}")
+                    # No `folder`, deliberately. That column is "what this run
+                    # left behind, to be erased if it is abandoned", and this
+                    # run left nothing — the folder belongs to a finished
+                    # application. Recording it would point `no` and `/cancel`
+                    # at a complete application and delete it, along with its
+                    # tracker row. `describe()` already names it in the
+                    # question text, which is all the user needs.
             return
 
-        opener = f"🛠 Building {label}…"
-        if partial:
-            opener += f"\n<i>{_escape(partial)}</i>"
+        if job.is_answer:
+            opener = f"💬 Continuing {label}…"
+        else:
+            opener = f"🛠 Building {label}…"
+            if partial:
+                opener += f"\n<i>{_escape(partial)}</i>"
         message_id = await self._reply(job, opener)
 
         # That opener becomes the live checklist, edited in place for the rest of
@@ -1130,6 +1476,11 @@ class Builder:
         if message_id is not None and self.config.build_progress_updates:
             reporter = _ProgressReporter(self.notifier, self.config, job, label,
                                          message_id, footer=partial)
+            if job.resume_log:
+                # Off the loop: this reads and decodes the asking session's whole
+                # event stream, and the loop is about to be the only thing
+                # draining the new one's stdout.
+                await asyncio.to_thread(reporter.prime, Path(job.resume_log))
             reporter.start()
             with store.connect() as conn:
                 store.set_build_progress_message(conn, job.build_id, message_id)
@@ -1145,19 +1496,18 @@ class Builder:
         verdict = "Interrupted"
         try:
             try:
-                ok, detail, closing, log_file = await self._attempt(
-                    job, company, title, url, label, reporter)
+                run = await self._attempt(job, company, title, url, label,
+                                          reporter)
             finally:
                 announced = await _settle(announcer)
-            verdict = await self._finish(job, company, title, label, ok, detail,
-                                         closing, log_file, announced)
+            verdict = await self._finish(job, company, title, label, run,
+                                         announced)
         finally:
             if reporter is not None:
                 await reporter.stop(verdict)
 
     async def _finish(self, job: Job, company: str, title: str, label: str,
-                      ok: bool, detail: str, closing: str, log_file: Path,
-                      announced: bool) -> str:
+                      run: RunResult, announced: bool) -> str:
         """Settle a finished run: salvage, clean up, record, report.
 
         Split out of `_handle` so the live checklist can be stopped in a
@@ -1168,10 +1518,11 @@ class Builder:
         # Look on disk either way. A failed run still leaves a folder behind,
         # and finding it is the only way to know what needs erasing — or whether
         # there is anything there worth keeping.
+        log_file = run.log_file or log_path_for(company, title)
         outcome = locate_output(company, title, self.config)
         outcome.announced = announced
-        if not ok:
-            failure = detail or "the CLI reported an error"
+        if not run.ok:
+            failure = run.detail or "the CLI reported an error"
             if outcome.status == DONE:
                 # The run died, but every required PDF is on disk. Interview
                 # Prep is where a long build spends its last ten minutes, so an
@@ -1210,18 +1561,21 @@ class Builder:
             # report either way.
             log.info("build stopped without documents: %s — %s", company, title)
             outcome = Outcome(status=NEEDS_DECISION, folder=outcome.folder,
-                              detail=closing or outcome.detail,
+                              detail=run.closing or outcome.detail,
                               documents=outcome.documents,
                               tracker_row=outcome.tracker_row,
                               announced=announced)
 
-        if outcome.status in (FAILED, INCOMPLETE, NEEDS_DECISION):
-            # The reason is a one-line note in the cleanup log, so a stop-and-ask
-            # passes its label rather than the paragraphs it stopped to say.
-            reason = ("the build stopped to ask" if outcome.status == NEEDS_DECISION
-                      else outcome.detail or outcome.status)
+        if outcome.status in (FAILED, INCOMPLETE):
             outcome.cleaned = await asyncio.to_thread(
-                clean_up, outcome.folder, reason)
+                clean_up, outcome.folder, outcome.detail or outcome.status)
+        # A stop-and-ask keeps its folder. The run is paused, not abandoned: the
+        # archived posting, the Match Brief and the Research Note are most of what
+        # makes resuming cheap, and erasing them turned every answer into a
+        # rebuild from step 00. Safe against the "a stale folder reads as already
+        # applied" rule in CLAUDE.md, because `dedupe.is_complete` requires the
+        # PDFs — a folder without them never blocks anything. Cleanup moves to
+        # whichever comes first: the user declining, or the question expiring.
 
         record = " · ".join(
             part for part in (outcome.detail, outcome.salvaged, outcome.cleaned)
@@ -1243,8 +1597,21 @@ class Builder:
             topic = "completed_build"
         elif outcome.status == NEEDS_DECISION:
             topic = "targeted_build"
-        await self._reply(job, result_message(label, outcome, log_file),
-                          topic=topic)
+        message_id = await self._reply(job, result_message(label, outcome, log_file),
+                                       topic=topic)
+
+        if outcome.status == NEEDS_DECISION and message_id:
+            # Record what was asked, where it was asked, and which session can
+            # answer it. Without this row the message is just text: the reply
+            # handler has nothing to match a reply against, and the run's own
+            # instruction to "answer here" is a promise nothing keeps.
+            with store.connect() as conn:
+                store.ask_question(
+                    conn, job.build_id, job.posting_id,
+                    store.QUESTION_STOP_AND_ASK, self.notifier.chat_id,
+                    message_id, thread_id=self.config.topic_for(topic),
+                    question=outcome.detail, folder=outcome.folder,
+                    session_id=run.session_id)
 
         if outcome.status == DONE:
             return "Complete" if not outcome.salvaged else "Complete (salvaged)"

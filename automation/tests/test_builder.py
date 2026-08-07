@@ -55,6 +55,7 @@ class Notifier:
 
     def __init__(self, *, edit_alive: bool = True) -> None:
         self.config = config()
+        self.chat_id = "-1001234567890"
         self.sent: list[tuple[str, str | None, int | None]] = []
         self.edits: list[tuple[int, str]] = []
         self.notices: list[str] = []
@@ -228,6 +229,20 @@ def test_the_command_carries_the_model_the_guard_and_the_stream(guarded) -> None
     assert cmd[cmd.index("--settings") + 1] == str(guarded)
 
 
+def test_a_resumed_run_carries_the_session_it_is_continuing(guarded) -> None:
+    """`--resume` is what makes an answer an answer rather than a second build.
+
+    It goes ahead of `--settings` so the guard is still the last word on what
+    the resumed run is allowed to do.
+    """
+    cmd = command_for(config(), resume="sess-abc")
+
+    assert "--resume" in cmd
+    assert cmd[cmd.index("--resume") + 1] == "sess-abc"
+    assert cmd.index("--resume") < cmd.index("--settings")
+    assert "--resume" not in command_for(config()), "an ordinary build is fresh"
+
+
 def test_a_missing_settings_file_refuses_to_build(guarded, monkeypatch) -> None:
     """bypassPermissions with no deny list and no hook is strictly more
     dangerous than not building at all."""
@@ -285,6 +300,24 @@ def test_the_prompt_is_the_url_and_the_note_and_nothing_else() -> None:
     assert build_prompt("https://x.test/job", "add German") == \
         "https://x.test/job\nadd German"
     assert build_prompt("https://x.test/job", "") == "https://x.test/job"
+
+
+def test_an_answer_is_the_answer_and_nothing_else() -> None:
+    """A resumed session already holds CLAUDE.md, the Match Brief and the
+    folder. Re-stating the URL there would be a second source of truth for a
+    run that already has the first one."""
+    assert builder.answer_prompt("  Go with option 2.  ") == "Go with option 2."
+    assert builder.answer_prompt("") == ""
+
+
+def test_a_gone_session_is_recognised_from_what_the_cli_says() -> None:
+    """The only signal available: the CLI reports it in the result text, and
+    the exit code is the same one every other failure uses."""
+    assert builder.session_is_gone(
+        "No conversation found with session ID: be5f59ca (exit 1)")
+    assert builder.session_is_gone("Session ID abc123 not found")
+    assert not builder.session_is_gone("API Error: 503 Service Unavailable")
+    assert not builder.session_is_gone("")
 
 
 # ===========================================================================
@@ -466,30 +499,34 @@ def spawnable(monkeypatch):
         state.process = state.make()
         return state.process
 
-    monkeypatch.setattr(builder, "command_for", lambda cfg: state.cmd)
+    def command_for(cfg, resume=""):
+        state.resume = resume
+        return state.cmd + (["--resume", resume] if resume else [])
+
+    monkeypatch.setattr(builder, "command_for", command_for)
     monkeypatch.setattr(builder.asyncio, "create_subprocess_exec", create)
     monkeypatch.setattr(builder, "_kill_tree", state.killed.append)
     return state
 
 
 def spawn(spawnable, log_file: Path, make_process, *, minutes=45,
-          on_event=None):
+          on_event=None, resume="", on_session=None):
     spawnable.make = make_process
     return asyncio.run(builder._spawn(
         "https://x.test/job", config(timeout_minutes=minutes), log_file,
-        on_event=on_event))
+        on_event=on_event, resume=resume, on_session=on_session))
 
 
 def test_a_clean_run_reports_success_and_writes_its_transcript(
         spawnable, tmp_path) -> None:
     log_file = tmp_path / "build.log"
-    ok, detail, closing = spawn(spawnable, log_file, lambda: Process([
+    run = spawn(spawnable, log_file, lambda: Process([
         event(type="system", subtype="init"),
         event(type="result", is_error=False, result="All documents rendered."),
     ]))
 
-    assert (ok, detail) == (True, "")
-    assert closing == "All documents rendered."
+    assert (run.ok, run.detail) == (True, "")
+    assert run.closing == "All documents rendered."
     written = log_file.read_text(encoding="utf-8")
     assert written.startswith("$ claude")
     assert "https://x.test/job" in written, "the prompt is part of the record"
@@ -500,14 +537,14 @@ def test_a_clean_run_reports_success_and_writes_its_transcript(
 
 
 def test_a_failing_result_carries_its_reason_out(spawnable, tmp_path) -> None:
-    ok, detail, _ = spawn(spawnable, tmp_path / "b.log", lambda: Process([
+    run = spawn(spawnable, tmp_path / "b.log", lambda: Process([
         event(type="result", is_error=True, subtype="success",
               result="API Error: Server error mid-response"),
     ], returncode=1))
 
-    assert ok is False
-    assert "Server error mid-response" in detail
-    assert "(exit 1)" in detail, "the exit code rides alongside, not instead"
+    assert run.ok is False
+    assert "Server error mid-response" in run.detail
+    assert "(exit 1)" in run.detail, "the exit code rides alongside, not instead"
 
 
 def test_a_non_zero_exit_after_a_clean_result_is_still_a_failure(
@@ -515,12 +552,12 @@ def test_a_non_zero_exit_after_a_clean_result_is_still_a_failure(
     """The CLI has reported success on the stream and then died on the way out.
     Recording that as a completed build is how a run with no PDFs gets filed as
     done."""
-    ok, detail, _ = spawn(spawnable, tmp_path / "b.log", lambda: Process([
+    run = spawn(spawnable, tmp_path / "b.log", lambda: Process([
         event(type="result", is_error=False, result="Done."),
     ], returncode=1))
 
-    assert ok is False
-    assert detail == "exit 1"
+    assert run.ok is False
+    assert run.detail == "exit 1"
 
 
 def test_the_closing_words_keep_the_last_few_turns_not_just_the_last(
@@ -529,42 +566,42 @@ def test_the_closing_words_keep_the_last_few_turns_not_just_the_last(
     subagents, so a build's question is rarely in its final turn — one run asked
     whether to claim experience the profile does not carry and signed off with
     "still holding on your decision from above"."""
-    _, _, closing = spawn(spawnable, tmp_path / "b.log", lambda: Process([
+    run = spawn(spawnable, tmp_path / "b.log", lambda: Process([
         event(type="result", is_error=False, result="Phase A dispatched."),
         event(type="result", is_error=False,
               result="Should I claim agent-framework experience?"),
         event(type="result", is_error=False, result="Still holding."),
     ]))
 
-    assert "Should I claim agent-framework experience?" in closing
-    assert "Still holding." in closing
+    assert "Should I claim agent-framework experience?" in run.closing
+    assert "Still holding." in run.closing
 
 
 def test_a_repeated_turn_is_not_recorded_twice(spawnable, tmp_path) -> None:
-    _, _, closing = spawn(spawnable, tmp_path / "b.log", lambda: Process([
+    run = spawn(spawnable, tmp_path / "b.log", lambda: Process([
         event(type="result", is_error=False, result="Same words."),
         event(type="result", is_error=False, result="Same words."),
     ]))
-    assert closing == "Same words."
+    assert run.closing == "Same words."
 
 
 def test_the_closing_words_are_capped(spawnable, tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(builder, "CLOSING_CHARS", 40)
-    _, _, closing = spawn(spawnable, tmp_path / "b.log", lambda: Process([
+    run = spawn(spawnable, tmp_path / "b.log", lambda: Process([
         event(type="result", is_error=False, result="word " * 100),
     ]))
-    assert len(closing) <= 40 and closing.endswith("…")
+    assert len(run.closing) <= 40 and run.closing.endswith("…")
 
 
 def test_a_hung_build_is_killed_along_with_everything_it_started(
         spawnable, tmp_path) -> None:
     """A bare terminate leaves node and latexmk alive holding the deliverable
     folder open, and the next attempt then fails for an unrelated reason."""
-    ok, detail, _ = spawn(spawnable, tmp_path / "b.log",
-                          lambda: Process([], hang=True), minutes=0.001)
+    run = spawn(spawnable, tmp_path / "b.log",
+                lambda: Process([], hang=True), minutes=0.001)
 
-    assert ok is False
-    assert "timed out after" in detail
+    assert run.ok is False
+    assert "timed out after" in run.detail
     assert spawnable.killed == [PID]
 
 
@@ -590,6 +627,57 @@ def test_every_event_is_offered_to_the_progress_hook(spawnable,
     assert [e.get("type") for e in seen] == ["system", "result"]
 
 
+def test_the_session_id_is_taken_off_the_stream(spawnable, tmp_path) -> None:
+    """The id arrives on the init event and is repeated on every result. It is
+    what turns "the run stopped to ask" into something answerable."""
+    run = spawn(spawnable, tmp_path / "b.log", lambda: Process([
+        event(type="system", subtype="init", session_id="sess-abc"),
+        event(type="result", is_error=False, session_id="sess-abc",
+              result="Should I claim that?"),
+    ]))
+
+    assert run.session_id == "sess-abc"
+
+
+def test_the_session_is_handed_over_the_moment_it_is_known(
+        spawnable, tmp_path) -> None:
+    """Not on the way out. A build that is killed or times out is exactly the
+    one worth resuming, and waiting for the return value loses the id in every
+    case where it is worth most."""
+    seen: list[str] = []
+    spawn(spawnable, tmp_path / "b.log", lambda: Process([
+        event(type="system", subtype="init", session_id="sess-abc"),
+        event(type="result", is_error=False, session_id="sess-abc",
+              result="Done."),
+    ]), on_session=seen.append)
+
+    assert seen == ["sess-abc"], "once, on the first sighting"
+
+
+def test_a_broken_session_hook_does_not_cost_an_application(
+        spawnable, tmp_path, caplog) -> None:
+    """Same rule as the progress hook: bookkeeping must not end a build."""
+    def explode(_session: str) -> None:
+        raise ZeroDivisionError("store is wedged")
+
+    with caplog.at_level("ERROR", logger="watcher.build"):
+        run = spawn(spawnable, tmp_path / "b.log", lambda: Process([
+            event(type="system", subtype="init", session_id="sess-abc"),
+            event(type="result", is_error=False, result="Done."),
+        ]), on_session=explode)
+
+    assert run.ok is True
+    assert "session hook failed" in caplog.text
+
+
+def test_the_resume_reaches_the_command(spawnable, tmp_path) -> None:
+    spawn(spawnable, tmp_path / "b.log", lambda: Process([
+        event(type="result", is_error=False, result="Done."),
+    ]), resume="sess-abc")
+
+    assert spawnable.resume == "sess-abc"
+
+
 def test_a_broken_progress_hook_does_not_cost_an_application(
         spawnable, tmp_path, caplog) -> None:
     """A defect in progress reporting must not end a build. This is the whole
@@ -598,11 +686,11 @@ def test_a_broken_progress_hook_does_not_cost_an_application(
         raise ZeroDivisionError("progress bug")
 
     with caplog.at_level("ERROR", logger="watcher.build"):
-        ok, _, _ = spawn(spawnable, tmp_path / "b.log", lambda: Process([
+        run = spawn(spawnable, tmp_path / "b.log", lambda: Process([
             event(type="result", is_error=False, result="Done."),
         ]), on_event=explode)
 
-    assert ok is True
+    assert run.ok is True
     assert "progress hook failed" in caplog.text
 
 
@@ -1229,6 +1317,221 @@ def test_recovery_is_not_reachable_from_an_ordinary_approval(db) -> None:
     assert row["status"] in ("queued", "running")
 
 
+def question(db_path, posting_id: str = "p1", *, kind: str = "stop_and_ask",
+             message_id: int = 501, session_id: str = "sess-1") -> int:
+    """An open question, recorded the way `_finish` records one."""
+    with real_store.connect() as conn:
+        build = real_store.queue_build(conn, posting_id)
+        return real_store.ask_question(
+            conn, build, posting_id, kind, "-100123", message_id,
+            thread_id=162, question="Sponsorship?", session_id=session_id)
+
+
+def test_an_answer_is_queued_as_a_job_carrying_the_session_to_resume(
+        db) -> None:
+    """The whole point of the answer path: the job the worker picks up has to
+    say both what the user said and which run said it, or the resume falls back
+    to a fresh build that has never seen the question."""
+    posting(db)
+    qid = question(db)
+
+    async def scenario():
+        worker = Builder(Notifier())
+        with real_store.connect() as conn:
+            row = real_store.open_question(conn, qid)
+        ahead = await worker.answer(row, "EU only, decline it")
+        job = worker._queue.get_nowait()
+        await worker.stop()
+        return ahead, job
+
+    ahead, job = asyncio.run(scenario())
+    assert ahead == 0
+    assert job.posting_id == "p1"
+    assert job.answer == "EU only, decline it"
+    assert job.resume_session == "sess-1"
+    assert job.reply_message_id == 501, (
+        "the continuation hangs off the message that asked")
+    assert job.note == "", "an answer is not a build note"
+
+
+def test_an_answer_to_a_question_with_no_session_still_queues(db) -> None:
+    """A question written before the session id was known — an older row, or a
+    run killed before its first event — must still be answerable. `_attempt`
+    falls back to a fresh build with the answer as its note, which is worth
+    more than refusing to accept the reply at all."""
+    posting(db)
+    qid = question(db, session_id="")
+
+    async def scenario():
+        worker = Builder(Notifier())
+        with real_store.connect() as conn:
+            row = real_store.open_question(conn, qid)
+        await worker.answer(row, "go ahead")
+        job = worker._queue.get_nowait()
+        await worker.stop()
+        return job
+
+    assert asyncio.run(scenario()).resume_session == ""
+
+
+def test_an_answer_carries_the_asking_sessions_log(db, tmp_path) -> None:
+    """So the continuation's checklist can start from what the first half did.
+
+    Resuming keeps the CLI session but not the tracker, and without this the
+    steps taken before the question went out stay blank for the rest of the
+    build — under a header that reads `0/13 steps` while the CV is being drafted.
+    """
+    posting(db)
+    earlier = tmp_path / "first-half.log"
+    earlier.write_text("{}\n", encoding="utf-8")
+    with real_store.connect() as conn:
+        build = real_store.queue_build(conn, "p1")
+        real_store.mark_build_running(conn, build, str(earlier))
+        qid = real_store.ask_question(
+            conn, build, "p1", "stop_and_ask", "-100123", 501,
+            thread_id=162, question="Sponsorship?", session_id="sess-1")
+
+    async def scenario():
+        worker = Builder(Notifier())
+        with real_store.connect() as conn:
+            row = real_store.open_question(conn, qid)
+        await worker.answer(row, "yes")
+        job = worker._queue.get_nowait()
+        await worker.stop()
+        return job
+
+    assert asyncio.run(scenario()).resume_log == str(earlier)
+
+
+def test_an_answer_to_a_build_that_never_logged_anything_still_queues(db) -> None:
+    """A duplicate decline is a question with no run behind it at all, so there
+    is no earlier checklist to inherit and nothing to look up. It answers like
+    any other."""
+    posting(db)
+    qid = question(db, kind="duplicate")
+
+    async def scenario():
+        worker = Builder(Notifier())
+        with real_store.connect() as conn:
+            row = real_store.open_question(conn, qid)
+        await worker.answer(row, "yes anyway")
+        job = worker._queue.get_nowait()
+        await worker.stop()
+        return job
+
+    assert asyncio.run(scenario()).resume_log == ""
+
+
+def test_an_answer_records_its_own_build_row(db) -> None:
+    """A resumed run is a build like any other — it spawns the CLI, writes to
+    the folder and can be interrupted, so a restart has to find it in `builds`
+    or it becomes the one kind of run nothing reports on."""
+    posting(db)
+    qid = question(db)
+
+    async def scenario():
+        worker = Builder(Notifier())
+        with real_store.connect() as conn:
+            row = real_store.open_question(conn, qid)
+        await worker.answer(row, "yes")
+        await worker.stop()
+
+    asyncio.run(scenario())
+    with real_store.connect() as conn:
+        rows = conn.execute("SELECT posting_id FROM builds ORDER BY id"
+                            ).fetchall()
+    assert len(rows) == 2, "the question's own build, then the continuation"
+    assert {r["posting_id"] for r in rows} == {"p1"}
+
+
+def test_dropping_the_next_job_leaves_the_rest_in_order(db) -> None:
+    """`/cancel` with nothing running aims at the queue head. Refilling an
+    `asyncio.Queue` by hand is easy to get wrong in a way no user would report:
+    the wrong job goes, or the survivors come back reversed and build in an
+    order nobody asked for."""
+    posting(db, "p1", title="Data Scientist")
+    posting(db, "p2", title="ML Engineer")
+    posting(db, "p3", title="AI Engineer")
+
+    async def scenario():
+        worker = Builder(Notifier())
+        for pid in ("p1", "p2", "p3"):
+            await worker.enqueue(pid, "")
+        dropped = worker.drop_queued()
+        rest = [worker._queue.get_nowait().posting_id for _ in range(2)]
+        await worker.stop()
+        return dropped, rest
+
+    dropped, rest = asyncio.run(scenario())
+    assert dropped is not None and dropped.posting_id == "p1"
+    assert rest == ["p2", "p3"]
+
+
+def test_a_dropped_job_is_named_rather_than_taken_off_the_front(db) -> None:
+    posting(db, "p1")
+    posting(db, "p2", title="ML Engineer")
+
+    async def scenario():
+        worker = Builder(Notifier())
+        await worker.enqueue("p1", "")
+        await worker.enqueue("p2", "")
+        dropped = worker.drop_queued("p2")
+        rest = [worker._queue.get_nowait().posting_id]
+        await worker.stop()
+        return dropped, rest
+
+    dropped, rest = asyncio.run(scenario())
+    assert dropped is not None and dropped.posting_id == "p2"
+    assert rest == ["p1"]
+
+
+def test_a_dropped_job_is_recorded_as_cancelled(db) -> None:
+    """Its row was written at enqueue time and would otherwise sit 'queued'
+    forever — which is exactly what boot recovery reads as "interrupted by a
+    restart", so the next start would announce a build the user cancelled."""
+    posting(db)
+
+    async def scenario():
+        worker = Builder(Notifier())
+        await worker.enqueue("p1", "")
+        worker.drop_queued()
+        await worker.stop()
+
+    asyncio.run(scenario())
+    with real_store.connect() as conn:
+        row = conn.execute("SELECT status, detail FROM builds").fetchone()
+    assert row["status"] == builder.CANCELLED
+    assert "queue" in row["detail"]
+
+
+def test_dropping_from_an_empty_queue_says_so(db) -> None:
+    """`/cancel` calls this whenever nothing is running, including when nothing
+    is waiting either. `None` is how it learns to say that."""
+    async def scenario():
+        worker = Builder(Notifier())
+        dropped = worker.drop_queued()
+        await worker.stop()
+        return dropped
+
+    assert asyncio.run(scenario()) is None
+
+
+def test_dropping_a_job_that_is_not_queued_leaves_the_queue_alone(db) -> None:
+    posting(db)
+
+    async def scenario():
+        worker = Builder(Notifier())
+        await worker.enqueue("p1", "")
+        dropped = worker.drop_queued("nowhere")
+        pending = worker.pending
+        await worker.stop()
+        return dropped, pending
+
+    dropped, pending = asyncio.run(scenario())
+    assert dropped is None
+    assert pending == 1, "an unmatched id must not silently empty the queue"
+
+
 # ===========================================================================
 # _handle: the paths before the build starts
 # ===========================================================================
@@ -1282,6 +1585,153 @@ async def _never_spawned(*args, **kwargs):
     raise AssertionError("a duplicate must not spawn a build")
 
 
+def test_the_decline_is_logged_and_sent_where_the_approval_was(
+        db, monkeypatch, caplog) -> None:
+    """Both halves of why a declined build read as one that never started.
+
+    Nothing reached `watcher.log` at all, so the log said the job had vanished
+    between the queue and the worker; and the message went to Processing while
+    the `yes` that caused it was in New postings, so the only trace was in a
+    topic nobody reads for answers.
+    """
+    posting(db)
+    monkeypatch.setattr(
+        builder, "check_duplicate",
+        lambda c, t, cfg: (hit(folder="2026/Acme/2026-08-01 - DS"), ""))
+    monkeypatch.setattr(builder, "_spawn", _never_spawned)
+
+    notifier = Notifier()
+    with real_store.connect() as conn:
+        build = real_store.queue_build(conn, "p1")
+    with caplog.at_level("INFO", logger="watcher.build"):
+        handle(Builder(notifier), Job("p1", "", 42, build))
+
+    assert "declined as a duplicate" in caplog.text
+    text, topic, _ = notifier.sent[0]
+    assert topic == "targeted_build"
+    assert "yes anyway" in text, "a decline the user can overrule"
+
+
+def test_a_decline_is_recorded_as_a_question(db, monkeypatch) -> None:
+    """So `/pending` lists it and a reply to it resolves — the same machinery a
+    stop-and-ask uses, because both are the watcher waiting on a decision."""
+    posting(db)
+    monkeypatch.setattr(
+        builder, "check_duplicate",
+        lambda c, t, cfg: (hit(folder="2026/Acme/2026-08-01 - DS"), ""))
+    monkeypatch.setattr(builder, "_spawn", _never_spawned)
+
+    notifier = Notifier()
+    with real_store.connect() as conn:
+        build = real_store.queue_build(conn, "p1")
+    handle(Builder(notifier), Job("p1", "", 42, build))
+
+    with real_store.connect() as conn:
+        row = conn.execute("SELECT * FROM questions").fetchone()
+    assert row["kind"] == real_store.QUESTION_DUPLICATE
+    assert row["message_id"] == notifier.next_id
+    assert row["answered_at"] is None
+    # The matched folder is named in the text and nowhere else. `folder` means
+    # "what this run left behind, erase it if the run is abandoned", and this
+    # run left nothing — that folder holds a finished application, so filling
+    # the column in would make `no` delete it.
+    assert not row["folder"]
+    assert "2026/Acme/2026-08-01 - DS" in row["question"]
+
+
+def test_an_override_skips_the_duplicate_check_entirely(db, monkeypatch) -> None:
+    """`yes anyway`. The check is not re-run and softened — it is not run.
+
+    Softening it would need a second threshold nobody set; the user has already
+    looked at the folder this would duplicate and said build it anyway.
+    """
+    posting(db)
+
+    def refuse(company, title, cfg):
+        raise AssertionError("the override must not consult the matcher")
+
+    monkeypatch.setattr(builder, "check_duplicate", refuse)
+    monkeypatch.setattr(builder, "locate_output",
+                        lambda c, t, cfg: Outcome(status=FAILED))
+    monkeypatch.setattr(builder, "clean_up", lambda folder, reason: "")
+
+    async def attempt(self, job, company, title, url, label, reporter=None):
+        return builder.RunResult(ok=True, log_file=Path("b.log"))
+
+    monkeypatch.setattr(Builder, "_attempt", attempt)
+
+    notifier = Notifier()
+    with real_store.connect() as conn:
+        build = real_store.queue_build(conn, "p1")
+    handle(Builder(notifier),
+           Job("p1", "", 42, build, override_duplicate=True))
+
+    assert "🛠 Building" in notifier.sent[0][0]
+
+
+def test_an_answer_says_it_is_continuing_rather_than_starting(
+        db, monkeypatch) -> None:
+    """The run it belongs to already has a folder. "Building" would read as a
+    second application for the same job."""
+    posting(db)
+
+    def refuse(company, title, cfg):
+        raise AssertionError("an answer has already been through this check")
+
+    monkeypatch.setattr(builder, "check_duplicate", refuse)
+    monkeypatch.setattr(builder, "locate_output",
+                        lambda c, t, cfg: Outcome(status=FAILED))
+    monkeypatch.setattr(builder, "clean_up", lambda folder, reason: "")
+
+    async def attempt(self, job, company, title, url, label, reporter=None):
+        return builder.RunResult(ok=True, log_file=Path("b.log"))
+
+    monkeypatch.setattr(Builder, "_attempt", attempt)
+
+    notifier = Notifier()
+    with real_store.connect() as conn:
+        build = real_store.queue_build(conn, "p1")
+    handle(Builder(notifier),
+           Job("p1", "", 42, build, answer="Option 2.",
+               resume_session="sess-abc"))
+
+    assert "💬 Continuing" in notifier.sent[0][0]
+
+
+def test_every_build_message_becomes_a_valid_reply_target(db) -> None:
+    """The literal symptom the user hit: the run ended by asking them to reply,
+    and the reply came back "that message isn't one of mine" — because `_reply`
+    never recorded what it sent, and `_resolve` reads `notifications`."""
+    posting(db)
+    notifier = Notifier()
+    worker = Builder(notifier)
+    job = Job("p1", "", 42, 1)
+
+    message_id = asyncio.run(worker._reply(job, "⏸ Stopped to ask"))
+
+    with real_store.connect() as conn:
+        found = real_store.postings_for_message(conn, notifier.chat_id,
+                                                message_id)
+    assert found == ["p1"]
+
+
+def test_a_build_message_is_not_mistaken_for_having_pinged_the_posting(
+        db) -> None:
+    """`unnotified_in_band` reads the same table. Recording build reports there
+    with a ping's kind would silence the ping for a posting never pinged."""
+    posting(db)
+    notifier = Notifier()
+    worker = Builder(notifier)
+
+    asyncio.run(worker._reply(Job("p1", "", 42, 1), "🛠 Building…"))
+
+    with real_store.connect() as conn:
+        row = conn.execute(
+            "SELECT kind FROM notifications WHERE posting_id = 'p1'").fetchone()
+    assert row["kind"] == "build"
+    assert "build" not in real_store.PING_KINDS
+
+
 def test_the_opener_carries_the_partial_note_and_becomes_the_checklist(
         db, monkeypatch, identity) -> None:
     """The opener is stored so a restart can find it: the queue lives in
@@ -1295,7 +1745,7 @@ def test_the_opener_carries_the_partial_note_and_becomes_the_checklist(
     monkeypatch.setattr(builder, "clean_up", lambda folder, reason: "")
 
     async def attempt(self, job, company, title, url, label, reporter=None):
-        return True, "", "", Path("b.log")
+        return builder.RunResult(ok=True, log_file=Path("b.log"))
 
     monkeypatch.setattr(Builder, "_attempt", attempt)
 
@@ -1327,7 +1777,7 @@ def test_no_checklist_is_started_when_progress_is_switched_off(
 
     async def attempt(self, job, company, title, url, label, reporter=None):
         assert reporter is None
-        return True, "", "", Path("b.log")
+        return builder.RunResult(ok=True, log_file=Path("b.log"))
 
     monkeypatch.setattr(Builder, "_attempt", attempt)
 
@@ -1350,25 +1800,25 @@ def test_a_crash_inside_the_spawn_becomes_an_ordinary_failure(
     which knows no company and so cannot clean up."""
     posting(db)
 
-    async def explode(prompt, cfg, log_file, on_event=None):
+    async def explode(prompt, cfg, log_file, **kwargs):
         raise OSError("the pipe closed")
 
     monkeypatch.setattr(builder, "_spawn", explode)
     monkeypatch.setattr(builder, "log_path_for",
-                        lambda c, t, attempt=1: Path(f"b{attempt}.log"))
+                        lambda c, t, attempt=1, suffix="": Path(f"b{attempt}.log"))
 
     worker = Builder(Notifier())
     with real_store.connect() as conn:
         build = real_store.queue_build(conn, "p1")
 
     with caplog.at_level("ERROR", logger="watcher.build"):
-        ok, detail, closing, log_file = asyncio.run(worker._attempt(
+        run = asyncio.run(worker._attempt(
             Job("p1", "", None, build), "Acme", "Data Scientist",
             "https://x.test/job", "<b>Acme</b> — DS"))
 
-    assert ok is False
-    assert detail == "the build crashed, see watcher.log"
-    assert closing == "" and log_file == Path("b1.log")
+    assert run.ok is False
+    assert run.detail == "the build crashed, see watcher.log"
+    assert run.closing == "" and run.log_file == Path("b1.log")
     assert "build crashed" in caplog.text
 
 
@@ -1376,13 +1826,10 @@ def test_each_attempt_is_told_which_one_it_is(db, monkeypatch) -> None:
     posting(db)
     seen: list[tuple[int, int]] = []
 
-    async def spawned(prompt, cfg, log_file, on_event=None):
-        return True, "", "", ""
-
     monkeypatch.setattr(builder, "_spawn",
                         lambda *a, **kw: _ok_spawn())
     monkeypatch.setattr(builder, "log_path_for",
-                        lambda c, t, attempt=1: Path("b.log"))
+                        lambda c, t, attempt=1, suffix="": Path("b.log"))
 
     class Rep:
         def begin_attempt(self, attempt, attempts):
@@ -1398,7 +1845,7 @@ def test_each_attempt_is_told_which_one_it_is(db, monkeypatch) -> None:
 
 
 async def _ok_spawn():
-    return True, "", "", ""
+    return builder.RunResult(ok=True)
 
 
 # ===========================================================================

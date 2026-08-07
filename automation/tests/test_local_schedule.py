@@ -155,8 +155,8 @@ def test_the_daily_jobs_are_registered_with_aware_times(monkeypatch) -> None:
     """
     app = _build(monkeypatch)
 
-    assert len(app.job_queue.daily) == 4, (
-        "digest, heartbeat, kb, and the startup-log trim")
+    assert len(app.job_queue.daily) == 5, (
+        "digest, heartbeat, kb, the startup-log trim, and question expiry")
     for when in app.job_queue.daily:
         assert when.tzinfo is not None, (
             "run_daily was handed a naive time — JobQueue reads that as UTC")

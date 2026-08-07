@@ -26,6 +26,12 @@ from .normalize import Posting
 
 log = logging.getLogger("watcher.store")
 
+#: `notifications.kind` values that mean "this posting was announced to the
+#: user". Everything else in that table — currently `build` — is recorded only
+#: so the message can be replied to, and must not count as having been pinged.
+PING_KINDS: tuple[str, ...] = ("instant", "digest")
+_PING_KINDS_SQL = ", ".join(f"'{kind}'" for kind in PING_KINDS)
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS postings (
     id              TEXT PRIMARY KEY,
@@ -108,6 +114,34 @@ CREATE TABLE IF NOT EXISTS builds (
 );
 CREATE INDEX IF NOT EXISTS idx_builds_posting ON builds(posting_id);
 
+-- A build that ended waiting on the user rather than on itself: it stopped to
+-- ask something, or it was declined as a duplicate. Both are decisions, not
+-- outcomes, and until this table existed there was nowhere to record that one
+-- was outstanding — so the question went out to Telegram and any answer to it
+-- was rejected as "not one of mine".
+--
+-- `message_id` is the message that carried the question and `thread_id` the
+-- topic it landed in; between them a reply *and* a bare message in that topic
+-- can both be resolved back to the posting. `session_id` is the CLI session to
+-- resume when the answer arrives.
+CREATE TABLE IF NOT EXISTS questions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    build_id    INTEGER NOT NULL REFERENCES builds(id),
+    posting_id  TEXT    NOT NULL REFERENCES postings(id),
+    kind        TEXT    NOT NULL,
+    chat_id     TEXT    NOT NULL,
+    message_id  INTEGER NOT NULL,
+    thread_id   INTEGER,
+    question    TEXT,
+    folder      TEXT,
+    session_id  TEXT,
+    asked_at    TEXT    NOT NULL,
+    answered_at TEXT,
+    answer      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_questions_open ON questions(answered_at);
+CREATE INDEX IF NOT EXISTS idx_questions_msg  ON questions(chat_id, message_id);
+
 CREATE TABLE IF NOT EXISTS source_health (
     source               TEXT PRIMARY KEY,
     last_ok_at           TEXT,
@@ -176,6 +210,14 @@ _MIGRATIONS: list[str] = [
     # still-in-progress for good. With it, boot can edit them to say so.
     """
     ALTER TABLE builds ADD COLUMN progress_message_id INTEGER;
+    """,
+    # The CLI session a build ran in, so a run that stopped to ask can be
+    # *continued* with the answer rather than started again from the URL. The
+    # session already holds CLAUDE.md, the Match Brief and the Research Note;
+    # without this column the only way to act on an answer is to throw all of
+    # that away and pay for it a second time.
+    """
+    ALTER TABLE builds ADD COLUMN session_id TEXT;
     """,
 ]
 
@@ -285,6 +327,22 @@ def get_posting(conn: sqlite3.Connection, posting_id: str) -> sqlite3.Row | None
     return conn.execute("SELECT * FROM postings WHERE id = ?", (posting_id,)).fetchone()
 
 
+def posting_for_url(conn: sqlite3.Connection, canonical: str) -> sqlite3.Row | None:
+    """The posting at a URL, newest first if a board has listed it twice.
+
+    Keyed on `canonical_url` — the tracking-parameter-stripped form — because
+    the URL a user pastes from their phone carries whatever the board's share
+    button added to it, and that is never what was stored.
+    """
+    if not canonical:
+        return None
+    return conn.execute(
+        "SELECT * FROM postings WHERE canonical_url = ? "
+        "ORDER BY first_seen_at DESC LIMIT 1",
+        (canonical,),
+    ).fetchone()
+
+
 def recent_postings(conn: sqlite3.Connection, limit: int = 50) -> list[sqlite3.Row]:
     return list(conn.execute(
         "SELECT * FROM postings ORDER BY first_seen_at DESC LIMIT ?", (limit,)
@@ -336,14 +394,22 @@ def get_verdict(conn: sqlite3.Connection, posting_id: str) -> sqlite3.Row | None
 
 def unnotified_in_band(conn: sqlite3.Connection, low: int, high: int | None = None
                        ) -> list[sqlite3.Row]:
-    """Scored postings in a score band that have never been messaged about."""
+    """Scored postings in a score band that have never been *pinged* about.
+
+    Restricted to the two announcement kinds rather than any notifications row
+    at all. Build messages are recorded here too, so that they can be replied
+    to — and a posting reachable by `/build` before it was ever scored would
+    otherwise carry a row that suppresses its own ping for good.
+    """
     upper = high if high is not None else 10_000
     return list(conn.execute(
-        """SELECT p.*, v.score, v.verdict, v.why_json, v.gaps_json,
-                  v.stop_and_ask, v.stop_reason
+        f"""SELECT p.*, v.score, v.verdict, v.why_json, v.gaps_json,
+                   v.stop_and_ask, v.stop_reason
            FROM postings p JOIN verdicts v ON v.posting_id = p.id
            WHERE v.score >= ? AND v.score < ?
-             AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.posting_id = p.id)
+             AND NOT EXISTS (SELECT 1 FROM notifications n
+                              WHERE n.posting_id = p.id
+                                AND n.kind IN ({_PING_KINDS_SQL}))
            ORDER BY v.score DESC""",
         (low, upper),
     ))
@@ -573,6 +639,28 @@ def set_build_progress_message(conn: sqlite3.Connection, build_id: int,
     )
 
 
+def set_build_session(conn: sqlite3.Connection, build_id: int,
+                      session_id: str) -> None:
+    """Remember the CLI session this build ran in, so it can be resumed.
+
+    Written as soon as the id is known rather than at the end, because the runs
+    worth resuming are exactly the ones that did not finish normally.
+    """
+    conn.execute("UPDATE builds SET session_id = ? WHERE id = ?",
+                 (session_id, build_id))
+
+
+def build_log_path(conn: sqlite3.Connection, build_id: int) -> str:
+    """Where a build wrote its event stream, or "" if it never got that far.
+
+    A build that was declined as a duplicate has no log at all, so the empty
+    string is an ordinary answer here and not a missing row.
+    """
+    row = conn.execute("SELECT log_path FROM builds WHERE id = ?",
+                       (build_id,)).fetchone()
+    return (row["log_path"] or "") if row else ""
+
+
 def unfinished_builds(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Builds left mid-flight by a crash or a kill.
 
@@ -601,6 +689,107 @@ def build_for_posting(conn: sqlite3.Connection, posting_id: str) -> sqlite3.Row 
         "SELECT * FROM builds WHERE posting_id = ? ORDER BY id DESC LIMIT 1",
         (posting_id,),
     ).fetchone()
+
+
+# --------------------------------------------------------------------------
+# open questions
+# --------------------------------------------------------------------------
+
+#: Kinds of question a build can end on. `stop_and_ask` is CLAUDE.md's own
+#: stop condition reaching Telegram; `duplicate` is this end declining to build
+#: something that looks already applied to.
+QUESTION_STOP_AND_ASK = "stop_and_ask"
+QUESTION_DUPLICATE = "duplicate"
+
+_QUESTION_COLUMNS = """q.*, p.company, p.title, p.url"""
+
+
+def ask_question(conn: sqlite3.Connection, build_id: int, posting_id: str,
+                 kind: str, chat_id: str, message_id: int,
+                 thread_id: int | None = None, question: str = "",
+                 folder: str = "", session_id: str = "") -> int:
+    """Record that a build ended waiting on the user, and how to reach it."""
+    cur = conn.execute(
+        """INSERT INTO questions
+           (build_id, posting_id, kind, chat_id, message_id, thread_id,
+            question, folder, session_id, asked_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (build_id, posting_id, kind, str(chat_id), int(message_id), thread_id,
+         question, folder, session_id, _now()),
+    )
+    return int(cur.lastrowid)
+
+
+def open_questions(conn: sqlite3.Connection, thread_id: int | None = None
+                   ) -> list[sqlite3.Row]:
+    """Unanswered questions, oldest first, with the posting they are about.
+
+    `thread_id` narrows to one forum topic. It is a filter and not a fallback:
+    a caller that wants "this topic, or everything if that finds nothing" has
+    to ask twice, because silently widening the search is how a message meant
+    for one posting gets applied to another.
+    """
+    sql = f"""SELECT {_QUESTION_COLUMNS} FROM questions q
+                JOIN postings p ON p.id = q.posting_id
+               WHERE q.answered_at IS NULL"""
+    params: list[Any] = []
+    if thread_id is not None:
+        sql += " AND q.thread_id = ?"
+        params.append(int(thread_id))
+    return list(conn.execute(sql + " ORDER BY q.id", params))
+
+
+def open_question(conn: sqlite3.Connection, question_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        f"""SELECT {_QUESTION_COLUMNS} FROM questions q
+              JOIN postings p ON p.id = q.posting_id
+             WHERE q.id = ? AND q.answered_at IS NULL""",
+        (question_id,),
+    ).fetchone()
+
+
+def question_for_message(conn: sqlite3.Connection, chat_id: str,
+                         message_id: int) -> sqlite3.Row | None:
+    """The open question a message carried, if it carried one."""
+    return conn.execute(
+        f"""SELECT {_QUESTION_COLUMNS} FROM questions q
+              JOIN postings p ON p.id = q.posting_id
+             WHERE q.chat_id = ? AND q.message_id = ? AND q.answered_at IS NULL
+             ORDER BY q.id DESC LIMIT 1""",
+        (str(chat_id), int(message_id)),
+    ).fetchone()
+
+
+def question_for_posting(conn: sqlite3.Connection, posting_id: str
+                         ) -> sqlite3.Row | None:
+    """The open question about a posting, if one is outstanding."""
+    return conn.execute(
+        f"""SELECT {_QUESTION_COLUMNS} FROM questions q
+              JOIN postings p ON p.id = q.posting_id
+             WHERE q.posting_id = ? AND q.answered_at IS NULL
+             ORDER BY q.id DESC LIMIT 1""",
+        (posting_id,),
+    ).fetchone()
+
+
+def close_question(conn: sqlite3.Connection, question_id: int,
+                   answer: str = "") -> None:
+    conn.execute(
+        "UPDATE questions SET answered_at = ?, answer = ? WHERE id = ?",
+        (_now(), answer, question_id),
+    )
+
+
+def expired_questions(conn: sqlite3.Connection, before: dt.datetime
+                      ) -> list[sqlite3.Row]:
+    """Open questions asked before a cutoff, for the housekeeping sweep."""
+    return list(conn.execute(
+        f"""SELECT {_QUESTION_COLUMNS} FROM questions q
+              JOIN postings p ON p.id = q.posting_id
+             WHERE q.answered_at IS NULL AND q.asked_at < ?
+             ORDER BY q.id""",
+        (before.isoformat(timespec="seconds"),),
+    ))
 
 
 # --------------------------------------------------------------------------

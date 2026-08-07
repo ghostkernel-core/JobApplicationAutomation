@@ -59,9 +59,19 @@ from .logsetup import force_utf8
 # States a row moves through. `pending` rows are the ones still to come, and
 # showing them is the point: the reader can see how much is left, not only what
 # has happened.
-PENDING, RUNNING, DONE, FAILED = "pending", "running", "done", "failed"
+#
+# `skipped` is the one that is not about this run's own progress. A step the
+# flow went past without the tracker ever seeing it would otherwise stay
+# `pending` for the rest of the build, and a blank row above rows that are
+# ticking along reads as "still stuck on step 1" when the truth is "that step is
+# not coming". It happens for two ordinary reasons: a resumed run did its early
+# steps in the session before this one, and an orchestrator may do a small step
+# itself rather than dispatch the agent this watches for. Marked, the row is
+# information; blank, it is a wrong answer.
+PENDING, RUNNING, DONE, FAILED, SKIPPED = (
+    "pending", "running", "done", "failed", "skipped")
 
-_MARK = {PENDING: "⬜", RUNNING: "⏳", DONE: "✅", FAILED: "❌"}
+_MARK = {PENDING: "⬜", RUNNING: "⏳", DONE: "✅", FAILED: "❌", SKIPPED: "➖"}
 
 
 @dataclass(frozen=True)
@@ -72,6 +82,13 @@ class Step:
     run actually reaches them, so an English-only build never shows a German row
     it will never fill in, and a run whose prep step is skipped does not look
     unfinished forever.
+
+    `phase` is the concurrency group from CLAUDE.md, and it is what makes a
+    skipped row detectable: only a step in a *later* phase proves the flow has
+    left an earlier one behind. Position in this list cannot carry that, because
+    much of the pipeline is deliberately parallel — the CV and the cover letter
+    are drafted at once, so whichever started first would mark the other skipped
+    a second before it began.
     """
 
     key: str
@@ -81,36 +98,46 @@ class Step:
     flag: str = ""           # substring that must be present for this variant
     anti_flag: str = ""      # substring that must be absent for this variant
     optional: bool = False
+    phase: int = 0           # concurrency group: same number means "at the same time"
 
 
 # The pipeline in CLAUDE.md order. The thirteen non-optional rows are the
 # English-only run; everything else appears when it happens.
+#
+# The phase numbers are CLAUDE.md's own parallel phases, and they are
+# deliberately coarse — a wrong number here costs a row briefly marked skipped
+# just before it starts, so where the ordering is a matter of the orchestrator's
+# discretion the steps share a number rather than guess. Phase 5 is the whole of
+# CLAUDE.md's Phase C for that reason: the documents track and the prep track are
+# started in the same message and interleave freely, so the prep agent beginning
+# says nothing about whether the renderer has.
 STEPS: tuple[Step, ...] = (
-    Step("archive",       "Archive posting",  agent="00-posting-archiver"),
-    Step("match",         "Match brief",      agent="01-experience-matcher"),
-    Step("research",      "Company research", agent="02-company-role-researcher"),
-    Step("cv_draft",      "CV draft",         agent="03-cv-writer-en"),
-    Step("letter_draft",  "Cover letter",     agent="05-cover-letter-writer-en"),
-    Step("cv_verify",     "Verify CV",        agent="04-cv-verifier-en"),
-    Step("letter_verify", "Verify letter",    agent="06-cover-letter-verifier-en"),
-    Step("german",        "German versions",  agent="07-translator-de", optional=True),
+    Step("archive",       "Archive posting",  agent="00-posting-archiver", phase=0),
+    Step("match",         "Match brief",      agent="01-experience-matcher", phase=1),
+    Step("research",      "Company research", agent="02-company-role-researcher", phase=1),
+    Step("cv_draft",      "CV draft",         agent="03-cv-writer-en", phase=2),
+    Step("letter_draft",  "Cover letter",     agent="05-cover-letter-writer-en", phase=2),
+    Step("cv_verify",     "Verify CV",        agent="04-cv-verifier-en", phase=3),
+    Step("letter_verify", "Verify letter",    agent="06-cover-letter-verifier-en", phase=3),
+    Step("german",        "German versions",  agent="07-translator-de", optional=True,
+         phase=4),
     # The two renderer calls and the two QA calls are told apart by their own
     # flags. The application pass must not match the prep pass, or a run would
     # look like it had rendered its documents twice and never made the study aid.
     Step("render_docs",   "Render documents", script="render_latex_application.py",
-         anti_flag="interview_prep_payload"),
+         anti_flag="interview_prep_payload", phase=5),
     Step("qa_docs",       "QA documents",     script="qa_application.py",
-         anti_flag="--require-prep"),
-    Step("prep",          "Interview prep",   agent="08-interview-prep"),
+         anti_flag="--require-prep", phase=5),
+    Step("prep",          "Interview prep",   agent="08-interview-prep", phase=5),
     Step("render_prep",   "Render prep",      script="render_latex_application.py",
-         flag="interview_prep_payload", optional=True),
+         flag="interview_prep_payload", optional=True, phase=5),
     Step("qa_prep",       "QA prep",          script="qa_application.py",
-         flag="--require-prep", optional=True),
-    Step("proofread",     "Proofread",        agent="09-proofreader"),
+         flag="--require-prep", optional=True, phase=5),
+    Step("proofread",     "Proofread",        agent="09-proofreader", phase=6),
     Step("clean",         "Clean folder",     script="clean_deliverable.py",
-         optional=True),
-    Step("final_qa",      "Final QA",         agent="10-final-verifier"),
-    Step("tracker",       "Tracker",          script="append_tracker_entry.py"),
+         optional=True, phase=7),
+    Step("final_qa",      "Final QA",         agent="10-final-verifier", phase=8),
+    Step("tracker",       "Tracker",          script="append_tracker_entry.py", phase=9),
 )
 
 @dataclass
@@ -181,6 +208,24 @@ def _escape(text: str) -> str:
     return (text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
+def _events(path: Path) -> Iterable[dict[str, Any]]:
+    """Decoded events from a build log on disk.
+
+    The log is the same NDJSON the live tracker sees, with the command line and
+    the prompt written above it, so non-JSON lines are skipped rather than
+    treated as corruption.
+    """
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+
 class Tracker:
     """Turns a build's event stream into a checklist.
 
@@ -219,11 +264,10 @@ class Tracker:
 
         Only the orchestrator's own tool calls count. `parent_tool_use_id` is set
         on everything a subagent does inside its own turn, and those are the
-        overwhelming majority of events in any build.
+        overwhelming majority of events in any build — with one exception, which
+        `_survives_nesting` explains.
         """
         if not isinstance(event, dict):
-            return False
-        if event.get("parent_tool_use_id") is not None:
             return False
 
         kind = event.get("type")
@@ -232,20 +276,55 @@ class Tracker:
         if kind not in ("assistant", "user"):
             return False
 
+        blocks = [block for block
+                  in (event.get("message") or {}).get("content") or []
+                  if isinstance(block, dict)]
+        if event.get("parent_tool_use_id") is not None:
+            blocks = [block for block in blocks if self._survives_nesting(block)]
+            if not blocks:
+                return False
+
         stamp = self._stamp(event)
         self.last_event = stamp
         if self.started_at is None:
             self.started_at = stamp
 
         changed = False
-        for block in (event.get("message") or {}).get("content") or []:
-            if not isinstance(block, dict):
-                continue
+        for block in blocks:
             if block.get("type") == "tool_use":
                 changed |= self._start(block, stamp)
             elif block.get("type") == "tool_result":
                 changed |= self._finish(block, stamp)
         return changed
+
+    def _survives_nesting(self, block: dict[str, Any]) -> bool:
+        """Whether a block that carries a parent id is still a pipeline step.
+
+        Normally the parent id is the whole filter and nothing survives: it is
+        set on everything a subagent does inside its own turn, which outnumbers
+        the orchestrator's own calls by roughly fourteen to one.
+
+        It stops being reliable across a resume. When a build stops to ask while
+        a background agent is still open, the continuation stamps the
+        orchestrator's next calls with *that* agent's id. The Roche run dispatched
+        its matcher and researcher exactly as it should have, both ran to
+        completion in 2m 09s and 4m 20s, and both arrived looking like work the
+        archiver had done inside its own turn — so both were dropped, and the
+        rows they should have filled were indistinguishable from steps that never
+        happened at all.
+
+        A pipeline agent is safe to take either way, because only the
+        orchestrator dispatches the numbered agents: nested, it is a
+        misattribution rather than a subagent's own business. A script is not
+        safe — subagents run the renderer and the QA pass for their own reasons,
+        and taking those is precisely the firehose the parent id keeps out. A
+        result is taken only for a row already open, which is the same rule said
+        in the other direction.
+        """
+        if block.get("type") == "tool_result":
+            use_id = str(block.get("tool_use_id") or "")
+            return use_id in self._open or use_id in self._closed
+        return block.get("name") == "Agent" and self._match(block) is not None
 
     def _stamp(self, event: dict[str, Any]) -> float:
         """The moment an event happened, advancing the tracker's clock."""
@@ -266,12 +345,15 @@ class Tracker:
         subtype = event.get("subtype")
         task_id = str(event.get("task_id") or "")
 
-        if subtype == "task_progress":
+        if subtype in ("task_progress", "task_notification"):
+            # The notification carries a final figure of its own, and it is the
+            # only one that covers the stretch between the last progress ping and
+            # the agent actually stopping. Reading the pings alone reported the
+            # Roche researcher at 3m 28s for 4m 20s of work — every step
+            # undercounted by however long it was quiet before it finished.
             spent = (event.get("usage") or {}).get("duration_ms")
             if task_id and isinstance(spent, (int, float)):
                 self._spent[task_id] = max(self._spent.get(task_id, 0.0), float(spent) / 1000)
-            return False
-
         if subtype != "task_notification":
             return False
         use_id = str(event.get("tool_use_id") or "")
@@ -306,7 +388,65 @@ class Tracker:
         use_id = block.get("id")
         if use_id:
             self._open[str(use_id)] = key
+        self._mark_skips()
         return True
+
+    def _mark_skips(self) -> None:
+        """Mark what the flow has left behind, now that it has reached this step.
+
+        Everything still untouched in an *earlier* phase than the furthest one
+        seen is not waiting its turn — its turn has been and gone. Marking it is
+        the whole difference between a checklist that says "three steps happened
+        elsewhere and the fourth is running" and one that says nothing has
+        started at all.
+
+        Nothing here is final. A step that begins after it was written off simply
+        starts, and `_start` puts it back to running with a fresh clock, which is
+        why the phases can afford to be coarse.
+        """
+        reached = max((step.phase for step in STEPS if self.rows[step.key].seen),
+                      default=-1)
+        for step in STEPS:
+            row = self.rows[step.key]
+            if row.state == PENDING and step.phase < reached:
+                row.state = SKIPPED
+
+    def prime(self, path: Path) -> None:
+        """Absorb an earlier session's log before this run's own events arrive.
+
+        Answering a stop-and-ask resumes the same CLI session, but the tracker is
+        new and sees only what happens after the resume. The steps the first
+        session finished therefore sat blank for the rest of the build, under a
+        header reading `0/13 steps` while the CV was being drafted.
+
+        Feeding that session's log in first restores those rows with the
+        durations it recorded. Whatever it left running is marked skipped rather
+        than carried over: the second session either redoes it, which starts the
+        row again, or it does not — and a row left open by a session that has
+        ended would measure its age against this build's clock and report an hour
+        that nobody spent.
+        """
+        live, self.live = self.live, False
+        try:
+            for event in _events(path):
+                self.feed(event)
+        finally:
+            self.live = live
+
+        for row in self.rows.values():
+            if row.state == RUNNING:
+                row.state = SKIPPED
+                row.started = row.finished = None
+        # Those tool_use ids belong to a session that has ended. Kept, a live
+        # result could close a row against one of them.
+        self._open.clear()
+        self._closed.clear()
+        self._spent.clear()
+        # The clock restarts with the resumed run; only the rows carry over.
+        self.clock = 0.0
+        self.started_at = None
+        self.last_event = None
+        self._mark_skips()
 
     def _finish(self, block: dict[str, Any], stamp: float) -> bool:
         use_id = str(block.get("tool_use_id") or "")
@@ -375,8 +515,16 @@ class Tracker:
         return [self.rows[step.key] for step in STEPS if self.rows[step.key].visible]
 
     def counts(self) -> tuple[int, int]:
+        """Rows that will not change again, over rows shown.
+
+        Skipped counts as settled. It is nothing to be proud of, but leaving it
+        out pinned the header at `0/13 steps` on a resumed build that was four
+        steps in, and a counter that cannot move is worse than one that credits a
+        step the run was right to pass over.
+        """
         rows = self.visible_rows
-        return sum(1 for r in rows if r.state in (DONE, FAILED)), len(rows)
+        settled = (DONE, FAILED, SKIPPED)
+        return sum(1 for r in rows if r.state in settled), len(rows)
 
     def total_elapsed(self, now: float) -> float:
         if self.started_at is None:
@@ -409,23 +557,10 @@ class Tracker:
 # --------------------------------------------------------------------------
 
 def replay(path: Path, now: Callable[[], float] = time.time) -> Tracker:
-    """Rebuild the checklist of a build that has already run, from its log.
-
-    The log is the same NDJSON the live tracker sees, with the command line and
-    the prompt written above it, so non-JSON lines are skipped rather than
-    treated as corruption.
-    """
+    """Rebuild the checklist of a build that has already run, from its log."""
     tracker = Tracker(now=now, live=False)
-    with path.open(encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            tracker.feed(event)
+    for event in _events(path):
+        tracker.feed(event)
     return tracker
 
 

@@ -87,17 +87,33 @@ class _Config:
     duplicate_lookback_days = 365
     build_retries = 0
     build_timeout_minutes = 45
+    build_progress_updates = False
+
+    def topic_for(self, kind: str) -> int | None:
+        return {"targeted_build": 162, "failed_build": 168,
+                "completed_build": 165}.get(kind)
 
 
 class _Store:
     """Stands in for `watcher.store`, recording what the build was filed as."""
 
+    QUESTION_STOP_AND_ASK = "stop_and_ask"
+
     def __init__(self) -> None:
         self.finished: list[tuple[str, str, str]] = []
+        self.asked: list[dict] = []
+        self.sessions: list[tuple[int, str]] = []
 
     @contextlib.contextmanager
     def connect(self, path=None):
         yield None
+
+    def ask_question(self, conn, build_id, posting_id, kind, chat_id,
+                     message_id, thread_id=None, question="", folder="",
+                     session_id=""):
+        self.asked.append({"kind": kind, "message_id": message_id,
+                           "session_id": session_id, "folder": folder})
+        return len(self.asked)
 
     def get_posting(self, conn, posting_id):
         return {"company": "Acme", "title": "Data Scientist",
@@ -108,6 +124,9 @@ class _Store:
 
     def mark_build_running(self, conn, build_id, log_file):
         pass
+
+    def set_build_session(self, conn, build_id, session_id):
+        self.sessions.append((build_id, session_id))
 
 
 class _Builder:
@@ -122,15 +141,17 @@ class _Builder:
     def __init__(self, ok: bool, detail: str, announce: bool,
                  closing: str = "") -> None:
         self.config = _Config()
+        self.notifier = type("N", (), {"chat_id": "-100999"})()
         self.sent: list[str] = []
         self.topics: list[str] = []
         self._ok, self._detail, self._announce = ok, detail, announce
         self._closing = closing
 
     async def _reply(self, job, text: str,
-                     topic: str = "processing_build") -> None:
+                     topic: str = "processing_build") -> int:
         self.sent.append(text)
         self.topics.append(topic)
+        return 700 + len(self.sent)
 
     async def _announce_ready(self, job, company, title, label) -> bool:
         if self._announce:
@@ -143,7 +164,9 @@ class _Builder:
         # would during a real build.
         await asyncio.sleep(0)
         await asyncio.sleep(0)
-        return self._ok, self._detail, self._closing, Path("build.log")
+        return builder.RunResult(ok=self._ok, detail=self._detail,
+                                 closing=self._closing,
+                                 log_file=Path("build.log"))
 
 
 def _run(monkeypatch, *, ok: bool, detail: str, disk: Outcome,
@@ -293,13 +316,18 @@ class _Retrier:
         self.sent.append(text)
 
 
-def _drive(monkeypatch, *, spawns, disk: Outcome):
+def _spawned(ok: bool, detail: str = "") -> builder.RunResult:
+    return builder.RunResult(ok=ok, detail=detail)
+
+
+def _drive(monkeypatch, *, spawns, disk: Outcome, job: Job | None = None):
     """Run the real `_attempt` over a fixed sequence of `_spawn` results."""
     trace: list[str] = []
     results = list(spawns)
 
-    async def fake_spawn(prompt, config, log_file, on_event=None):
-        trace.append("spawn")
+    async def fake_spawn(prompt, config, log_file, on_event=None, resume="",
+                         on_session=None):
+        trace.append(f"spawn:{resume}" if resume else "spawn")
         return results.pop(0)
 
     def fake_clean_up(folder: str, reason: str) -> str:
@@ -312,10 +340,10 @@ def _drive(monkeypatch, *, spawns, disk: Outcome):
     monkeypatch.setattr(builder, "locate_output",
                         lambda c, t, cfg: dataclasses.replace(disk))
     monkeypatch.setattr(builder, "log_path_for",
-                        lambda c, t, attempt=1: Path(f"build-{attempt}.log"))
+                        lambda c, t, attempt=1, suffix="": Path(f"build-{attempt}.log"))
 
     instance = _Retrier()
-    job = Job(posting_id="p1", note="", reply_message_id=None, build_id=1)
+    job = job or Job(posting_id="p1", note="", reply_message_id=None, build_id=1)
     outcome = asyncio.run(builder.Builder._attempt(
         instance, job, "Acme", "Data Scientist", "https://example.com/job",
         "<b>Acme</b> — Data Scientist"))
@@ -325,12 +353,12 @@ def _drive(monkeypatch, *, spawns, disk: Outcome):
 def test_a_drop_after_the_documents_landed_is_not_retried(monkeypatch) -> None:
     """The regression: a finished application is not rebuilt from step 00."""
     _, outcome, trace = _drive(
-        monkeypatch, spawns=[(False, DROPPED, "")], disk=_complete())
+        monkeypatch, spawns=[_spawned(False, DROPPED)], disk=_complete())
 
     assert trace == ["spawn"], "the documents were already there"
     # Returned as the failure it was — `_finish` is what turns that into a
     # salvage, and it makes the same disk check to do it.
-    assert outcome[0] is False and outcome[1] == DROPPED
+    assert outcome.ok is False and outcome.detail == DROPPED
 
 
 def test_a_drop_before_the_documents_is_still_retried(monkeypatch) -> None:
@@ -341,11 +369,11 @@ def test_a_drop_before_the_documents_is_still_retried(monkeypatch) -> None:
                    documents=("Someone - CV.pdf",))
     _, outcome, trace = _drive(
         monkeypatch,
-        spawns=[(False, DROPPED, ""), (True, "", "")],
+        spawns=[_spawned(False, DROPPED), _spawned(True)],
         disk=disk)
 
     assert trace.count("spawn") == 2
-    assert outcome[0] is True
+    assert outcome.ok is True
 
 
 def test_the_partial_folder_is_erased_before_the_retry(monkeypatch) -> None:
@@ -356,7 +384,7 @@ def test_the_partial_folder_is_erased_before_the_retry(monkeypatch) -> None:
                    documents=("Someone - CV.pdf",))
     instance, _, trace = _drive(
         monkeypatch,
-        spawns=[(False, DROPPED, ""), (True, "", "")],
+        spawns=[_spawned(False, DROPPED), _spawned(True)],
         disk=disk)
 
     assert trace == ["spawn", f"clean:{folder}", "spawn"]
@@ -371,8 +399,65 @@ def test_nothing_is_erased_when_the_first_attempt_wrote_no_folder(
                    detail="the build reported success but no dated folder appeared")
     _, outcome, trace = _drive(
         monkeypatch,
-        spawns=[(False, DROPPED, ""), (True, "", "")],
+        spawns=[_spawned(False, DROPPED), _spawned(True)],
         disk=disk)
 
     assert trace == ["spawn", "spawn"]
-    assert outcome[0] is True
+    assert outcome.ok is True
+
+
+# --------------------------------------------------------------------------
+# answering a question, and the session that has since been pruned
+# --------------------------------------------------------------------------
+
+def test_an_answer_resumes_the_session_that_asked(monkeypatch) -> None:
+    """The whole point of keeping the session id: the run already holds the
+    folder, the Match Brief and CLAUDE.md, so the answer is all it needs."""
+    job = Job(posting_id="p1", note="", reply_message_id=None, build_id=1,
+              answer="Go with option 2.", resume_session="sess-abc")
+    _, outcome, trace = _drive(monkeypatch, spawns=[_spawned(True)],
+                               disk=_complete(), job=job)
+
+    assert trace == ["spawn:sess-abc"]
+    assert outcome.ok is True
+
+
+def test_a_pruned_session_is_rebuilt_rather_than_lost(monkeypatch) -> None:
+    """The CLI prunes its history, and a question can sit unanswered for days.
+
+    Starting over costs a build; dropping the answer costs the application.
+    """
+    job = Job(posting_id="p1", note="", reply_message_id=None, build_id=1,
+              answer="Go with option 2.", resume_session="sess-gone")
+    instance, outcome, trace = _drive(
+        monkeypatch,
+        spawns=[_spawned(False, "No conversation found with session ID: sess-gone"),
+                _spawned(True)],
+        disk=_complete(), job=job)
+
+    assert trace == ["spawn:sess-gone", "spawn"], "the second is a fresh build"
+    assert outcome.ok is True
+    assert "session has expired" in instance.sent[-1]
+
+
+def test_the_fresh_build_still_gets_its_retries(monkeypatch) -> None:
+    """A dead session is not a failed attempt, so it must not spend one.
+
+    `build_retries = 1` here: the fallback plus a genuine transient failure plus
+    the retry that clears it is three spawns, and only two of them are attempts.
+    """
+    job = Job(posting_id="p1", note="", reply_message_id=None, build_id=1,
+              answer="Option 2.", resume_session="sess-gone")
+    disk = Outcome(status=INCOMPLETE,
+                   folder="2026/Acme/2026-08-05 - Data Scientist",
+                   detail="missing Someone - Cover Letter.pdf",
+                   documents=("Someone - CV.pdf",))
+    _, outcome, trace = _drive(
+        monkeypatch,
+        spawns=[_spawned(False, "No conversation found with session ID: sess-gone"),
+                _spawned(False, DROPPED),
+                _spawned(True)],
+        disk=disk, job=job)
+
+    assert trace.count("spawn") == 2, "the resume attempt does not count"
+    assert outcome.ok is True

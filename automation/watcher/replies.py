@@ -19,15 +19,19 @@ SKIP = "skip"
 SNOOZE = "snooze"
 UNKNOWN = "unknown"
 
+# "force" and "anyway" are here for overruling a duplicate decline, where the
+# natural phrasings are "yes anyway" (already an approve — the head word decides)
+# and the bare "anyway"/"force" that reads as a reply to it.
 _APPROVE = {"yes", "y", "yeah", "yep", "ok", "okay", "go", "do it", "build",
-            "apply", "ja", "los"}
+            "apply", "ja", "los", "force", "anyway"}
 _SKIP = {"no", "n", "nope", "skip", "nein", "pass", "drop"}
 _SNOOZE = {"later", "snooze", "wait", "hold", "not now", "später", "spaeter"}
 
 # Words that carry no meaning of their own and are dropped from the note.
 # "apply"/"build"/"go" are absent because they govern what follows — "apply as
 # Data Scientist" has to reach the pipeline whole, not as "as Data Scientist".
-_DROPPABLE = {"yes", "y", "yeah", "yep", "ok", "okay", "ja"} | _SKIP | _SNOOZE
+_DROPPABLE = ({"yes", "y", "yeah", "yep", "ok", "okay", "ja", "force", "anyway"}
+              | _SKIP | _SNOOZE)
 
 # "build 3" / "3" / "#3" — promoting one line out of a digest.
 _INDEX = re.compile(r"^(?:build\s*|#)?(\d{1,2})\b[\s,.:;-]*(.*)$", re.IGNORECASE)

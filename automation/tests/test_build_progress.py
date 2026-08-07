@@ -78,9 +78,9 @@ def _result(use_id: str, second: int, *, text: str = "done",
     }
 
 
-def _launch_ack(use_id: str, second: int) -> dict:
+def _launch_ack(use_id: str, second: int, *, parent: str | None = None) -> dict:
     """What a backgrounded agent answers with, immediately, before doing anything."""
-    return _result(use_id, second, text=(
+    return _result(use_id, second, parent=parent, text=(
         "Async agent launched successfully. (This tool result is internal "
         "metadata.)\nagentId: task-1"))
 
@@ -94,11 +94,16 @@ def _task_progress(task_id: str, use_id: str, ms: int) -> dict:
     }
 
 
-def _task_done(task_id: str, use_id: str, status: str = "completed") -> dict:
-    return {
+def _task_done(task_id: str, use_id: str, status: str = "completed",
+               ms: int | None = None) -> dict:
+    """The agent's own last word. `ms` is its final duration, when it reports one."""
+    event = {
         "type": "system", "subtype": "task_notification",
         "task_id": task_id, "tool_use_id": use_id, "status": status,
     }
+    if ms is not None:
+        event["usage"] = {"duration_ms": ms}
+    return event
 
 
 def _feed(tracker: progress.Tracker, events: list[dict]) -> list[bool]:
@@ -132,6 +137,42 @@ def test_a_subagents_own_tool_calls_are_not_steps(tracker):
     assert [row.step.key for row in running] == ["match"]
     # The nested render must not have started the render row.
     assert tracker.rows["render_docs"].state == progress.PENDING
+
+
+def test_a_pipeline_agent_counts_even_when_the_stream_misattributes_it(tracker):
+    """The Roche case: the parent id is wrong, and the step happened anyway.
+
+    A resumed run stamps the orchestrator's next calls with the id of whatever
+    agent was still open when it stopped to ask. Both these steps ran to
+    completion and both were dropped, leaving rows indistinguishable from work
+    that never started.
+    """
+    _feed(tracker, [
+        _agent("01-experience-matcher", "m1", 0, parent="toolu_archiver"),
+        _launch_ack("m1", 1, parent="toolu_archiver"),
+        _task_done("task-m", "m1"),
+    ])
+    assert tracker.rows["match"].state == progress.DONE
+
+
+def test_a_nested_script_call_is_still_not_a_step(tracker):
+    """Forgiving the parent id for agents must not forgive it for scripts.
+
+    Subagents run the renderer and the QA pass for their own reasons, and those
+    are the firehose the parent id exists to keep out.
+    """
+    changed = _feed(tracker, [
+        _use("Bash", "n1", 0, parent="t1",
+             command='python scripts/qa_application.py "f" --no-images'),
+        _result("n1", 3, parent="t1"),
+    ])
+    assert changed == [False, False]
+    assert tracker.rows["qa_docs"].state == progress.PENDING
+
+
+def test_a_nested_result_for_a_row_we_never_opened_changes_nothing(tracker):
+    """A result is taken only for a row already open — the same rule reversed."""
+    assert tracker.feed(_result("never-seen", 5, parent="t1")) is False
 
 
 def test_unrecognised_orchestrator_work_is_ignored(tracker):
@@ -211,6 +252,23 @@ def test_a_backgrounded_agent_finishes_on_its_task_notification(tracker):
     row = tracker.rows["match"]
     assert row.state == progress.DONE
     assert row.elapsed(0) == 384  # 6m 24s, not the 1s the stream clock knew about
+
+
+def test_a_step_is_timed_by_its_final_report_not_its_last_ping(tracker):
+    """The pings stop before the agent does, and the gap belongs to the step.
+
+    Reading the pings alone put the Roche researcher at 3m 28s for 4m 20s of
+    work: every step was short by however long it was quiet before it finished.
+    """
+    _feed(tracker, [
+        _agent("02-company-role-researcher", "r1", 0),
+        _launch_ack("r1", 1),
+        _task_progress("task-r", "r1", 208_399),
+        _task_done("task-r", "r1", ms=260_507),
+    ])
+    row = tracker.rows["research"]
+    assert row.state == progress.DONE
+    assert row.elapsed(0) == pytest.approx(260.507)
 
 
 def test_a_synchronous_agent_still_finishes_on_its_tool_result(tracker):
@@ -335,6 +393,144 @@ def test_reset_clears_the_previous_attempt(tracker):
 
 
 # --------------------------------------------------------------------------
+# steps the flow went past
+# --------------------------------------------------------------------------
+
+def test_a_step_the_flow_went_past_is_marked_rather_than_left_blank(tracker):
+    """The complaint this section answers: three blank rows above a running one.
+
+    A resumed build showed `⬜ Archive posting`, `⬜ Match brief`,
+    `⬜ Company research` over a CV draft that was ticking, and a header reading
+    `0/13 steps`. Every one of those steps had happened; none of them was ever
+    going to fill in. Blank is the same mark as "still to come", so the message
+    said the run had not started while it was two thirds of the way through.
+    """
+    _feed(tracker, [_agent("03-cv-writer-en", "t1", 0)])
+    passed = {key: tracker.rows[key].state
+              for key in ("archive", "match", "research")}
+    assert passed == {key: progress.SKIPPED for key in passed}
+    # …and what is genuinely still to come keeps saying so.
+    assert tracker.rows["cv_verify"].state == progress.PENDING
+    assert tracker.rows["tracker"].state == progress.PENDING
+
+
+def test_a_parallel_sibling_is_not_written_off_a_second_before_it_starts(tracker):
+    """Phase B drafts the CV and the letter at once, in that order more often
+    than not. Read by position rather than by phase, the first Agent call would
+    write off the second one moment before it arrived."""
+    _feed(tracker, [_agent("03-cv-writer-en", "t1", 0)])
+    assert tracker.rows["letter_draft"].state == progress.PENDING
+
+    _feed(tracker, [_agent("05-cover-letter-writer-en", "t2", 30)])
+    assert tracker.rows["letter_draft"].state == progress.RUNNING
+
+
+def test_the_prep_track_does_not_write_off_the_documents_track(tracker):
+    """CLAUDE.md's Phase C starts both tracks in one message and lets them
+    interleave, so interview prep beginning says nothing at all about whether
+    the renderer has. Hence one phase number across the whole of it."""
+    _feed(tracker, [_agent("08-interview-prep", "t1", 0)])
+    still_coming = {key: tracker.rows[key].state
+                    for key in ("render_docs", "qa_docs")}
+    assert still_coming == {key: progress.PENDING for key in still_coming}
+
+
+def test_a_step_written_off_that_starts_anyway_is_running_again(tracker):
+    """Which is what lets the phases be coarse.
+
+    Being wrong here costs a row marked skipped for as long as it takes the step
+    to begin, and then corrects itself. Being wrong the other way — a phase split
+    too finely — costs a row that is wrong until the build ends.
+    """
+    _feed(tracker, [_agent("09-proofreader", "t1", 0)])
+    assert tracker.rows["prep"].state == progress.SKIPPED
+
+    _feed(tracker, [_agent("08-interview-prep", "t2", 30)])
+    assert tracker.rows["prep"].state == progress.RUNNING
+    assert tracker.rows["prep"].elapsed(_epoch(90)) == 60
+
+
+def test_a_skipped_step_counts_towards_the_header(tracker):
+    """`0/13 steps` on a build that is four steps in was half the complaint."""
+    _feed(tracker, [_agent("03-cv-writer-en", "t1", 0)])
+    assert tracker.counts() == (3, 13)
+
+
+def test_a_skipped_optional_row_stays_hidden(tracker):
+    """German on an English-only run is not a gap; it is a document nobody asked
+    for. Optional rows appear when they happen and not otherwise, and being
+    passed over is not happening."""
+    _feed(tracker, [_agent("09-proofreader", "t1", 0)])
+    assert tracker.rows["german"].state == progress.SKIPPED
+    assert "German" not in tracker.render("t", "s", 0)
+    assert len(tracker.visible_rows) == 13
+
+
+# --------------------------------------------------------------------------
+# a resumed run inherits the first half
+# --------------------------------------------------------------------------
+
+def _log(tmp_path, events: list[dict], name: str = "earlier.log"):
+    """A build log as it sits on disk: the command line, then the NDJSON."""
+    path = tmp_path / name
+    path.write_text(
+        "$ claude -p --output-format stream-json --verbose\n"
+        + "\n".join(json.dumps(event) for event in events) + "\n",
+        encoding="utf-8")
+    return path
+
+
+def test_priming_restores_what_an_earlier_session_finished(tracker, tmp_path):
+    """Answering a stop-and-ask resumes the same CLI session, but not the same
+    tracker — so the steps done before the question went out are invisible to it
+    unless it is handed that session's log first."""
+    tracker.prime(_log(tmp_path, [
+        _agent("00-posting-archiver", "a1", 0),
+        _result("a1", 33),
+    ]))
+    assert tracker.rows["archive"].state == progress.DONE
+    assert tracker.rows["archive"].elapsed(0) == 33, "its own duration, not ours"
+
+    _feed(tracker, [_agent("03-cv-writer-en", "t1", 600)])
+    assert tracker.rows["archive"].state == progress.DONE
+    assert tracker.counts() == (3, 13), "one done, two passed over, one running"
+
+
+def test_priming_does_not_carry_a_row_the_earlier_session_left_running(
+        tracker, tmp_path):
+    """That session has ended. A row still open in it has no finish time and
+    never will, so left running it would measure its age against this build's
+    clock and report an hour nobody spent."""
+    tracker.prime(_log(tmp_path, [_agent("01-experience-matcher", "m1", 0)]))
+    row = tracker.rows["match"]
+    assert row.state == progress.SKIPPED
+    assert row.elapsed(_epoch(3600)) is None
+
+
+def test_priming_leaves_no_ids_a_live_result_could_close(tracker, tmp_path):
+    """Two sessions, two id spaces. A `tool_result` from this run must not be
+    able to close a row against a call made in the last one."""
+    tracker.prime(_log(tmp_path, [_agent("01-experience-matcher", "m1", 0)]))
+    assert tracker.feed(_result("m1", 900)) is False
+    assert tracker.rows["match"].state == progress.SKIPPED
+
+
+def test_priming_does_not_date_the_resumed_build_from_the_first_session(
+        tracker, tmp_path):
+    """The rows carry over; the clock does not. A build that started a minute ago
+    should not report the three quarters of an hour the first half took."""
+    tracker.prime(_log(tmp_path, [
+        _agent("00-posting-archiver", "a1", 0),
+        _result("a1", 33),
+    ]))
+    assert tracker.started_at is None
+
+    _feed(tracker, [_agent("03-cv-writer-en", "t1", 600)])
+    assert tracker.started_at == _epoch(600)
+    assert tracker.total_elapsed(_epoch(660)) == 60
+
+
+# --------------------------------------------------------------------------
 # the reporter must not be able to end a build
 # --------------------------------------------------------------------------
 
@@ -379,6 +575,15 @@ def test_an_edit_that_raises_does_not_reach_the_build():
     reporter = _reporter(notifier)
     reporter.feed(_agent("01-experience-matcher", "t1", 0))
     asyncio.run(reporter.stop("Complete"))  # must not raise
+
+
+def test_an_earlier_log_that_is_gone_does_not_break_the_checklist(tmp_path):
+    """Logs are files on a disk somebody else owns. A resumed build whose first
+    half has been tidied away simply starts its checklist where it would have
+    anyway — nothing here is worth failing a build over."""
+    reporter = _reporter(_Notifier())
+    reporter.prime(tmp_path / "deleted.log")  # must not raise
+    assert reporter.tracker.counts() == (0, 13)
 
 
 def test_a_deleted_message_stops_the_edits():
