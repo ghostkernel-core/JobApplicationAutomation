@@ -354,6 +354,29 @@ def test_title_similarity_forgives_rank_but_not_subject() -> None:
     assert normalize.title_similarity("", "") == 0.0
 
 
+def test_an_extra_subject_is_a_different_job() -> None:
+    """The Roche decline: `Machine Learning Engineer` scored 1.00 against
+    `Data Scientist Machine Learning Engineer`, because subject tokens were
+    compared by containment and every extra word on the longer side was free.
+    `Data Scientist` came along for nothing, and a posting the user had said
+    yes to was declined as already applied to.
+
+    Rank and family words — Senior, Engineer, Scientist — stay free. Subject
+    words cost, which is the whole distinction the two halves exist to draw.
+    """
+    assert normalize.title_similarity(
+        "Machine Learning Engineer",
+        "Data Scientist Machine Learning Engineer") < 0.8
+    # And the other way round, which is how the folder-vs-posting check reads it.
+    assert normalize.title_similarity(
+        "Data Scientist Machine Learning Engineer",
+        "Machine Learning Engineer") < 0.8
+    # Still a duplicate of itself under any amount of decoration.
+    assert normalize.title_similarity(
+        "Data Scientist Machine Learning Engineer",
+        "Senior Data Scientist Machine Learning Engineer (m/f/d)") >= 0.8
+
+
 def test_containment_treats_an_empty_side_as_no_evidence() -> None:
     assert normalize._containment(set(), set()) == 1.0
     assert normalize._containment({"a"}, set()) == 0.0
