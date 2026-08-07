@@ -87,6 +87,44 @@ CREATE TABLE IF NOT EXISTS score_attempts (
     updated_at  TEXT NOT NULL
 );
 
+-- Postings the discovery gate judged not worth storing at all — never
+-- hydrated, never scored, no `postings` row. Keyed on the same fingerprint
+-- `postings.id` would use if the posting had survived, so a later change of
+-- mind (a widened profile, a corrected rule) can look one up by the same id
+-- everything else in this database uses.
+--
+-- `digest_key` is `sha1(profile_digest + newline + kb)[:16]` at the moment of
+-- the drop. Suppression (`known_drops`) only matches within the current key, so
+-- editing the canonical profile or approving a kb rule re-judges the backlog
+-- exactly once rather than trusting a verdict the profile has since outgrown.
+-- `stage` shares its vocabulary with `prefilter.STAGES` even though only
+-- "triage" is written here today, so one table can hold every rejection this
+-- system ever wants to record without a second schema.
+CREATE TABLE IF NOT EXISTS drops (
+    id             TEXT PRIMARY KEY,
+    loose_key      TEXT NOT NULL,
+    source         TEXT NOT NULL,
+    provider       TEXT NOT NULL,
+    company        TEXT NOT NULL,
+    title          TEXT NOT NULL,
+    location       TEXT,
+    country        TEXT,
+    url            TEXT NOT NULL,
+    canonical_url  TEXT NOT NULL,
+    detail_url     TEXT,
+    stage          TEXT NOT NULL,
+    reason         TEXT,
+    digest_key     TEXT NOT NULL,
+    first_seen_at  TEXT NOT NULL,
+    last_seen_at   TEXT NOT NULL,
+    times_seen     INTEGER NOT NULL DEFAULT 1,
+    audited_at     TEXT,
+    audit_score    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_drops_stage   ON drops(stage);
+CREATE INDEX IF NOT EXISTS idx_drops_seen    ON drops(last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_drops_audited ON drops(audited_at);
+
 CREATE TABLE IF NOT EXISTS notifications (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     posting_id          TEXT NOT NULL REFERENCES postings(id),
@@ -357,6 +395,86 @@ def recent_postings(conn: sqlite3.Connection, limit: int = 50) -> list[sqlite3.R
     return list(conn.execute(
         "SELECT * FROM postings ORDER BY first_seen_at DESC LIMIT ?", (limit,)
     ))
+
+
+# --------------------------------------------------------------------------
+# drops
+# --------------------------------------------------------------------------
+
+def known_drops(conn: sqlite3.Connection, ids: Iterable[str], stage: str,
+                digest_key: str) -> set[str]:
+    """Which of these ids are already dropped, under the current profile.
+
+    Scoped to `stage` and `digest_key` — the same id dropped by a different
+    stage, or by triage under a profile that has since changed, does not
+    count as known. Mirrors `known_ids`'s chunking for the same reason: a
+    backfill can hand this thousands of ids in one call.
+    """
+    ids = list(ids)
+    if not ids:
+        return set()
+    out: set[str] = set()
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        placeholders = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            f"SELECT id FROM drops WHERE stage = ? AND digest_key = ? "
+            f"AND id IN ({placeholders})",
+            [stage, digest_key, *chunk],
+        )
+        out.update(row["id"] for row in rows)
+    return out
+
+
+def record_drop(conn: sqlite3.Connection, posting: Posting, stage: str,
+                reason: str, digest_key: str = "") -> None:
+    """Record — or refresh — a rejection that never became a `postings` row.
+
+    `ON CONFLICT` bumps `last_seen_at`/`times_seen` and overwrites
+    `stage`/`reason`/`digest_key`, leaving `first_seen_at` alone, the same
+    idiom as `save_verdict`. A conflict here means the posting resurfaced
+    under a changed profile (`known_drops` would not have suppressed it), so
+    the fresher judgement is what should be on record.
+    """
+    now = _now()
+    conn.execute(
+        """INSERT INTO drops
+           (id, loose_key, source, provider, company, title, location, country,
+            url, canonical_url, detail_url, stage, reason, digest_key,
+            first_seen_at, last_seen_at, times_seen)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+           ON CONFLICT(id) DO UPDATE SET
+             stage=excluded.stage, reason=excluded.reason,
+             digest_key=excluded.digest_key, last_seen_at=excluded.last_seen_at,
+             times_seen=drops.times_seen + 1""",
+        (
+            posting.fingerprint, posting.loose_key, posting.source, posting.provider,
+            posting.company, posting.title, posting.location, posting.country,
+            posting.url, posting.canonical_url, posting.detail_url,
+            stage, reason, digest_key, now, now,
+        ),
+    )
+
+
+def touch_drops(conn: sqlite3.Connection, ids: Iterable[str]) -> None:
+    """Bump `last_seen_at`/`times_seen` for drops suppressed by `known_drops`.
+
+    A suppressed posting was never re-judged, so nothing about it changed —
+    this just records that it was seen again, for `recall.py`'s miss-rate
+    audit and for `drop_retention_days` to measure from the right date.
+    """
+    ids = list(ids)
+    if not ids:
+        return
+    now = _now()
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        placeholders = ",".join("?" * len(chunk))
+        conn.execute(
+            f"UPDATE drops SET last_seen_at = ?, times_seen = times_seen + 1 "
+            f"WHERE id IN ({placeholders})",
+            [now, *chunk],
+        )
 
 
 # --------------------------------------------------------------------------

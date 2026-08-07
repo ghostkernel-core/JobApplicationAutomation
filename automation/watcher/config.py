@@ -215,6 +215,7 @@ class Config:
     notify: dict[str, Any] = field(default_factory=dict)
     build: dict[str, Any] = field(default_factory=dict)
     kb: dict[str, Any] = field(default_factory=dict)
+    triage: dict[str, Any] = field(default_factory=dict)
 
     def _num(self, section_name: str, section: dict[str, Any], key: str,
              default: _Number, cast: Callable[[str], _Number] = int) -> _Number:
@@ -515,6 +516,49 @@ class Config:
     def kb_timeout(self) -> int:
         return self._num("kb", self.kb, "timeout_seconds", 180)
 
+    # --- triage -------------------------------------------------------------
+    @property
+    def triage_enabled(self) -> bool:
+        """Default False, unlike every other `_enabled` flag in this file.
+
+        Every existing `poll_once` test constructs a bare `Config()`, and this
+        default is what keeps that construction from spawning a `claude`
+        subprocess. config.toml itself ships `enabled = true` — the file is
+        the on switch for a live deployment, the code default is a harness
+        guard for everything that is not one.
+        """
+        return bool(self.triage.get("enabled", False))
+
+    @property
+    def triage_model(self) -> str:
+        return str(self.triage.get("model", "haiku"))
+
+    @property
+    def triage_batch_size(self) -> int:
+        """Small on purpose: the prompt is dominated by the profile digest,
+        not by per-posting content, since triage never sees a description."""
+        return self._num("triage", self.triage, "batch_size", 200)
+
+    @property
+    def triage_timeout(self) -> int:
+        return self._num("triage", self.triage, "timeout_seconds", 120)
+
+    @property
+    def triage_max_per_cycle(self) -> int:
+        """Caps how many candidates one poll cycle sends to triage.
+
+        Above the cap, the excess is deferred to the next cycle rather than
+        judged — never marked unsure just to clear the queue, and never
+        dropped by exhaustion. This is the safety net for the one-time
+        backfill, where thousands of never-stored candidates would otherwise
+        arrive in a single cycle.
+        """
+        return self._num("triage", self.triage, "max_per_cycle", 600)
+
+    @property
+    def triage_drop_retention_days(self) -> int:
+        return self._num("triage", self.triage, "drop_retention_days", 90)
+
 
 @dataclass(frozen=True)
 class SourceDefaults:
@@ -727,6 +771,7 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         notify=raw.get("notify", {}),
         build=raw.get("build", {}),
         kb=raw.get("kb", {}),
+        triage=raw.get("triage", {}),
     )
 
 

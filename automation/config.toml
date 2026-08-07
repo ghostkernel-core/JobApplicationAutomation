@@ -32,6 +32,29 @@ retry_after_minutes = 60
 retry_backoff_factor = 2.0
 retry_backoff_max_minutes = 1440
 
+[triage]
+# The discovery gate: judges title + company + location only, never a
+# description, before a posting is ever hydrated or stored. Replaced
+# title_allow, a hand-written substring list that decided what was ever seen
+# ahead of the profile that decides what is worth applying to.
+enabled = true
+model = "haiku"
+# Small on purpose — the prompt is dominated by the profile digest, not by
+# per-posting content, since triage never reads a body.
+batch_size = 200
+timeout_seconds = 120
+# Hard per-call ceiling. Above this many candidates in one cycle, the excess
+# is deferred to the next cycle rather than judged — never marked unsure just
+# to clear the queue. This is what keeps a widened prefilter from handing a
+# single cycle thousands of first-time candidates; `watcher.triage --backfill`
+# is the deliberate, one-time way to work through a backlog that size instead.
+max_per_cycle = 600
+# How long a drop row is kept before it is eligible for pruning. Purely a
+# housekeeping figure — suppression itself is keyed on the profile digest, not
+# on age, so a drop stops being honoured the moment the profile changes,
+# whatever this says.
+drop_retention_days = 90
+
 [match]
 model = "haiku"
 batch_size = 8
