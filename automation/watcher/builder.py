@@ -688,13 +688,13 @@ def duplicate_message(label: str, existing: dedupe.ExistingApplication) -> str:
             f"<i>Nothing was built. Reply \"yes anyway\" to build it regardless.</i>")
 
 
-def _doc_list(documents: tuple[str, ...]) -> str:
-    """Document names for a report, with the owner's file prefix stripped.
+def _doc_label(name: str) -> str:
+    """One document name for a report, with the owner's file prefix stripped.
 
     Stripping it is cosmetic: `<file_prefix> - CV.pdf` reads better as "CV" in a
     Telegram message that already says whose workspace this is. It is not
     worth an exception. `load_identity` raises when identity.toml is missing or
-    still full of FILL IN, and this is the function that reports a build —
+    still full of FILL IN, and this feeds the function that reports a build —
     including the build that failed *because* the workspace is incomplete. A
     report that cannot render is strictly worse than one that spells a filename
     out in full, and raising here replaces the real failure with this one.
@@ -703,8 +703,114 @@ def _doc_list(documents: tuple[str, ...]) -> str:
         prefix = f"{load_identity().file_prefix} - "
     except Exception:  # missing, unreadable, or still a placeholder
         prefix = ""
-    return " · ".join(name.removeprefix(prefix).replace(".pdf", "")
-                      for name in documents)
+    return name.removeprefix(prefix).replace(".pdf", "")
+
+
+def _doc_list(documents: tuple[str, ...]) -> str:
+    return " · ".join(_doc_label(name) for name in documents)
+
+
+#: Missing keywords and style tells named in full before the line turns into a
+#: count. Three is what fits one phone line beside the percentages.
+QA_LINE_ITEMS = 3
+
+
+def read_qa_summary(folder: str) -> dict:
+    """The two report-only halves of QA for a finished build, or `{}`.
+
+    `qa_application` writes them to `_tmp/payloads/<Company> <date> <Role>/`,
+    outside the deliverable folder — a stray `.json` inside it is an unexpected
+    file, and unexpected files fail the folder inventory. That path is unchanged
+    by step 09, which is what lets one lookup serve both the ready message, sent
+    before the cleanup, and the run-complete message, sent after it.
+
+    Everything here fails open, to `{}`. This sits on the announce path: a
+    scorer that cannot parse its own output must never cost the user the message
+    saying their application is ready. The imports are local for the same
+    reason — both modules read `identity.toml` at import time, and a build that
+    failed because the workspace is incomplete still has to be able to report
+    that.
+    """
+    if not folder:
+        return {}
+    try:
+        from clean_deliverable import payload_dir
+        from qa_application import QA_SUMMARY_NAME
+
+        root = to_absolute(folder)
+        target = payload_dir(root)
+        for path in ([target / QA_SUMMARY_NAME] if target else []) + \
+                    [root / QA_SUMMARY_NAME]:
+            if path.is_file():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                return data if isinstance(data, dict) else {}
+    except Exception:  # unreadable, malformed, or the module would not import
+        log.debug("no QA summary for %s", folder, exc_info=True)
+    return {}
+
+
+def _ats_line(summary: dict) -> str:
+    """Keyword coverage of the built CV, as one line — or nothing at all.
+
+    This is the number an ATS-shaped reader would arrive at, not the one a
+    recruiter sees; no vendor publishes that formula. Saying `brief` and
+    `posting` separately is what keeps it honest: the first is coverage of the
+    keywords step 01A judged truthfully usable, the second a proxy over the raw
+    ad, and they answer different questions.
+    """
+    ats = summary.get("ats")
+    if not isinstance(ats, dict):
+        return ""
+    try:
+        from ats_report import summary_line
+    except Exception:
+        return ""
+    try:
+        return summary_line(ats, max_missing=QA_LINE_ITEMS)
+    except Exception:
+        return ""
+
+
+def _style_line(summary: dict) -> str:
+    """The AI-tell count, named down to the first few.
+
+    Report-only, exactly as in the QA report: rule 07 routes these to a human
+    reader, and a finished application is not withdrawn over the word "robust".
+    Naming them is the point — a bare count sends the user looking.
+    """
+    style = summary.get("style")
+    if not isinstance(style, dict):
+        return ""
+    hits = [h for h in (style.get("hits") or []) if isinstance(h, dict)]
+    metrics = [m for m in (style.get("metrics") or [])
+               if isinstance(m, dict) and m.get("em_dash_overuse")]
+    runs = [r for r in (style.get("bullet_runs") or []) if isinstance(r, dict)]
+    total = len(hits) + len(metrics) + len(runs)
+    if not total:
+        return ""
+
+    named = [f'"{h.get("match", "?")}" ({_doc_label(str(h.get("document", "")))})'
+             for h in hits[:QA_LINE_ITEMS]]
+    named += [f'em-dashes ({_doc_label(str(m.get("document", "")))})'
+              for m in metrics[:max(0, QA_LINE_ITEMS - len(named))]]
+    named += [f'repeated bullet opener "{r.get("word", "?")}" '
+              f'({_doc_label(str(r.get("document", "")))})'
+              for r in runs[:max(0, QA_LINE_ITEMS - len(named))]]
+    line = f"⚠ {total} style tell{'' if total == 1 else 's'}: " + ", ".join(named)
+    if total > len(named):
+        line += f" +{total - len(named)} more"
+    return line
+
+
+def qa_lines(folder: str) -> list[str]:
+    """The ATS and style lines for a build report, ready to append.
+
+    Empty when there is no summary to read, which is what makes every message
+    that uses it byte-identical to the one sent before any of this existed.
+    """
+    summary = read_qa_summary(folder)
+    return [_escape(line) for line in (_ats_line(summary), _style_line(summary))
+            if line]
 
 
 def ready_message(label: str, outcome: Outcome) -> str:
@@ -715,11 +821,13 @@ def ready_message(label: str, outcome: Outcome) -> str:
     every run look as long as its slowest optional step.
     """
     where = _escape(relative(outcome.folder)) if outcome.folder else ""
-    return (f"✅ <b>Application ready</b> · {label}\n"
-            f"<code>{where}</code>\n"
-            f"{_doc_list(outcome.documents)}\n"
-            f"<i>Interview prep is still rendering — it will land in the same "
-            f"folder.</i>")
+    lines = [f"✅ <b>Application ready</b> · {label}",
+             f"<code>{where}</code>",
+             _doc_list(outcome.documents)]
+    lines += qa_lines(outcome.folder)
+    lines.append("<i>Interview prep is still rendering — it will land in the "
+                 "same folder.</i>")
+    return "\n".join(lines)
 
 
 def result_message(label: str, outcome: Outcome, log_file: Path) -> str:
@@ -735,6 +843,12 @@ def result_message(label: str, outcome: Outcome, log_file: Path) -> str:
         else:
             head = (f"✅ <b>Built</b> · {label}\n<code>{where}</code>\n"
                     f"{docs} · {tracker}")
+            # Only when the ready message never went out. Repeating the same
+            # two lines a minute after the user has already read them is noise,
+            # and neither number can have moved: both are measured off the CV,
+            # which was final before that message was sent.
+            for line in qa_lines(outcome.folder):
+                head += f"\n{line}"
         if outcome.salvaged:
             # Everything an employer sees is finished and still on disk, so
             # this is not a failure — but it is not a clean run either, and the

@@ -105,6 +105,14 @@ jobs:
     # is wedged, not slow, and the default six-hour ceiling means nobody finds
     # out until the day is over.
     timeout-minutes: 20
+    env:
+      # A runner has no identity.toml — it is untracked by design, and the
+      # structure job above fails if it is ever committed. But several modules
+      # build their document-name constants from it at *import* time, so its
+      # absence is not a skipped test: it is a collection error that takes the
+      # whole file down, and takes every unrelated test in that file with it.
+      # The fixture is an invented person; nothing here may point at a real one.
+      JOBAPP_IDENTITY: ${{ github.workspace }}/automation/tests/data/identity.fixture.toml
     steps:
       - uses: actions/checkout@v4
 
