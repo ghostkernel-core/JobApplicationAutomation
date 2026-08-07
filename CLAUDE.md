@@ -28,7 +28,7 @@ in the Telegram thread. Do not invent an answer to keep going. Details: `automat
 ## Pipeline (orchestrator reference)
 
 Architecture: models write and verify structured payloads; deterministic scripts render LaTeX and build PDFs.
-Browser MCP is not used — use pasted text, `webfetch`, and `scripts/save_singlefile.sh`.
+Browser MCP is not used — use pasted text, or `scripts/capture_posting.py` for a URL.
 PDF compilation requires `latexmk` or `xelatex` on PATH, or `LATEX_ENGINE` set. Check with `python scripts/check_latex_toolchain.py`.
 
 | # | Step | Agent/tool | Output | Depends on |
@@ -218,7 +218,8 @@ Two files that are not worth a turn:
 - `.claude/agents/` — Claude Code specialist-subagent files.
 - `master/LaTeX/templates/` — locked LaTeX templates (cv_en, cv_de, letter_en, letter_de, interview_prep_en).
 - `master/LaTeX/shared/` — shared LaTeX macros/style.
-- `scripts/` — scaffold, render, healthcheck, one-pass QA, toolchain check, SingleFile capture, tracker
+- `scripts/` — scaffold, render, healthcheck, one-pass QA, toolchain check, `capture_posting.py`
+  for posting capture (SingleFile with a rendered-browser fallback), tracker
   build/append, `clean_deliverable.py` to tidy a finished folder down to its deliverables,
   and `cleanup_application.py` to undo a failed run entirely. The two are not
   interchangeable: the first runs on success, the second erases the application.

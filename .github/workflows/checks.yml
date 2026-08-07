@@ -127,6 +127,13 @@ jobs:
       - name: Install watcher dependencies
         run: python -m pip install --quiet -r automation/requirements.txt
 
+      - name: Script tests
+        # `scripts/` was compile-checked and nothing more until posting capture
+        # grew a decision in it: whether the file a capture method just wrote is
+        # actually the posting. These run offline — no network, no browser — and
+        # take a couple of seconds.
+        run: python -m pytest scripts/tests -q
+
       - name: Watcher tests
         # Offline only — pytest.ini deselects the `live` marker by default, and
         # those checks run on their own schedule in live.yml. This job must not

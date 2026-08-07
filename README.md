@@ -83,7 +83,14 @@ Full walkthrough: [docs/the-pipeline.md](./docs/the-pipeline.md).
 ## Quickstart
 
 You need Python 3.11+, the Claude Code CLI on PATH, and a LaTeX toolchain (`xelatex` or
-`latexmk`). A Telegram bot and Playwright are only needed for the watcher.
+`latexmk`). Posting capture wants Node (for `npx single-file-cli`) and Playwright — it
+tries SingleFile first and falls back to a rendered browser for the career sites that
+serve nothing without JavaScript, so with only one of the two some postings cannot be
+captured at all. A Telegram bot is needed only for the watcher.
+
+```bash
+python -m pip install playwright && python -m playwright install chromium
+```
 
 ```bash
 git clone https://github.com/ghostkernel-core/JobApplicationAutomation.git

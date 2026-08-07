@@ -11,9 +11,12 @@ Input: job posting URL or pasted posting text, application date.
 
 Capture order:
 1. Use pasted posting text directly when provided.
-2. Try static/web capture first.
-3. Use `scripts/save_singlefile.sh` for a self-contained HTML archive when static capture is insufficient.
-4. If automated capture still fails, ask for pasted posting text or manual SingleFile capture. Do not use Chrome MCP.
+2. Otherwise run `python scripts/capture_posting.py "<url>" "<output.html>"` — one call,
+   which falls back from SingleFile to a rendered browser by itself and verifies that what
+   it captured is the posting rather than an error page.
+3. Only if that exits non-zero, ask for pasted posting text or manual SingleFile capture.
+   Do not use Chrome MCP, and do not call `save_singlefile.sh` directly — alone it cannot
+   tell a posting from a 403.
 
 Tasks:
 - Capture the posting as exactly one `.html` file when possible.
