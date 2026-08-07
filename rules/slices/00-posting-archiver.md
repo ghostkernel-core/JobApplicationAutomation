@@ -3,9 +3,27 @@
 ## Capture rules
 
 - Use pasted posting text directly when provided.
-- Try `webfetch` static capture first.
-- Use `scripts/save_singlefile.sh` for self-contained HTML when static capture insufficient.
-- If all automated capture fails, ask for pasted text or manual SingleFile capture. Do not use Chrome MCP.
+- Otherwise capture the URL with one call, and do not hand-roll the fallbacks:
+
+```
+python scripts/capture_posting.py "<url>" "<folder>/<Company> - <Role>.html"
+```
+
+  It tries SingleFile, checks that what came back is actually the posting, and
+  re-renders the page in a real browser when it is not. Exit 0 means a usable
+  archive is on disk; the `NOTE:` line, when present, says which method was
+  rejected and why. That is a caveat to report, not a failure.
+
+- Do not call `scripts/save_singlefile.sh` directly. On its own it cannot tell a
+  posting from an error page: `careers.axa.com` answered a headless browser with
+  403, SingleFile wrote those 640 bytes out with exit code 0, and the run that
+  trusted it stopped to ask for text it already had a way to get.
+- `webfetch` is for reading a page, not archiving one — it does not run
+  JavaScript, so on a site that renders its body client-side it returns the
+  title and the nav and nothing else. Use it to confirm company and role if you
+  like; never treat its output as the capture.
+- Only if `capture_posting.py` exits non-zero: ask for pasted text or a manual
+  SingleFile capture. Do not use Chrome MCP.
 
 ## Folder and naming rules
 

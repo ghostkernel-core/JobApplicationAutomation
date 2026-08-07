@@ -25,6 +25,14 @@ this file in the same run — otherwise every other agent is working from a stal
 Run every script from the workspace root. Paths with spaces need quoting.
 
 ```
+python scripts/capture_posting.py <url> <output.html>   # the only capture call you need
+       [--timeout 120]        # seconds per method
+       [--min-chars 600]      # visible text below which a capture is rejected
+       [--renderer auto|singlefile|playwright]
+       # Tries SingleFile, checks the result is really the posting, and renders
+       # the page in a browser if it is not. Prints METHOD/TEXT/HTML, and NOTE
+       # when the first method was rejected. Exit 1 only if both fail.
+
 python scripts/scaffold.py "<Company>" "<Role>"     # creates the deliverable folder
        [--date YYYY-MM-DD]   # default today
        # prints the absolute path on stdout — capture it, do not rebuild it by hand
