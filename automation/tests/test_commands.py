@@ -120,6 +120,22 @@ def _question(posting_id: str = "p1", *, kind: str = "stop_and_ask",
                                   folder=folder)
 
 
+def _ping(posting_id: str = "p1", *, message_id: int = 42,
+          days_ago: float = 0.0, sent_at: str | None = None) -> None:
+    """A recorded ping, backdated when the test needs one that has aged."""
+    with store.connect() as conn:
+        store.record_notification(conn, posting_id, "-100123", message_id,
+                                  "instant")
+        if sent_at is None and not days_ago:
+            return
+        stamp = sent_at if sent_at is not None else (
+            dt.datetime.now() - dt.timedelta(days=days_ago)
+        ).isoformat(timespec="seconds")
+        conn.execute(
+            "UPDATE notifications SET sent_at = ? WHERE telegram_message_id = ?",
+            (stamp, message_id))
+
+
 class _Worker:
     """A builder that records what it was asked to do and nothing else."""
 
@@ -253,12 +269,99 @@ def test_pending_shows_a_ping_that_was_never_answered(db) -> None:
     """The oldest of the three kinds of waiting, and the one that had nowhere to
     be seen: a posting pinged into the chat and simply scrolled past."""
     _posting()
-    with store.connect() as conn:
-        store.record_notification(conn, "p1", "-100123", 42, "instant")
+    _ping()
 
     text = _run(run_watcher.on_pending, _App()).replies[0]
     assert "Pinged, never answered" in text
     assert "Acme — Data Scientist" in text
+
+
+def test_a_ping_inside_the_week_is_still_waiting_on_you(db) -> None:
+    _posting()
+    _ping(days_ago=3)
+
+    text = _run(run_watcher.on_pending, _App()).replies[0]
+    assert "Acme — Data Scientist" in text
+    assert "aged out" not in text
+
+
+def test_a_ping_older_than_the_window_drops_off_the_list(db) -> None:
+    """Silence for a week is an answer. Listing it forever turned the one
+    section of `/pending` that should be short into the longest."""
+    _posting()
+    _ping(days_ago=8)
+
+    text = _run(run_watcher.on_pending, _App()).replies[0]
+    assert "Acme — Data Scientist" not in text
+    assert "1 older ping(s) aged out" in text
+    assert "Nothing was deleted" in text
+
+
+def test_the_window_is_named_where_the_pings_are_listed(db) -> None:
+    """Otherwise a short list reads as "nothing came in" rather than "nothing
+    came in this week", which are very different states to be in."""
+    _posting()
+    _ping()
+
+    assert f"last {run_watcher.PING_TTL_DAYS} days" in _run(
+        run_watcher.on_pending, _App()).replies[0]
+
+
+def test_an_aged_out_ping_is_still_reported_when_nothing_else_waits(db) -> None:
+    _posting()
+    _ping(days_ago=30)
+
+    text = _run(run_watcher.on_pending, _App()).replies[0]
+    assert "Nothing waiting on you" in text
+    assert "aged out" in text, (
+        "a silent filter here is indistinguishable from a watcher that stopped")
+
+
+def test_ageing_out_a_ping_decides_nothing_and_deletes_nothing(db) -> None:
+    """The reason this is a filter and not a sweep.
+
+    Writing an "expired" decision row would drop the ping off this list on its
+    own — and would also put the posting permanently out of reach of
+    `rehydrate.rescore_before`, which leaves anything with a decision alone.
+    A rescore after a profile change is exactly when an old ping should come
+    back, so nothing may be recorded on the user's behalf here.
+    """
+    _posting()
+    _ping(days_ago=8)
+
+    _run(run_watcher.on_pending, _App())
+
+    with store.connect() as conn:
+        assert store.last_decision(conn, "p1") is None, "silence is not a choice"
+        assert store.sent_notifications(conn), "the ping row was deleted"
+
+
+def test_the_window_is_read_when_it_is_used_not_when_it_is_imported(
+        db, monkeypatch) -> None:
+    """The filter and the header must never disagree about the window.
+
+    Writing `ttl_days=PING_TTL_DAYS` into the signature evaluates it once at
+    import, so a changed constant would move the header line and leave the
+    filter behind — a list headed "last 2 days" still showing everything.
+    """
+    _posting()
+    _ping(days_ago=4)
+    monkeypatch.setattr(run_watcher, "PING_TTL_DAYS", 2)
+
+    text = _run(run_watcher.on_pending, _App()).replies[0]
+    assert "Acme — Data Scientist" not in text
+    assert "aged out after 2 days" in text
+
+
+def test_a_ping_with_an_unreadable_timestamp_is_kept(db) -> None:
+    """Dropping a posting off the only list that mentions it, because of a
+    stamp we could not parse, is the one failure mode worth being loud about."""
+    _posting()
+    _ping(sent_at="not a date")
+
+    text = _run(run_watcher.on_pending, _App()).replies[0]
+    assert "Acme — Data Scientist" in text
+    assert "aged out" not in text
 
 
 def test_an_answered_ping_is_not_still_pending(db) -> None:

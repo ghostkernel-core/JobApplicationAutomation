@@ -1048,6 +1048,57 @@ async def on_rescore(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 #: tree indefinitely.
 QUESTION_TTL_DAYS = 2
 
+#: How long a ping stays on the `/pending` list before it stops counting as
+#: something waiting on the user. A posting shown a week ago and never replied
+#: to is not a decision still outstanding; it is one already made by silence,
+#: and listing it forever turns the one section of `/pending` that should be
+#: short into the longest. At 149 entries the list had stopped being readable,
+#: which is the same as not having it.
+#:
+#: Nothing is written or deleted when a ping ages out — see `_still_waiting`.
+PING_TTL_DAYS = 7
+
+
+def _still_waiting(rows, ttl_days: int | None = None) -> tuple[list, int]:
+    """(pings still worth answering, how many aged out).
+
+    Deliberately a filter and not a sweep. The obvious implementation writes a
+    decision row so the ping drops out of `/pending` on its own, and it is
+    wrong twice over: `decisions` records what the user chose, and silence is
+    not a choice they made, so an "expired" row there is a fact the table does
+    not have. It is also load-bearing elsewhere — `rehydrate.rescore_before`
+    leaves any posting with a decision alone ("already decided"), so writing
+    one would quietly make every aged-out ping unreachable to a rescore after
+    a profile change, which is exactly when you would want it back.
+
+    Filtering costs nothing, hides nothing, and needs no migration to undo.
+
+    `ttl_days` defaults at call time rather than in the signature. A default
+    argument is evaluated once at import, so `PING_TTL_DAYS` written into the
+    signature would freeze there while the caller's own header line — which
+    reads the module global — went on reporting whatever it had been changed
+    to. The window the list is filtered by and the window it claims to show
+    must be the same number, and this is what makes them one.
+    """
+    if ttl_days is None:
+        ttl_days = PING_TTL_DAYS
+    cutoff = dt.datetime.now() - dt.timedelta(days=ttl_days)
+    fresh = []
+    aged = 0
+    for row in rows:
+        try:
+            sent = dt.datetime.fromisoformat(row["sent_at"])
+        except (TypeError, ValueError):
+            # An unparseable stamp is not a reason to drop a posting off the
+            # only list that mentions it. Keep it and let it be seen.
+            fresh.append(row)
+            continue
+        if sent >= cutoff:
+            fresh.append(row)
+        else:
+            aged += 1
+    return fresh, aged
+
 
 def _age(stamp: str) -> str:
     """"3h" / "2d" for a stored timestamp. Never raises — it decorates a list."""
@@ -1087,6 +1138,7 @@ async def on_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             questions = store.open_questions(conn)
             waiting = [row for row in store.sent_notifications(conn)
                        if store.last_decision(conn, row["posting_id"]) is None]
+        waiting, aged_out = _still_waiting(waiting)
     except Exception:
         log.exception("could not read what is pending")
         await message.reply_html("⚠️ Could not read the database — see watcher.log.")
@@ -1116,17 +1168,27 @@ async def on_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if lines:
             lines.append("")
         shown = waiting[:MAX_RESCORE_LIST]
-        lines.append(f"📨 <b>Pinged, never answered</b> ({len(waiting)})")
+        lines.append(f"📨 <b>Pinged, never answered</b> ({len(waiting)}, "
+                     f"last {PING_TTL_DAYS} days)")
         lines += [f"• {_escape(r['company'])} — {_escape(r['title'])}"
                   for r in shown]
         if len(waiting) > len(shown):
             lines.append(f"• …and {len(waiting) - len(shown)} more")
 
+    # Reported rather than dropped in silence: the count is the difference
+    # between "you are on top of it" and "you stopped reading a month ago",
+    # and one line is the whole cost of being able to tell those apart. It
+    # rides along with "nothing waiting" too, which is the case where a silent
+    # filter would be most misleading.
+    aged_note = (f"\n<i>{aged_out} older ping(s) aged out after "
+                 f"{PING_TTL_DAYS} days and are no longer listed. "
+                 f"Nothing was deleted.</i>" if aged_out else "")
+
     if not lines:
         tail = ("" if config.build_enabled else f"\n{BUILD_DISABLED_NOTE}")
-        await message.reply_html(f"✅ Nothing waiting on you.{tail}")
+        await message.reply_html(f"✅ Nothing waiting on you.{tail}{aged_note}")
         return
-    await message.reply_html("\n".join(lines))
+    await message.reply_html("\n".join(lines) + aged_note)
 
 
 def _split_build_args(raw: str) -> tuple[str, str, str, str]:
