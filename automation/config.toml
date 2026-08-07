@@ -202,3 +202,24 @@ lookback_days = 7
 # Below this many drops in the window there is nothing worth measuring and no
 # message is sent.
 min_drops = 20
+
+[queries]
+# The search terms typed into the three aggregator portals, written from the
+# profile digest instead of by hand. `sources.toml` ships four per portal, and
+# those four are the entire aperture of this half of the watcher: a role the
+# profile is qualified for that nobody thought to type is not ranked badly, it
+# is never fetched, and nothing reports its absence.
+#
+# Off by default, and the last switch to flip. This one changes what is
+# *fetched*, so it moves every downstream number at once — turn it on alone,
+# after triage and recall have had a week to settle, or there is no way to tell
+# which change moved what.
+enabled = false
+# Runs once per profile edit, not once per cycle, so the cost is negligible and
+# the downside is not: a bad query set quietly narrows every portal until
+# somebody notices the boards went quiet.
+model = "sonnet"
+# Asked for per portal. Roughly half survive validation on a good run, and a
+# portal that ends up with fewer than two keeps its sources.toml list.
+per_portal = 8
+timeout_seconds = 180
