@@ -114,6 +114,9 @@ Replies are resolved by *which message you replied to*, so several can be in fli
                             can never start a build.
 ```
 
+A reply to a message the *watcher* asked something with is an answer to that
+question instead, whatever it says — see **When the pipeline stops to ask**.
+
 ### 5 · Build — one at a time
 
 ```
@@ -150,18 +153,25 @@ Replies are resolved by *which message you replied to*, so several can be in fli
  done             exit ok + every required PDF present        → Completed topic
  done (salvaged)  died late, but the PDFs are there anyway.   → Completed topic
                   The study aid is optional; the application is the point.
- duplicate        blocked before spawning                     → Processing topic
+ duplicate        blocked before spawning                     → Targeted topic
+                  (reply "yes anyway" to build it regardless)
  needs_decision   clean exit, no documents — the pipeline hit a stop-and-ask.
                   Its closing words are relayed verbatim      → Targeted topic
  incomplete       ran, wrote some of the documents            → Failed topic
  failed           timeout, crash, upstream error              → Failed topic
+ cancelled        stopped by /cancel                          → Failed topic
  interrupted      the watcher restarted mid-build             → General
                   (reply "yes" again to run it afresh)
 
- failed, incomplete and needs_decision erase their folder via
+ failed, incomplete and cancelled erase their folder via
  scripts/cleanup_application.py — dated folder, empty company folder, the
  tracker row, and that run's _tmp scratch. A folder with no PDFs reads as
  "already applied" to everything that scans the tree, including this watcher.
+
+ `needs_decision` keeps its folder while the question is open: the run is
+ paused, not abandoned, and the archived posting, Match Brief and Research
+ Note are what make answering it cheap. It is erased when you decline the
+ question, cancel it, or it expires unanswered after two days.
 
  `interrupted` is the exception: the process was killed, so nothing ran to
  tidy up. The next build for that role reports the partial folder and
@@ -212,13 +222,16 @@ prep — the longest step, and the only one no employer sees — cannot take the
 
 `build_prompt()` is one line — `f"{url}\n{note}"` — and that is deliberate. Every sentence of
 scaffolding added there would be a second source of truth competing with `CLAUDE.md`, and the
-day the two disagree the pipeline behaves differently depending on who started it.
+day the two disagree the pipeline behaves differently depending on who started it. `answer_prompt()`
+is the same idea for a resumed run: your answer, stripped, and nothing else. That session already
+holds `CLAUDE.md`, the Match Brief and the folder, so re-stating any of it would be that second
+source of truth arriving by another route.
 
 What actually differs between the two doors:
 
 | | pasted into the CLI | spawned by the watcher |
 |---|---|---|
-| stop-and-ask | you answer, the run continues | the question is relayed to Telegram and the run ends; the folder is erased |
+| stop-and-ask | you answer, the run continues | the question goes to Telegram; you answer there and the same session resumes |
 | duplicate check | the pipeline's own | plus the watcher's, before spawning |
 | permissions | your session's | `bypassPermissions` + `build_settings.json` + `guard.py` |
 | timeout | none | 45 minutes, then the process tree is killed |
@@ -359,7 +372,7 @@ three months. Model names, `claude_bin`, and the `[build]`/`[kb]` `enabled` swit
 deliberately **not** overridable: they change what runs, not how hard it runs.
 
 Generated, not edited: `state/watch.db` (postings, verdicts, notifications, decisions, builds,
-source health), `state/profile_digest.md` (cache, regenerates when the canonical profile
+open questions, source health), `state/profile_digest.md` (cache, regenerates when the canonical profile
 changes), `decisions.jsonl` (append-only audit of every notification and its outcome),
 `logs/watcher.log`, `logs/builds/`.
 
@@ -464,7 +477,25 @@ yes, add German          anything after "yes" is passed to the pipeline verbatim
 no / no, too much devops the reason is appended to profile_kb.md
 later                    snooze for [notify] snooze_days
 build 3                  promote line 3 of a digest
+yes anyway               build it despite a duplicate verdict
 ```
+
+### Answering a question the watcher asked
+
+A build can end by asking you something — a stop-and-ask from the pipeline, or a duplicate it
+declined. Those messages are answerable, and answering one is not the grammar above:
+
+- **Reply to the message that asked**, and whatever you type goes to the run that asked it. Free
+  text is passed through verbatim rather than parsed, so `no sponsorship needed, I already hold
+  a permit` reaches the model as an answer instead of being read as a decline.
+- **Or just send a message in that topic** when exactly one question is open there. Two or more
+  and they are listed rather than guessed between. With none open, a bare message still starts
+  nothing — that rule has not moved.
+- **A bare `no`** (nothing after it) declines: the question is closed and the paused run's folder
+  is erased. A duplicate's `no` erases nothing, because the folder it matched belongs to a
+  finished application.
+
+`/pending` lists everything waiting on you, numbered; `/cancel <n>` closes one.
 
 ## Sorting into topics
 
@@ -477,9 +508,10 @@ in `config.toml` with the thread ids:
 ```toml
 [notify.topics]
 new_posting     = 0    # instant pings and the evening digest
-targeted_build  = 0    # postings you approved, and any question a run stops to ask
-processing_build = 0   # queued, building, retrying, declined as a duplicate
-failed_build    = 0    # a build that failed, and any retraction
+targeted_build  = 0    # postings you approved, any question a run stops to ask,
+                       #   and any duplicate it declined
+processing_build = 0   # queued, building, retrying
+failed_build    = 0    # a build that failed or was cancelled, and any retraction
 completed_build = 0    # the application is ready, and the run is complete
 ```
 
@@ -501,10 +533,12 @@ Everything here is optional and independent:
   ignoring the rest is a legitimate setup.
 - **No topics at all is the original behaviour**, byte for byte: same chat, no thread, and the
   replies still thread to the message they answer.
-- **`targeted_build` sends nothing until you set it.** It is a new record with no equivalent in a
-  plain chat, so it stays silent rather than adding traffic to a setup that never asked for it.
+- **The approval record sends nothing until `targeted_build` is set.** It is a new message with no
+  equivalent in a plain chat, so it stays silent rather than adding traffic to a setup that never
+  asked for it. Questions routed to the same topic are not affected — those have somewhere to go
+  either way, and fall back to General like everything else.
 - The watcher's own talk — heartbeats, source-disabled and recovered alerts, the weekly
-  `profile_kb.md` proposal, interrupted-build notices — stays in **General**, next to the two
+  `profile_kb.md` proposal, interrupted-build notices — stays in **General**, next to the
   commands below.
 
 One consequence worth knowing: a message routed to a topic loses its `reply_to`. Telegram rejects
@@ -515,12 +549,16 @@ Replies still work exactly as before. Reply inside whichever topic the posting w
 
 ## Commands
 
-Four commands are answered in the chat itself — in **General**, or anywhere in a non-forum chat.
+The commands are answered in the chat itself — in **General**, or anywhere in a non-forum chat.
 They are deliberately ignored inside a posting topic, where a stray `/status` is far more likely
 a mis-sent reply than a question. They are published to Telegram's own `/` menu at startup.
 
 ```
 /status                  the full technical report (below)
+/pending                 everything waiting on you, numbered
+/build <url>             build a posting without hunting for its ping
+/cancel                  stop the running build, or drop the next queued one
+/cancel 2                close question 2 from /pending
 /threshold               current score cuts, and what is waiting under them
 /threshold 60            move the instant-ping cut
 /threshold digest 30     move the digest cut
@@ -530,6 +568,52 @@ a mis-sent reply than a question. They are published to Telegram's own `/` menu 
 /restart                 restart the watcher process
 /restart force           …even with a build running
 ```
+
+### /pending
+
+Three separate kinds of waiting, which used to live in three different places or nowhere at all:
+
+```
+❓ Waiting on an answer
+1. RWE — AI Data Engineer · stopped to ask · 3h ago
+    The Match Brief just came back with a real integrity flag…
+2. Roche — Machine Learning Engineer · duplicate · 1d ago
+    Already applied — Roche — Data Scientist ML Engineer · applied 2026-06-24 · …
+Reply to the message that asked, or just send your answer here if only one is open.
+
+🛠 Builds in flight
+• Bayer — Data Scientist · running
+
+📨 Pinged, never answered (4)
+• Merck — ML Engineer
+…
+```
+
+The numbers under the first block are what `/cancel <n>` takes.
+
+### /build
+
+For a posting the watcher already has on record, this is identical to replying `yes` — the
+decision is recorded, the approval is filed in Targeted, and the build is queued.
+
+```
+/build https://…                                 a posting it already knows
+/build https://… | Acme | Data Scientist         one it has never seen
+/build https://… | Acme | Data Scientist | add German
+```
+
+The employer and role are **required** for an unknown URL and are never guessed. Both the
+duplicate check and the folder lookup search by company and title, so a wrong guess produces a
+build that renders into one folder and is then reported as "no dated folder appeared" — a run
+that worked, reported as a failure, with the documents left somewhere nothing will find them.
+
+### /cancel
+
+With a build running, it kills the CLI and everything it started — including any `latexmk`
+children — and erases the half-application, the same rule the rest of this file follows. With
+nothing running it drops the next queued job instead; the queue has no visible handles, so "the
+next one" is the only thing you can name without one, and it is the one just queued by mistake.
+`/cancel <n>` closes question `n` from `/pending` and cleans up after it.
 
 ### /status
 
@@ -740,7 +824,7 @@ Running · 12m 40s · 8/13 steps
 
   ✅ Archive posting   4m 15s
   ✅ Match brief       2m 47s
-  ✅ Company research  5m 05s
+  ➖ Company research
   ⏳ CV draft          1m 12s
   ⏳ Cover letter      0m 58s
   ⬜ Verify CV
@@ -760,6 +844,22 @@ the real completion arrives later as a `task_notification` carrying the same `to
 by the `duration_ms` the run reports for itself. And that notification has no timestamp of its
 own, so a step that *does* get a stamped result later has its finish time corrected rather than
 left on the stale stream clock.
+
+A fifth mark, `➖`, is for a step the run went past without this ever seeing it — the flow has
+reached a later phase and that row is not coming. It is not an error and it is not rare: an
+orchestrator may do a short step itself instead of dispatching the agent watched for here, and a
+resumed run did its early steps in the session before this one. Left blank those rows are
+indistinguishable from "still to come", which is how a build four steps in came to show three
+empty rows under a header reading `0/13 steps`. `STEPS` carries a phase number per row for this,
+and only a *later* phase writes an earlier one off — much of the pipeline is deliberately
+parallel, so position in the list proves nothing. The numbers are coarse on purpose: guessing
+high costs a row briefly marked `➖` just before it starts, which the next event undoes.
+
+A resumed build gets one more thing. Answering a stop-and-ask continues the same CLI session, but
+the tracker is new, so `Job.resume_log` carries the asking build's log and the checklist is primed
+from it before the first live event — the first half's steps come back with the durations they
+actually took, rather than as a blank third of a message. Anything that session left running is
+marked `➖` rather than carried, since its clock would otherwise run against this build's.
 
 The message never blocks the build. The stdout pump only flips a dirty flag; a separate task owns
 every edit, and a progress failure is logged and swallowed. On a retry the checklist resets and
@@ -788,6 +888,31 @@ A folder alone is not proof: `2026/Synergeticon/2026-07-13 - AI Engineer` holds 
 A folder hit blocks a rebuild only when both `<file_prefix> - CV.pdf` and
 `<file_prefix> - Cover Letter.pdf` (`<file_prefix>` from `identity.toml`) are present; otherwise the build proceeds and the
 message says it is rebuilding over an incomplete attempt.
+
+**A decline is not final.** It lands in **Targeted**, next to the approval it answers, and ends
+with an override:
+
+```
+⚠️ Duplicate · Roche — Machine Learning Engineer
+Already applied — Roche — Data Scientist Machine Learning Engineer · applied 2026-06-24
+  · 2026/Roche/2026-06-24 - Data Scientist Machine Learning Engineer
+Nothing was built. Reply "yes anyway" to build it regardless.
+```
+
+It used to go to **Processing** with no override and no log line, so a build that never started
+produced nothing anywhere and read as the approval having been dropped on the floor. It is now
+an open question: it appears in `/pending`, it is logged, and `yes anyway` builds it.
+
+Declining it — a bare `no` — closes the question and touches nothing else. The matched folder
+holds a *finished* application, not this run's debris, so no cleanup runs against it. That is
+also why the message names the folder in its text rather than the question carrying it.
+
+**Titles.** Extra *rank* words are free (`Senior Data Scientist` matches `Data Scientist`), extra
+*subject* words are not: `Machine Learning Engineer` against `Data Scientist Machine Learning
+Engineer` scores 0.67 and builds. It used to score 1.00 — the subject halves were compared by
+containment, which forgave every extra word on the longer side, so `Data Scientist` came free.
+The fix loosens dedupe slightly, which is the right direction: a false positive costs a missed
+application silently, a false negative costs one wasted build you can see.
 
 ### Retry on a transient upstream failure
 
@@ -858,8 +983,9 @@ said:
 The Match Brief came back with a real integrity flag — this is exactly the "stop and ask"
 case CLAUDE.md calls out. …
 
-Nothing was drafted. Reply here with what you want done, or approve the posting again
-once the profile covers it.
+Nothing was drafted yet, and the folder is being kept while this is open. Answer in this
+topic — as a reply or a plain message — and the run picks up where it stopped.
+Say "no" to drop it.
 log: 20260805-184432-rwe-ag-ai-data-engineer.log
 ```
 
@@ -869,18 +995,36 @@ subagent, and the run above asked its question a turn before the end and signed 
 "still holding on your decision from above" — useless alone, since the message it points at is
 the one that was lost.
 
+**The folder survives while the question is open**, which is the one place this file's otherwise
+absolute cleanup rule bends. A paused run is not an abandoned one, and the archived posting,
+Match Brief and Research Note are exactly what make resuming cheap instead of a second full
+build. It is safe because a folder without both PDFs never blocks a rebuild anyway — see
+[Duplicates](#duplicates). The folder is erased when you decline, when you `/cancel` it, or when
+the question expires unanswered after two days.
+
+Answering resumes the same CLI session, so the run keeps the posting, the brief and the folder
+in context — see [Answering a question the watcher asked](#answering-a-question-the-watcher-asked).
+If that session is gone by the time you answer, it falls back once to a fresh build carrying your
+answer as the note, and says so.
+
 No attempt is made to tell a stop-and-ask from a run that quietly produced nothing. Both end
-cleanly with no application, both have their folder cleaned up the same way, and quoting what
-the run said beats "the build reported success but no dated folder appeared" either way.
+cleanly with no application, and quoting what the run said beats "the build reported success but
+no dated folder appeared" either way.
 
 ### Cleanup after a bad build
 
-A build that fails, crashes, times out, or finishes without a full set of documents is
-erased rather than left half-done — after its retries, if it had any. The builder runs `scripts/cleanup_application.py` on
+A build that fails, crashes, times out, is cancelled, or finishes without a full set of documents
+is erased rather than left half-done — after its retries, if it had any. The builder runs `scripts/cleanup_application.py` on
 whatever folder appeared, which removes the dated folder, the company folder if that
 leaves it empty, the matching tracker row, and that application's `_tmp` scratch. The
 tracker workbook itself is never deleted — only the one row whose company + position +
 date match, keyed exactly as `append_tracker_entry.py` wrote it.
+
+**One exception: a run that stopped to ask.** Its folder is kept while the question is open,
+because the run is paused rather than abandoned and you may well be about to continue it. The
+cleanup still happens — just later, at whichever of these comes first: you decline the question,
+you `/cancel <n>` it, or two days pass with no answer. Everything else is erased immediately, as
+before.
 
 The Telegram reply says what was removed:
 

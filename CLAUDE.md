@@ -283,6 +283,13 @@ Headless runs get the same treatment without being asked: the watcher runs this 
 itself whenever a build fails or comes out incomplete, so a Telegram-approved build
 never leaves a half-application on disk either.
 
+One exception, and only headlessly: a run that ends on a **stop-and-ask** keeps its folder
+while the question is open in Telegram. The user can answer there, which resumes this same
+session with the folder, Match Brief and Research Note still in place — the run is paused,
+not abandoned. The watcher erases it when they decline, cancel, or leave it unanswered for
+two days. Nothing changes for the run itself: stop and say why, exactly as above, and do
+not clean up on the way out.
+
 ### If the user declines after a stop-and-ask
 
 When a stop-and-ask flag (unsupported claim, skills gap, work-authorization mismatch, or

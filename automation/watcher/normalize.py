@@ -168,6 +168,18 @@ def title_similarity(left: str, right: str) -> float:
     So tokens are split into subject words and rank/family words, and both
     halves must agree before extra words are forgiven. `Senior` being added is
     then free, while `Data` becoming `AI` is not.
+
+    Only the *family* half forgives extra words. The subject half used to as
+    well, which meant every subject word on the longer side was free too:
+    `Machine Learning Engineer` scored 1.0 against `Data Scientist Machine
+    Learning Engineer`, and a genuinely different role was declined as a
+    duplicate of an application already sent. Comparing subjects both ways —
+    Jaccard rather than containment — makes `Data Scientist` cost something,
+    which is right, because it is the part of a title that says what the job is.
+
+    That loosens deduplication a little, and deliberately in this direction: a
+    false positive costs a missed application nobody ever sees, a false negative
+    costs one build the user is told about and can stop.
     """
     a, b = title_key(left), title_key(right)
     if not a or not b:
@@ -180,8 +192,9 @@ def title_similarity(left: str, right: str) -> float:
 
     subject_a, subject_b = ta - GENERIC_TITLE_TOKENS, tb - GENERIC_TITLE_TOKENS
     family_a, family_b = ta & GENERIC_TITLE_TOKENS, tb & GENERIC_TITLE_TOKENS
-    structural = min(_containment(subject_a, subject_b),
-                     _containment(family_a, family_b))
+    subject = (len(subject_a & subject_b) / len(subject_a | subject_b)
+               if (subject_a | subject_b) else 1.0)
+    structural = min(subject, _containment(family_a, family_b))
 
     return max(jaccard, structural)
 

@@ -247,3 +247,68 @@ def test_the_two_ends_of_a_run_route_to_their_own_topics(topic: str) -> None:
 def test_a_build_report_still_carries_its_reply() -> None:
     """Dropping it is `send`'s job, and only when a thread is actually chosen."""
     assert _reply("🛠 Building…")[1] == 42
+
+
+def test_a_duplicate_decline_is_filed_where_the_approval_was(
+        monkeypatch, tmp_path) -> None:
+    """The one build message that is not progress.
+
+    A duplicate ends the run by asking the user whether to build it anyway, so
+    it belongs in Targeted — the topic their approval was in and the one they
+    read for decisions. It went to Processing, which is a feed of things
+    happening; a build that never started produced no other line there, and the
+    whole event read as the approval having been dropped on the floor.
+    """
+    import datetime as dt
+
+    from watcher import builder as builder_mod
+    from watcher import dedupe, store
+
+    path = tmp_path / "watch.db"
+    store.init_db(path)
+    monkeypatch.setattr(store, "DB_PATH", path)
+    monkeypatch.setattr(store, "ensure_dirs", lambda: None)
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    with store.connect() as conn:
+        conn.execute(
+            """INSERT INTO postings (id, loose_key, source, provider, url,
+                                     canonical_url, company, title,
+                                     first_seen_at, description)
+               VALUES ('p1', 'Roche|ML', 'ats:roche', 'greenhouse',
+                       'https://roche.test/1', 'https://roche.test/1',
+                       'Roche', 'Machine Learning Engineer', ?, '')""",
+            (now,))
+        build = store.queue_build(conn, "p1")
+
+    monkeypatch.setattr(builder_mod, "check_duplicate", lambda c, t, cfg: (
+        dedupe.ExistingApplication(
+            company="Roche", title="Data Scientist Machine Learning Engineer",
+            applied_on=dt.date(2026, 6, 24),
+            folder="/w/2026/Roche/2026-06-24 - Data Scientist ML Engineer",
+            similarity=1.0, origin="folder"), ""))
+
+    class _Chatty(_Notifier):
+        chat_id = "-100123"
+        config = Config(notify={"topics": {"targeted_build": 162}})
+
+    worker = builder_mod.Builder(_Chatty())
+    asyncio.run(worker._handle(
+        builder_mod.Job("p1", "", 42, build)))
+
+    text, _, topic = worker.notifier.sent[0]
+    assert topic == "targeted_build"
+    assert "Duplicate" in text
+    assert "anyway" in text, "a decline the user cannot overrule is final"
+
+    # And it is recorded as a question, in the thread it was sent to, so the
+    # override can be a plain reply rather than another command.
+    with store.connect() as conn:
+        question = store.question_for_posting(conn, "p1")
+    assert question is not None
+    assert question["kind"] == store.QUESTION_DUPLICATE
+    assert question["thread_id"] == 162
+    assert not question["folder"], (
+        "that folder holds a finished application — recording it here would "
+        "point `no` and `/cancel` at it")
+    assert "2026-06-24" in question["question"], (
+        "which is why the match has to be named in the text instead")
