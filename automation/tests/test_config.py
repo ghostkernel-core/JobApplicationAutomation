@@ -497,13 +497,19 @@ def test_every_source_gets_a_stable_key(entry, expected) -> None:
     assert config.source_key(entry) == expected
 
 
-def test_title_rules_are_lowered_so_the_file_need_not_be() -> None:
-    sources = parse_sources({"defaults": {
-        "title_allow": ["Data Scientist", "ML Engineer"],
-        "title_deny": ["Sales"],
-    }})
-    assert sources.defaults.title_allow == ("data scientist", "ml engineer")
+def test_title_deny_is_lowered_so_the_file_need_not_be() -> None:
+    sources = parse_sources({"defaults": {"title_deny": ["Sales"]}})
     assert sources.defaults.title_deny == ("sales",)
+
+
+def test_a_leftover_title_allow_key_is_ignored_not_rejected() -> None:
+    """An un-migrated sources.toml must keep loading after the allow-list
+    was retired — the key going quiet must not stop the watcher."""
+    sources = parse_sources({"defaults": {
+        "title_allow": ["Data Scientist"], "title_deny": ["Sales"],
+    }})
+    assert sources.defaults.title_deny == ("sales",)
+    assert not hasattr(sources.defaults, "title_allow")
 
 
 def test_the_legacy_countries_setting_is_still_honoured() -> None:
@@ -561,7 +567,7 @@ def test_a_sources_file_with_nothing_in_it_still_builds() -> None:
     sources = parse_sources({})
     assert sources.all_enabled() == []
     assert sources.filters.location.allowed == frozenset()
-    assert sources.defaults == SourceDefaults((), (), ())
+    assert sources.defaults == SourceDefaults((), ())
 
 
 def test_the_geographic_lists_are_additive_and_interchangeable() -> None:

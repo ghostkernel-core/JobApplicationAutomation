@@ -50,7 +50,7 @@ def posting(**over) -> Posting:
 
 
 def defaults(**over) -> SourceDefaults:
-    fields = {"countries": (), "title_allow": (), "title_deny": ()}
+    fields = {"countries": (), "title_deny": ()}
     fields.update(over)
     return SourceDefaults(**fields)
 
@@ -366,29 +366,22 @@ def test_a_posting_with_no_title_is_refused() -> None:
     assert result.reason == "missing title"
 
 
-def test_the_allow_list_is_matched_as_a_substring_of_the_title() -> None:
-    assert check(posting(title="Senior Machine Learning Engineer"),
-                 title_allow=("machine learning",)).accepted
-    result = check(posting(title="Marketing Manager"),
-                   title_allow=("machine learning",))
-    assert not result.accepted
-    assert result.reason == "title outside target roles"
-
-
-def test_an_empty_allow_list_lets_every_title_through() -> None:
+def test_there_is_no_allow_list_every_title_gets_through_by_default() -> None:
     assert check(posting(title="Marketing Manager")).accepted
 
 
-def test_the_deny_list_wins_over_the_allow_list() -> None:
+def test_the_deny_list_hard_blocks_a_title() -> None:
     result = check(posting(title="Machine Learning Sales Engineer"),
-                   title_allow=("machine learning",), title_deny=("sales",))
+                   title_deny=("sales",))
     assert not result.accepted
     assert result.reason == "title hard-blocked"
+    assert result.stage == "title"
 
 
-def test_title_rules_ignore_case() -> None:
-    assert check(posting(title="MACHINE LEARNING ENGINEER"),
-                 title_allow=("machine learning",)).accepted
+def test_title_deny_ignores_case() -> None:
+    result = check(posting(title="MACHINE LEARNING SALES ENGINEER"),
+                   title_deny=("sales",))
+    assert not result.accepted
 
 
 def test_a_posting_older_than_the_cap_is_refused() -> None:
@@ -590,7 +583,7 @@ def test_a_posting_that_clears_every_rule_is_accepted() -> None:
             seniority=SeniorityFilter(allow=("senior", "mid")),
             experience=ExperienceFilter(mode="filter", max_years=8),
         ),
-        title_allow=("machine learning",), title_deny=("sales",),
+        title_deny=("sales",),
     )
     assert result == prefilter.FilterResult(True, "")
 
@@ -602,8 +595,7 @@ def test_a_posting_that_clears_every_rule_is_accepted() -> None:
 def test_explain_prints_what_the_config_expands_to(monkeypatch, capsys) -> None:
     """`regions = ["DACH"]` is only useful once you can see the codes it became."""
     sources = Sources(
-        defaults=defaults(title_allow=("machine learning",),
-                          title_deny=("sales",)),
+        defaults=defaults(title_deny=("sales",)),
         ats=(), portals=(),
         filters=Filters(
             location=LocationFilter(regions=("DACH",), exclude_countries=("CH",),
@@ -622,7 +614,8 @@ def test_explain_prints_what_the_config_expands_to(monkeypatch, capsys) -> None:
     assert "-> excluded       CH" in out
     assert "-> cities         Munich" in out
     assert "-> excluded cities Bonn" in out
-    assert "machine learning" in out and "sales" in out
+    assert "sales" in out
+    assert "no allow-list" in out
     assert "max_years         8" in out
 
 

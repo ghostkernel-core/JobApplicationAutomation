@@ -43,8 +43,7 @@ def health_row(source: str, *, disabled=0, failures=0, error="",
 
 
 def sources(*, ats=(), portals=(), filters=None) -> Sources:
-    return Sources(defaults=SourceDefaults(countries=("DE",), title_allow=(),
-                                           title_deny=()),
+    return Sources(defaults=SourceDefaults(countries=("DE",), title_deny=()),
                    ats=tuple(ats), portals=tuple(portals),
                    filters=filters or Filters())
 

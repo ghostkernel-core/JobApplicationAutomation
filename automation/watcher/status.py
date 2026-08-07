@@ -231,8 +231,9 @@ def print_filters(sources: Sources) -> None:
     field("experience", f"{exp.mode}"
           + (f" — drop above {exp.max_years} years" if exp.filtering
              else " — shown in the ping, never acted on"))
-    wrapped("title must match", sources.defaults.title_allow)
     wrapped("title must not", sources.defaults.title_deny)
+    field("title otherwise", "judged against the profile by triage, not by a "
+                             "keyword list")
 
 
 def print_behaviour(config: Config) -> None:

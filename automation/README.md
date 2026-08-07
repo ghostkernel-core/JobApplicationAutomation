@@ -38,8 +38,9 @@ The numbers below are the shipped `config.toml`; `/status` prints the ones actua
       ├─ fingerprint already stored, or a loose company+title match in 30 days?
       │        └──► dropped as already known
       │
-      ├─ prefilter (free): title allow/deny, posted ≤ 14d ago, hard blockers,
-      │  location, seniority — years is extracted and shown, not enforced
+      ├─ prefilter (free): title deny, posted ≤ 14d ago, location, seniority,
+      │  then (needs the body) hard blockers, experience cap — years is
+      │  extracted and shown, not enforced
       │        └──► dropped, with a reason (`poll --dry-run` prints them)
       │
       ├─ body under 800 chars? fetch the real ad and run the prefilter again
@@ -321,6 +322,9 @@ Underneath, the entrypoint is still directly usable, and every sub-command below
 | command | what it does |
 |---|---|
 | `-m watcher.poll --dry-run` | fetch and normalize, store nothing; `--source ats:Bayer` to isolate one |
+| `-m watcher.triage --replay 30` | re-judge the last 30 stored postings against the profile and print a table, plus an acceptance-gate check against their stored scores; writes nothing |
+| `-m watcher.triage --backfill [--limit N] [--source KEY] [--dry-run]` | fetch, prefilter, and triage a fresh batch the way `poll` would, without storing the postings themselves — the deliberate way to work through more than one cycle's worth at once |
+| `-m watcher.triage --explain` | print the exact prompt a real call would send, no model call |
 | `-m watcher.match --replay 30` | re-score the last 30 stored postings and print a table |
 | `-m watcher.match --calibrate` | score postings you already applied to, to sanity-check the threshold |
 | `-m watcher.match --refresh-digest` | rebuild the cached profile digest by hand |
@@ -400,8 +404,9 @@ configure: each portal reads a different internal shape, so a fourth one means a
 | `hiringcafe` | Next.js `_next/data` endpoint, via the shared browser | yes | none — worldwide, geography is filtered below |
 | `stepstone` | the search page's `__PRELOADED_STATE__`, via the same browser | yes | `location` → `/in-<slug>`; `"Deutschland"` is all of it |
 
-`queries` is search text, verbatim and per portal. Broad is fine — the `[defaults] title_allow`
-list decides relevance and is stricter than any of the three (a real run: 209 fetched, 92 kept).
+`queries` is search text, verbatim and per portal. Broad is fine — there is no title allow-list
+to narrow it further; relevance is judged by `[triage]` against the profile, downstream of
+fetching.
 
 The two fragile ones share **one persistent Playwright context** in `state/browser/`, so a
 Cloudflare challenge solved once is reused instead of re-triggered every 30 minutes. Playwright

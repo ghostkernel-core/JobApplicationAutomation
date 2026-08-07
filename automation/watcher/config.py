@@ -215,6 +215,7 @@ class Config:
     notify: dict[str, Any] = field(default_factory=dict)
     build: dict[str, Any] = field(default_factory=dict)
     kb: dict[str, Any] = field(default_factory=dict)
+    triage: dict[str, Any] = field(default_factory=dict)
 
     def _num(self, section_name: str, section: dict[str, Any], key: str,
              default: _Number, cast: Callable[[str], _Number] = int) -> _Number:
@@ -515,11 +516,60 @@ class Config:
     def kb_timeout(self) -> int:
         return self._num("kb", self.kb, "timeout_seconds", 180)
 
+    # --- triage -------------------------------------------------------------
+    @property
+    def triage_enabled(self) -> bool:
+        """Default False, unlike every other `_enabled` flag in this file.
+
+        Every existing `poll_once` test constructs a bare `Config()`, and this
+        default is what keeps that construction from spawning a `claude`
+        subprocess. config.toml itself ships `enabled = true` — the file is
+        the on switch for a live deployment, the code default is a harness
+        guard for everything that is not one.
+        """
+        return bool(self.triage.get("enabled", False))
+
+    @property
+    def triage_model(self) -> str:
+        return str(self.triage.get("model", "haiku"))
+
+    @property
+    def triage_batch_size(self) -> int:
+        """Small on purpose: the prompt is dominated by the profile digest,
+        not by per-posting content, since triage never sees a description."""
+        return self._num("triage", self.triage, "batch_size", 200)
+
+    @property
+    def triage_timeout(self) -> int:
+        return self._num("triage", self.triage, "timeout_seconds", 120)
+
+    @property
+    def triage_max_per_cycle(self) -> int:
+        """Caps how many candidates one poll cycle sends to triage.
+
+        Above the cap, the excess is deferred to the next cycle rather than
+        judged — never marked unsure just to clear the queue, and never
+        dropped by exhaustion. This is the safety net for the one-time
+        backfill, where thousands of never-stored candidates would otherwise
+        arrive in a single cycle.
+        """
+        return self._num("triage", self.triage, "max_per_cycle", 600)
+
+    @property
+    def triage_drop_retention_days(self) -> int:
+        return self._num("triage", self.triage, "drop_retention_days", 90)
+
 
 @dataclass(frozen=True)
 class SourceDefaults:
     countries: tuple[str, ...]
-    title_allow: tuple[str, ...]
+    #: There is deliberately no `title_allow`. A hand-written substring list
+    #: decided what was ever *seen*, ahead of the profile that decides what is
+    #: worth applying to, and it was never measured: `ats:Roche` fetched 200
+    #: postings a cycle and stored none, ten of fifteen boards had stored
+    #: nothing ever, and a title like "Specialist Advanced Analytics" had no way
+    #: through. `title_deny` stays — a substring is a fine way to say never, and
+    #: a poor way to say only.
     title_deny: tuple[str, ...]
 
 
@@ -721,6 +771,7 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         notify=raw.get("notify", {}),
         build=raw.get("build", {}),
         kb=raw.get("kb", {}),
+        triage=raw.get("triage", {}),
     )
 
 
@@ -856,7 +907,9 @@ def _parse_sources(raw: dict[str, Any]) -> Sources:
     return Sources(
         defaults=SourceDefaults(
             countries=tuple(defaults.get("countries", [])),
-            title_allow=tuple(s.lower() for s in defaults.get("title_allow", [])),
+            # A `title_allow` left in an existing sources.toml is ignored
+            # rather than rejected: the file is hand-edited and the key going
+            # quiet must not stop the watcher. `watcherctl status` says so.
             title_deny=tuple(s.lower() for s in defaults.get("title_deny", [])),
         ),
         ats=tuple(raw.get("ats", [])),

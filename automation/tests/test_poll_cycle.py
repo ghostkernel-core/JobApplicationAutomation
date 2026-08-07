@@ -25,6 +25,7 @@ on the opening sentence of the ad.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 
 import pytest
@@ -61,8 +62,7 @@ def posting(source: str, job_id: str, *, title: str = "Data Scientist",
 
 
 def sources(*names: str, fragile: bool = False, portals=()) -> Sources:
-    defaults = SourceDefaults(countries=("DE",),
-                              title_allow=("data scientist",), title_deny=())
+    defaults = SourceDefaults(countries=("DE",), title_deny=())
     return Sources(defaults=defaults,
                    ats=tuple({"company": n, "provider": "greenhouse",
                               "token": n.lower(),
@@ -448,9 +448,14 @@ def test_the_cli_says_dry_run_so_a_transcript_is_not_misread(
 
 
 def test_the_cli_can_show_why_things_were_filtered(db, boards, quiet,
+                                                    monkeypatch,
                                                     capsys) -> None:
     """The default is silent about it — a cycle drops hundreds — but it is the
     first thing to look at when a board goes quiet."""
+    filtered = dataclasses.replace(
+        sources("Alpha"),
+        defaults=SourceDefaults(countries=("DE",), title_deny=("chef",)))
+    monkeypatch.setattr(poll_module, "load_sources", lambda: filtered)
     boards["ats:Alpha"] = [posting("ats:Alpha", "1", title="Chef")]
 
     poll_module.main([])

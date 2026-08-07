@@ -51,9 +51,12 @@ def _posting(source: str, job_id: str, title: str = "Data Scientist",
 
 
 def _sources(*names: str) -> Sources:
-    defaults = SourceDefaults(countries=("DE",),
-                              title_allow=("data scientist",),
-                              title_deny=())
+    # `chef` is denied so the "Chef" postings below still produce a filtered
+    # count. They used to be filtered by omission — an allow-list of
+    # ("data scientist",) that nothing else in the file mentioned — so removing
+    # the allow-list would have left every funnel test asserting on a
+    # filtered-count of zero while still passing.
+    defaults = SourceDefaults(countries=("DE",), title_deny=("chef",))
     return Sources(defaults=defaults,
                    ats=tuple({"company": n, "provider": "greenhouse",
                               "board": n.lower()} for n in names),
