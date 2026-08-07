@@ -36,6 +36,83 @@ PREP_PDF = _IDENT.doc_name("Interview Prep", ".pdf")
 ROOT = Path(__file__).resolve().parents[1]
 MASTER_COMMON = ROOT / "master" / "LaTeX" / "shared" / "common.tex"
 
+# Transcribed from rules/07-humanlike-anti-ai.md section F2, which is the source
+# of truth. This lives here rather than in qa_application.py because this module
+# is the lower one: qa_application imports from it, so a single definition can
+# cover both the .tex scan (check_bad_patterns, below) and the PDF scan. Keeping
+# two lists is what let GPT, Sonnet, Opus, Llama and Cursor be caught in a PDF
+# but not in the .tex that produced it. Update this and rule 07 together.
+VENDOR_NAMES = (
+    "Anthropic", "Claude", "Sonnet", "Opus", "Haiku",
+    "OpenAI", "ChatGPT", "Codex", "DALL-E", "Whisper",
+    "Gemini", "Bard", "Gemma", "DeepMind",
+    "Llama", "Mistral", "Mixtral", "Cohere", "Grok", "xAI",
+    "Perplexity", "Copilot", "Cursor",
+    "Ollama", "LM Studio", "LangChain",
+    "MCP", "Model Context Protocol",
+)
+
+# Two families that need a shape rather than a literal: the GPT version zoo
+# (GPT, GPT-3, GPT-3.5, GPT-4o, GPT-5) and the o-series (o1, o3, o1-mini).
+_VENDOR_SHAPES = (
+    r"GPT-?\d*(?:\.\d+)?o?",
+    r"o[13](?:-(?:mini|preview))?",
+)
+
+
+def _split_name(name: str) -> list[str]:
+    """The words inside a vendor name: "LangChain" -> ["Lang", "Chain"].
+
+    Rule 07 F2 bans these in "any casing, spacing, or hyphenation", and the
+    brands are written both ways in the wild ("OpenAI"/"Open AI",
+    "LangChain"/"Lang Chain"). Splitting on the internal capital as well as on
+    real whitespace lets one entry in VENDOR_NAMES cover every spelling.
+    """
+    parts: list[str] = []
+    for chunk in re.split(r"[\s-]+", name):
+        if not chunk:
+            continue
+        parts.extend(re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", chunk) or [chunk])
+    return parts
+
+
+def _name_pattern(name: str) -> str:
+    """A vendor name, tolerant of how the separator between its words is written."""
+    return r"[\s-]?".join(re.escape(part) for part in _split_name(name))
+
+
+def _loose_name_pattern(name: str) -> str:
+    """A vendor name, additionally tolerant of a space *inside* one of its words.
+
+    pypdf splits kerned glyph pairs, so this workspace's CVs extract "PyTorch"
+    as "PyT orch", "Torchvision" as "T orchvision" and the owner's own first
+    name as "T ahasanul". poppler's pdftotext reads all three correctly, so it
+    is an extractor artifact rather than a defect in the document — but pypdf is
+    what this module scans, and a banned name split the same way would walk
+    straight through the \\b-anchored strict pattern.
+
+    Collapsing the spaces out of the text instead does not work: it also removes
+    the genuine gap between words, so "built with Cla ude" becomes
+    "builtwithClaude" and the leading \\b no longer holds. Loosening the pattern
+    keeps both anchors meaningful. Only ever run this against text extracted
+    from a PDF, never against .tex source.
+    """
+    return r"[\s-]?".join(
+        r"\s?".join(re.escape(char) for char in part) for part in _split_name(name)
+    )
+
+
+def _vendor_alternation(patterns: list[str]) -> str:
+    return r"\b(?:" + "|".join(patterns) + r")\b"
+
+
+VENDOR_PATTERN = _vendor_alternation(
+    [_name_pattern(name) for name in VENDOR_NAMES] + list(_VENDOR_SHAPES)
+)
+VENDOR_PATTERN_LOOSE = _vendor_alternation(
+    [_loose_name_pattern(name) for name in VENDOR_NAMES] + list(_VENDOR_SHAPES)
+)
+
 # Generic patterns only: these apply to anybody using this system, regardless
 # of who owns the workspace, so they are safe to keep hard-coded in a public
 # repo. Person-specific stale strings (superseded dates, claims that person
@@ -49,8 +126,11 @@ BAD_PATTERNS = [
     r"\?\?",
     r"visa|permit|sponsorship|relocation",
     r"PERSOENLICHE|Nationalitaet|\bfuer\b|\bueber\b|Gruessen|Strasse",
-    r"\b(?:Claude|ChatGPT|Anthropic|OpenAI|Ollama|Gemini|Mistral|Copilot|LangChain|MCP)\b",
+    VENDOR_PATTERN,
 ]
+
+# A readable name for the patterns that are too long to print back at a reader.
+PATTERN_LABELS = {VENDOR_PATTERN: "AI vendor/model name (rule 07 F2)"}
 
 STALE_PATTERNS_FILE = ROOT / "rules" / "stale_patterns.txt"
 
@@ -100,11 +180,56 @@ def pdf_text_and_pages(path: Path) -> tuple[int, str, list[str]]:
         return 0, "", [f"{path.name}: cannot read PDF: {exc}"]
 
 
-def check_bad_patterns(name: str, text: str) -> list[str]:
+# Fields worth reading back. /CreationDate and /ModDate are deliberately absent:
+# they carry the build time to the second, which is a mild tell, but suppressing
+# it needs SOURCE_DATE_EPOCH and a reproducible-build flag on the compile, and an
+# ordinary human LaTeX user leaks exactly the same field.
+METADATA_KEYS = ("/Producer", "/Creator", "/Author", "/Title", "/Subject", "/Keywords")
+
+
+def pdf_metadata(path: Path) -> dict[str, str]:
+    """The document-information fields of a PDF, plus whether it carries XMP.
+
+    rules/slices/10-final-verifier.md tells that agent to confirm no banned
+    string sits in PDF metadata, but nothing has ever put the metadata in front
+    of it. Today's output is ordinary (`LaTeX with hyperref` / a MiKTeX
+    producer, no /Author, no /Title), so this is a regression guard for the day
+    a template gains a \\hypersetup.
+
+    Missing or unreadable metadata is reported as {} — never as an error. A PDF
+    with no /Info dictionary is valid, and this is a reporting field, not a gate.
+    """
+    if PdfReader is None:
+        return {}
+    try:
+        reader = PdfReader(str(path))
+        info = reader.metadata or {}
+        found = {key: str(info[key]) for key in METADATA_KEYS if info.get(key)}
+        if reader.xmp_metadata is not None:
+            found["xmp"] = "present"
+        return found
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def check_bad_patterns(name: str, text: str, from_pdf: bool = False) -> list[str]:
+    """Every BAD_PATTERNS hit in one document's text.
+
+    `from_pdf` swaps the strict vendor pattern for the loose one, which also
+    matches a name pypdf has split at a kerning pair. It is off by default
+    because .tex source has no such artifact and the loose pattern is a wider
+    net than that text needs.
+    """
     errors: list[str] = []
     for pattern in BAD_PATTERNS:
-        if re.search(pattern, text, flags=re.IGNORECASE):
-            errors.append(f"{name}: forbidden/stale pattern found: {pattern}")
+        active = VENDOR_PATTERN_LOOSE if (from_pdf and pattern == VENDOR_PATTERN) else pattern
+        match = re.search(active, text, flags=re.IGNORECASE)
+        if match:
+            label = PATTERN_LABELS.get(pattern, pattern)
+            errors.append(
+                f"{name}: forbidden/stale pattern found: {label} "
+                f"(matched {match.group(0).strip()!r})"
+            )
     return errors
 
 
@@ -180,7 +305,7 @@ def check_folder(folder: Path, require_prep: bool = True) -> list[str]:
         if pages and pages > limit:
             errors.append(f"{name}: {pages} pages exceeds limit {limit}")
         if text:
-            errors.extend(check_bad_patterns(name, text))
+            errors.extend(check_bad_patterns(name, text, from_pdf=True))
             if not any(part in text for part in _IDENT.full_name.split() if len(part) > 2):
                 errors.append(f"{name}: PDF text extraction missing candidate name")
 
@@ -242,7 +367,7 @@ def check_cv_folder(folder: Path, expect_phd: bool) -> list[str]:
         if pages and pages > PAGE_LIMITS[name]:
             errors.append(f"{name}: {pages} pages exceeds limit {PAGE_LIMITS[name]}")
         if text:
-            errors.extend(check_bad_patterns(name, text))
+            errors.extend(check_bad_patterns(name, text, from_pdf=True))
             if not any(part in text for part in _IDENT.full_name.split() if len(part) > 2):
                 errors.append(f"{name}: PDF text extraction missing candidate name")
             rendered_text[name] = text

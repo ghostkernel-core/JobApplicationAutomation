@@ -16,13 +16,36 @@ Self-check:  python scripts/workspace_identity.py
 """
 from __future__ import annotations
 
+import os
 import tomllib
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-IDENTITY_PATH = ROOT / "identity.toml"
+
+#: `JOBAPP_IDENTITY` points this at a file outside the checkout. It exists for
+#: the one caller that has no identity.toml and cannot be given one: CI, where
+#: the file is untracked by design and the structure job actively fails if it
+#: ever appears. Several modules build their document-name constants at import
+#: time, so an absent identity there is not a skipped test — it is a collection
+#: error that takes the whole suite down.
+#:
+#: This is deliberately not a fallback. Nothing is guessed and nothing is
+#: relaxed: the override still goes through the same validation, so a stub full
+#: of FILL IN fails exactly as it would at the default path.
+def default_path(environ: dict | None = None) -> Path:
+    """Where `load()` looks when it is not given a path.
+
+    Takes the environment as an argument so the rule can be tested without
+    reloading this module — a reload would hand out a second `load` with its own
+    cache while every importer still holds the first.
+    """
+    env = os.environ if environ is None else environ
+    return Path(env.get("JOBAPP_IDENTITY") or ROOT / "identity.toml")
+
+
+IDENTITY_PATH = default_path()
 
 # Every key that must be present before a document can be rendered.
 REQUIRED_PERSON = ("full_name", "file_prefix", "email", "phone",

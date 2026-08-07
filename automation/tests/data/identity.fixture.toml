@@ -1,0 +1,28 @@
+# An invented person, so CI has an identity.toml to load.
+#
+# The real one is untracked on purpose and the structure job fails if it is ever
+# committed, which leaves every module that builds its document-name constants
+# at import time — latex_healthcheck, and everything importing it — unimportable
+# on a fresh checkout. Point JOBAPP_IDENTITY here and they load.
+#
+# Nobody by this name exists. It must stay that way: do not "improve" these
+# values with anything from a real profile, and never point a real build at this
+# file — it renders straight onto a CV.
+
+[person]
+full_name     = "Alex Morgan"
+file_prefix   = "Morgan, Alex"
+email         = "alex.morgan@example.invalid"
+phone         = "+49 30 000000"
+date_of_birth = "01.01.1990"
+linkedin      = "linkedin.com/in/example"
+street        = "Beispielstraße 1"
+city          = "Berlin"
+
+[en]
+city_line   = "10115 Berlin, Germany"
+nationality = "German"
+
+[de]
+city_line   = "10115 Berlin, Deutschland"
+nationality = "Deutsch"

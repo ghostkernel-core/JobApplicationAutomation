@@ -47,6 +47,11 @@ python scripts/latex_healthcheck.py <folder>          # folder is POSITIONAL, no
 
 python scripts/qa_application.py <folder>             # one-pass QA, see below
        [--json] [--no-images] [--require-prep]
+       [--posting-text FILE]  # plain-text job description for the ATS number;
+                              # better input than re-parsing the archived .html
+
+python scripts/ats_report.py <folder>       # the ATS section on its own, for debugging
+       [--posting-text FILE] [--json]       # qa_application already runs this
 
 python scripts/pdf_to_images.py <pdf>
        [--outdir DIR]  # default _tmp/pdf_pages/<pdf stem>/
@@ -65,6 +70,26 @@ python scripts/append_tracker_entry.py --company C --position P --location L --c
 
 python scripts/check_latex_toolchain.py    # no args; reports engine availability
 ```
+
+## QA report shape
+
+`--json` prints one object. Four keys decide nothing and two decide everything:
+
+| Key | Weight |
+|---|---|
+| `errors`, `fingerprints`, `files.unexpected` | these three, and only these, set `verdict` |
+| `documents[]` | per PDF: `pages`, `limit`, `within_limit`, `metadata`, `images` |
+| `style` | `hits`, `metrics`, `bullet_runs` — AI tells, report-only |
+| `ats` | `brief` and `posting` keyword coverage of the CV, report-only |
+
+`style` and `ats` can never fail a run. Both are also written to
+`_tmp/payloads/<Company> <date> <Role>/qa_summary.json`, which is where the watcher
+reads them for its Telegram message — outside the deliverable folder, because a stray
+`.json` inside it is an unexpected file and unexpected files fail the inventory.
+
+A `null` ATS section means "not measured", not "scored zero": no Match Brief was
+archived, or the saved posting page holds no readable description. The number is
+keyword coverage, not a recruiter's ATS score — no vendor publishes that formula.
 
 ## Payload keys
 
