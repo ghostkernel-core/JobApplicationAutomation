@@ -21,10 +21,20 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
 
-from .config import DB_PATH, ensure_dirs
+from .config import DB_PATH, ensure_dirs, to_absolute, to_relative
 from .normalize import Posting
 
 log = logging.getLogger("watcher.store")
+
+#: Path columns in this database — `builds.folder`, `builds.log_path`,
+#: `questions.folder` — hold a path *relative to the workspace root*, written
+#: on the way in and resolved on the way out. Callers pass and receive absolute
+#: paths throughout; the relative form exists only on disk.
+#:
+#: The alternative, storing what the caller held, is what this replaces: after
+#: the workspace moved off `D:\Job Applications` every one of the 42 stored
+#: paths pointed at a drive that is no longer there, which turned a finished
+#: application into an empty folder and a build log into a missing file.
 
 #: `notifications.kind` values that mean "this posting was announced to the
 #: user". Everything else in that table — currently `build` — is recorded only
@@ -618,7 +628,7 @@ def start_build(conn: sqlite3.Connection, posting_id: str, log_path: str) -> int
     cur = conn.execute(
         """INSERT INTO builds (posting_id, status, log_path, started_at)
            VALUES (?, 'running', ?, ?)""",
-        (posting_id, log_path, _now()),
+        (posting_id, to_relative(log_path), _now()),
     )
     return int(cur.lastrowid)
 
@@ -626,7 +636,7 @@ def start_build(conn: sqlite3.Connection, posting_id: str, log_path: str) -> int
 def mark_build_running(conn: sqlite3.Connection, build_id: int, log_path: str) -> None:
     conn.execute(
         "UPDATE builds SET status = 'running', log_path = ?, started_at = ? WHERE id = ?",
-        (log_path, _now(), build_id),
+        (to_relative(log_path), _now(), build_id),
     )
 
 
@@ -655,10 +665,13 @@ def build_log_path(conn: sqlite3.Connection, build_id: int) -> str:
 
     A build that was declined as a duplicate has no log at all, so the empty
     string is an ordinary answer here and not a missing row.
+
+    Absolute, resolved against the current workspace root — the caller opens it.
     """
     row = conn.execute("SELECT log_path FROM builds WHERE id = ?",
                        (build_id,)).fetchone()
-    return (row["log_path"] or "") if row else ""
+    stored = (row["log_path"] or "") if row else ""
+    return str(to_absolute(stored)) if stored else ""
 
 
 def unfinished_builds(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -680,7 +693,7 @@ def finish_build(conn: sqlite3.Connection, build_id: int, status: str,
     conn.execute(
         """UPDATE builds SET status = ?, folder = ?, detail = ?, finished_at = ?
            WHERE id = ?""",
-        (status, folder, detail, _now(), build_id),
+        (status, to_relative(folder), detail, _now(), build_id),
     )
 
 
@@ -715,7 +728,7 @@ def ask_question(conn: sqlite3.Connection, build_id: int, posting_id: str,
             question, folder, session_id, asked_at)
            VALUES (?,?,?,?,?,?,?,?,?,?)""",
         (build_id, posting_id, kind, str(chat_id), int(message_id), thread_id,
-         question, folder, session_id, _now()),
+         question, to_relative(folder), session_id, _now()),
     )
     return int(cur.lastrowid)
 

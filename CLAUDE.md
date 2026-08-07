@@ -155,6 +155,7 @@ Rules:
 - `--status` defaults to `Applied`; leave it at the default. Status changes after that are the user's to make in Excel.
 - The script reads its columns from the sheet's header row, so the user may add or remove columns in Excel without breaking the run. Do not re-add a column the user has deleted.
 - If the workbook for that year does not exist yet, the script creates it — no separate setup step.
+- Keep passing the **absolute** path to `--folder`, exactly as `scaffold.py` printed it. The script stores the workspace-relative form (`2026/<Company>/<date> - <Role>`) in the `Application Folder` column, so the row still resolves after the workspace is moved to another drive, cloned to another machine, or read on another OS. Everything this system persists follows that rule — see `scripts/workspace_paths.py`, and `scripts/normalize_stored_paths.py` to repair values written before it.
 - Missing/stale tracker row is not a reason to fail the run: if the script errors, report it in the step 11 summary and move on.
 
 Both tracker scripts need `openpyxl` (already installed; `python -m pip install openpyxl` if a
@@ -223,6 +224,9 @@ Two files that are not worth a turn:
   build/append, `clean_deliverable.py` to tidy a finished folder down to its deliverables,
   and `cleanup_application.py` to undo a failed run entirely. The two are not
   interchangeable: the first runs on success, the second erases the application.
+  `workspace_paths.py` defines how a path is written down (relative to the workspace
+  root, forward slashes) and `normalize_stored_paths.py` repairs stores written
+  before it. Neither is part of a run.
 - `<YYYY>/Job Applications Tracker <YYYY>.xlsx` — application tracker, one row per application.
 - `automation/` — the job watcher (polling, matching, Telegram, headless builds). Self-contained:
   its own `.venv`, config, sqlite state, and logs. Nothing in the pipeline reads from it.

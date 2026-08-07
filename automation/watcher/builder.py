@@ -44,7 +44,7 @@ from . import dedupe, progress, store
 from .claude_cli import ClaudeError, resolve_bin
 from .config import (BUILD_LOG_DIR, BUILD_SETTINGS_PATH, REPO_ROOT, Config,
                      ensure_dirs, load_config, load_identity,
-                     sync_build_settings)
+                     sync_build_settings, to_absolute)
 from .notifier import TELEGRAM_MAX_CHARS
 
 # Imported after .config, which is what puts scripts/ on sys.path.
@@ -1011,7 +1011,9 @@ class Builder:
         if not message_id or not log_path:
             return
         try:
-            path = Path(log_path)
+            # Straight off the row rather than through `store.build_log_path`,
+            # so the stored relative value is resolved here instead.
+            path = to_absolute(log_path)
             if not path.exists():
                 return
             tracker = progress.replay(path)

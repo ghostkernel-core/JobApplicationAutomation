@@ -52,6 +52,14 @@ REPO_ROOT = AUTOMATION_DIR.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 from workspace_identity import load as load_identity  # noqa: E402
 
+# Same reasoning, same source: every path this system persists is stored
+# relative to the workspace root, and `scripts/workspace_paths.py` is the one
+# definition of what that means. The pipeline scripts write those values; the
+# watcher reads them back. Two copies of the rule would be two chances to drift.
+from workspace_paths import (  # noqa: E402,F401
+    FOLDER_RE, YEAR_RE, to_absolute, to_relative,
+)
+
 STATE_DIR = AUTOMATION_DIR / "state"
 LOG_DIR = AUTOMATION_DIR / "logs"
 BUILD_LOG_DIR = LOG_DIR / "builds"

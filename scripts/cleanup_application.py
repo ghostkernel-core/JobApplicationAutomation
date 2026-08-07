@@ -34,16 +34,14 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import re
 import shutil
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-TMP = ROOT / "_tmp"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workspace_paths import FOLDER_RE, ROOT, YEAR_RE  # noqa: E402
 
-FOLDER_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\s*-\s*(.+)$")
-YEAR_RE = re.compile(r"^(19|20)\d{2}$")
+TMP = ROOT / "_tmp"
 
 # Written by make_application_tracker.py as a per-row formula. Rewriting the
 # data region must not touch it, or row N ends up holding row N+1's formula.

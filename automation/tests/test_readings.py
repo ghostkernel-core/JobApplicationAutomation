@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import datetime as dt
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -727,13 +728,42 @@ def test_the_other_employers_in_the_tracker_are_passed_over(tmp_path) -> None:
 
 
 def test_a_tracker_row_reports_the_folder_it_names(tmp_path) -> None:
+    """The column stores a workspace-relative path; consumers want a real one.
+
+    `is_complete` asks the filesystem, `builder.check_duplicate` calls
+    `.is_dir()`, and the value eventually reaches `cleanup_application.py
+    --folder`, which resolves against the process cwd and would refuse a
+    relative one. So it is absolutised where it enters the program.
+    """
     today = dt.date.today()
     tracker(tmp_path, today.year,
             [("Example", "Data Scientist", today, "2026/Example/x")])
 
     hit = dedupe.find_existing("Example", "Data Scientist", root=tmp_path)
-    assert hit.folder == "2026/Example/x"
-    assert "2026/Example/x" in hit.describe()
+    assert hit.folder == str(tmp_path / "2026" / "Example" / "x")
+    assert Path(hit.folder).is_absolute()
+
+
+def test_a_tracker_row_written_before_the_workspace_moved_still_resolves(
+        tmp_path, identity) -> None:
+    r"""The regression the whole relative-path convention exists to prevent.
+
+    After the workspace moved off `D:\Job Applications`, 39 of 43 rows still
+    named that drive. `is_complete` saw a folder with no PDFs and let finished
+    applications be rebuilt — the duplicate message even quoted the dead path
+    while the documents sat on disk.
+    """
+    today = dt.date.today()
+    folder = application(tmp_path, "Example", today.isoformat(), "Data Scientist",
+                         documents=dedupe.required_pdfs())
+    stale = (rf"D:\Job Applications\{today.year}\Example"
+             rf"\{today.isoformat()} - Data Scientist")
+    tracker(tmp_path, today.year, [("Example", "Data Scientist", today, stale)])
+
+    hits = dedupe.collect_existing("Example", "Data Scientist", root=tmp_path)
+    row = next(h for h in hits if h.origin == "tracker")
+    assert row.folder == folder
+    assert dedupe.is_complete(row)
 
 
 def test_a_tracker_datetime_is_read_as_a_date(tmp_path) -> None:
