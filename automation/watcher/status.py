@@ -21,7 +21,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Iterable
 
-from . import store
+from . import queries, store
 from .config import (BUILD_SETTINGS_PATH, CONFIG_PATH, DB_PATH, ENV_PATH,
                      LOG_DIR, PROFILE_KB_PATH, PROFILE_DIGEST_PATH, REPO_ROOT,
                      SOURCES_PATH, TOPIC_KINDS, Config, Sources, clock,
@@ -185,6 +185,16 @@ def print_portals(sources: Sources, health: dict[str, sqlite3.Row],
         radius = entry.get("radius_km")
         scope = f"{where} +{radius}km" if radius else where
         print(f"{INDENT}location: {scope}")
+        # The same substitution the poll makes, so a status page can never show
+        # the sources.toml list while the poll is running generated terms.
+        # `allow_generate=False`: printing a status page must not spend a model
+        # call, so a profile edited since the last poll shows the previous set
+        # for one cycle rather than quietly costing one here.
+        if config is not None:
+            live = queries.for_entry(tagged, config, allow_generate=False)
+            if live is not tagged:
+                print(f"{INDENT}queries: generated from the profile")
+                tagged = live
         for query, url in source_urls(tagged).searches:
             print(f"{INDENT}{query}")
             print(f"{INDENT}  {url}")

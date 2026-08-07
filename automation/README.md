@@ -325,6 +325,10 @@ Underneath, the entrypoint is still directly usable, and every sub-command below
 | `-m watcher.triage --replay 30` | re-judge the last 30 stored postings against the profile and print a table, plus an acceptance-gate check against their stored scores; writes nothing |
 | `-m watcher.triage --backfill [--limit N] [--source KEY] [--dry-run]` | fetch, prefilter, and triage a fresh batch the way `poll` would, without storing the postings themselves — the deliberate way to work through more than one cycle's worth at once |
 | `-m watcher.triage --explain` | print the exact prompt a real call would send, no model call |
+| `-m watcher.queries` | print the search terms each portal is currently polled with, and whether they came from `sources.toml` or the profile |
+| `-m watcher.queries --regenerate [--dry-run]` | write a fresh set from the profile digest now, without waiting for the digest to change |
+| `-m watcher.queries --check "Data Scientist Berlin"` | run one query string through the validator and say which rule it breaks |
+| `-m watcher.queries --explain` | print the config, the cache key, and the prompt a real call would send, no model call |
 | `-m watcher.match --replay 30` | re-score the last 30 stored postings and print a table |
 | `-m watcher.match --calibrate` | score postings you already applied to, to sanity-check the threshold |
 | `-m watcher.match --refresh-digest` | rebuild the cached profile digest by hand |
@@ -407,6 +411,20 @@ configure: each portal reads a different internal shape, so a fourth one means a
 `queries` is search text, verbatim and per portal. Broad is fine — there is no title allow-list
 to narrow it further; relevance is judged by `[triage]` against the profile, downstream of
 fetching.
+
+Those few terms per portal are the entire aperture of this half of the watcher. A role the
+profile is qualified for that nobody thought to type is not ranked badly — it is never
+fetched, and nothing anywhere reports its absence. `[queries]` closes that by writing the
+terms from the profile digest instead: one model call per profile edit, cached against the
+digest that produced it, so a poll cycle never pays for it. A generated set replaces a
+portal's hand-written list only when enough of it survives validation — no location words
+(every portal takes location as its own field, so a city in the query text double-filters and
+returns an empty page that reads exactly like a quiet day), no boolean or wildcard syntax
+(one unbalanced quote is a structural failure, and a structural failure *parks* the source),
+two to six words. Below two valid queries that portal keeps `sources.toml` verbatim, and the
+fallback is per portal, since arbeitsagentur is asked for German and the other two for English
+and those halves fail independently. It is off by default and is the last switch to flip:
+it changes what is *fetched*, so it moves every downstream number at once.
 
 The two fragile ones share **one persistent Playwright context** in `state/browser/`, so a
 Cloudflare challenge solved once is reused instead of re-triggered every 30 minutes. Playwright

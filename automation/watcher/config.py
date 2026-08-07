@@ -76,6 +76,10 @@ BROWSER_PROFILE_ENV = "WATCHER_BROWSER_PROFILE"
 # than in memory so a restart between "sent" and "answered" does not turn the
 # reply into an orphan the handler cannot resolve.
 KB_PROPOSAL_PATH = STATE_DIR / "kb_proposal.json"
+# Portal search terms generated from the profile, cached against the digest
+# that produced them. Regenerated only when that digest changes, so a poll
+# cycle never pays for them.
+SEARCH_QUERIES_PATH = STATE_DIR / "search_queries.json"
 
 PROFILE_KB_PATH = AUTOMATION_DIR / "profile_kb.md"
 DECISIONS_PATH = AUTOMATION_DIR / "decisions.jsonl"
@@ -218,6 +222,7 @@ class Config:
     kb: dict[str, Any] = field(default_factory=dict)
     triage: dict[str, Any] = field(default_factory=dict)
     recall: dict[str, Any] = field(default_factory=dict)
+    queries: dict[str, Any] = field(default_factory=dict)
 
     def _num(self, section_name: str, section: dict[str, Any], key: str,
              default: _Number, cast: Callable[[str], _Number] = int) -> _Number:
@@ -611,6 +616,27 @@ class Config:
         a miss rate computed from four postings would read as a fact."""
         return self._num("recall", self.recall, "min_drops", 20)
 
+    # --- generated portal queries -------------------------------------------
+    @property
+    def queries_enabled(self) -> bool:
+        """Default False. This one changes what is *fetched*, so it moves every
+        downstream number at once — it is switched on last and alone."""
+        return bool(self.queries.get("enabled", False))
+
+    @property
+    def queries_model(self) -> str:
+        """Sonnet: it runs once per profile edit, and a bad query set quietly
+        narrows every portal until someone notices the boards went quiet."""
+        return str(self.queries.get("model", "sonnet"))
+
+    @property
+    def queries_per_portal(self) -> int:
+        return self._num("queries", self.queries, "per_portal", 8)
+
+    @property
+    def queries_timeout(self) -> int:
+        return self._num("queries", self.queries, "timeout_seconds", 180)
+
 
 @dataclass(frozen=True)
 class SourceDefaults:
@@ -825,6 +851,7 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         kb=raw.get("kb", {}),
         triage=raw.get("triage", {}),
         recall=raw.get("recall", {}),
+        queries=raw.get("queries", {}),
     )
 
 

@@ -31,7 +31,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import store
+from . import queries, store
 from .config import Config, Sources, load_config, load_sources, source_key
 from .fetchers import SourceNotImplemented, fetch_source, hydrate
 from .fetchers.base import StructuralError
@@ -165,6 +165,12 @@ def _collect(sources: Sources, config: Config, conn, only: str | None,
             else:
                 log.info("%s is disabled after repeated failures — skipping", key)
                 continue
+        # Generated search terms, if there are usable ones for this portal.
+        # This returns a *new* entry rather than editing the one it was given:
+        # `sources.all_enabled()` hands out the objects the config cache holds,
+        # so writing into one would leave generated queries in place after the
+        # feature was switched back off.
+        entry = queries.for_entry(entry, config)
         try:
             found = fetch_source(entry, config.http_timeout)
         except SourceNotImplemented as exc:
