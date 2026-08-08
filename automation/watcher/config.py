@@ -568,11 +568,16 @@ class Config:
 
         Above the cap, the excess is deferred to the next cycle rather than
         judged — never marked unsure just to clear the queue, and never
-        dropped by exhaustion. This is the safety net for the one-time
-        backfill, where thousands of never-stored candidates would otherwise
-        arrive in a single cycle.
+        dropped by exhaustion.
+
+        Sized with a lot of room. A dry-run poll across every source fetched
+        4,200 postings and handed triage one of them: triage only sees a
+        posting that is both new and past the free deterministic filters, and
+        in steady state that is single digits a cycle. The cap exists for the
+        cycle after a prefilter widens, when candidates the prefilter used to
+        reject have never been stored and so cannot be deduped away.
         """
-        return self._num("triage", self.triage, "max_per_cycle", 600)
+        return self._num("triage", self.triage, "max_per_cycle", 200)
 
     @property
     def triage_drop_retention_days(self) -> int:

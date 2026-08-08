@@ -61,12 +61,22 @@ timeout_seconds = 180
 # to clear the queue. This is what keeps a widened prefilter from handing a
 # single cycle thousands of first-time candidates; `watcher.triage --backfill`
 # is the deliberate, one-time way to work through a backlog that size instead.
-# A ceiling, not the expected load: the busiest cycle on record handed triage
-# 300. At ~1.9s per posting that is ~10 minutes, comfortably inside the
-# 30-minute interval; a cycle that actually hit 600 would take ~19 and leave
-# little margin for a slow run, so lower this rather than raise it if cycles
-# start running long.
-max_per_cycle = 600
+# A ceiling, not the expected load, and now measured rather than feared. The
+# worry when this was written was the first cycle after the prefilter widened:
+# nothing the prefilter rejects is ever stored, so dedupe cannot suppress it,
+# and the estimate was ~3,900 candidates arriving at once. That is not what a
+# real cycle looks like. `poll --dry-run --triage-only` across every source
+# fetched 4,200 postings and sent triage **one**: 3,067 never got past phase-1
+# filtering and 1,133 were already stored. Steady-state load is single digits,
+# because triage only ever sees a posting that is both new and past the free
+# filters.
+#
+# So 200 is roughly two orders of magnitude of headroom, not a tight fit. At
+# ~1.9s a posting a full 200 is ~6 minutes inside a 30-minute interval, which
+# leaves room for the cycle to be slow and still finish. The old 600 was ~19
+# minutes and bought nothing that the deferral path does not already handle:
+# excess is carried to the next cycle, never marked unsure to clear the queue.
+max_per_cycle = 200
 # How long a drop row is kept before it is eligible for pruning. Purely a
 # housekeeping figure — suppression itself is keyed on the profile digest, not
 # on age, so a drop stops being honoured the moment the profile changes,
