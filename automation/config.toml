@@ -39,15 +39,33 @@ retry_backoff_max_minutes = 1440
 # ahead of the profile that decides what is worth applying to.
 enabled = true
 model = "haiku"
-# Small on purpose — the prompt is dominated by the profile digest, not by
-# per-posting content, since triage never reads a body.
-batch_size = 200
-timeout_seconds = 120
+# Measured, not guessed. The first version of this said "small on purpose —
+# the prompt is dominated by the profile digest, not by per-posting content"
+# and then set 200, which is true of the input and beside the point: the cost
+# is one JSON verdict *generated* per posting, so wall time tracks the item
+# count at roughly 1.9s each. 200 items is over six minutes and could never
+# finish inside a 120s ceiling, so every batch timed out, every posting
+# degraded to unsure, and the gate silently passed everything for as long as
+# it was enabled.
+# Timed against live postings (batch/elapsed): 10/20s, 25/92s, 50/128s,
+# 100/189s — near-linear, with almost no fixed overhead. Throughput is
+# therefore flat across sizes, so a bigger batch buys nothing and only puts
+# more postings behind one timeout. 25 is one slow call of ~90s, which the
+# ceiling below doubles.
+batch_size = 25
+# Per attempt, and `run_json` retries once — a batch that times out costs two
+# of these before it degrades.
+timeout_seconds = 180
 # Hard per-call ceiling. Above this many candidates in one cycle, the excess
 # is deferred to the next cycle rather than judged — never marked unsure just
 # to clear the queue. This is what keeps a widened prefilter from handing a
 # single cycle thousands of first-time candidates; `watcher.triage --backfill`
 # is the deliberate, one-time way to work through a backlog that size instead.
+# A ceiling, not the expected load: the busiest cycle on record handed triage
+# 300. At ~1.9s per posting that is ~10 minutes, comfortably inside the
+# 30-minute interval; a cycle that actually hit 600 would take ~19 and leave
+# little margin for a slow run, so lower this rather than raise it if cycles
+# start running long.
 max_per_cycle = 600
 # How long a drop row is kept before it is eligible for pruning. Purely a
 # housekeeping figure — suppression itself is keyed on the profile digest, not

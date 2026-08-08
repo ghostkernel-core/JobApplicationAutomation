@@ -331,7 +331,7 @@ Underneath, the entrypoint is still directly usable, and every sub-command below
 | command | what it does |
 |---|---|
 | `-m watcher.poll --dry-run` | fetch and normalize, store nothing; `--source ats:Bayer` to isolate one |
-| `-m watcher.triage --replay 30` | re-judge the last 30 stored postings against the profile and print a table, plus an acceptance-gate check against their stored scores; writes nothing |
+| `-m watcher.triage --replay 30` | re-judge the last 30 stored postings against the profile and print a table, plus an acceptance-gate check against their stored scores; writes nothing. Exits 0 only when postings scoring >=65 were actually judged and none came back `drop` — a run where they degraded, or where none scored >=65, exits 1 as inconclusive |
 | `-m watcher.triage --backfill [--limit N] [--source KEY] [--dry-run]` | fetch, prefilter, and triage a fresh batch the way `poll` would, without storing the postings themselves — the deliberate way to work through more than one cycle's worth at once |
 | `-m watcher.triage --explain` | print the exact prompt a real call would send, no model call |
 | `-m watcher.recall` | re-score a sample of dropped postings and report the miss rate; `--plan` shows the sample without fetching, `--json` for the raw report |
@@ -512,12 +512,22 @@ say *only*, which is why `title_deny` survived and its opposite did not. A lefto
 
 `[triage]` in `config.toml` does that job instead, against the profile digest the matcher
 already scores with. It sees title, company and location only — never a description — and runs
-in one batch per cycle before anything is hydrated, which is what makes it cheap enough to put
-in front of everything.
+in small batches before anything is hydrated, which is what makes it cheap enough to put in
+front of everything. `batch_size` is measured, not guessed. Timed against live postings, cost is
+close to linear in the item count at about 1.9s each with almost no fixed overhead (10 items in
+20s, 50 in 128s, 100 in 189s), so a bigger batch buys no throughput — it only puts more postings
+behind a single timeout. Latency also varies a lot between identical calls: one 25-item batch
+took 92s where that rate predicts 49s, which is why `timeout_seconds` is set to roughly double
+the typical duration rather than just above it. Batches run one after another, so a size that
+overruns the ceiling does not slow the cycle down — it degrades the whole batch.
 
 It **fails open**, and that is the whole design. A degraded batch, a malformed reply, a verdict
 that is not the exact string `drop` — all keep the posting. An outage widens the funnel and
 costs a few scored postings; it can never quietly narrow it. Only a deliberate `drop` drops.
+
+The cost of failing open is that a *systematically* failing triage is silent: it gates nothing
+and looks exactly like a working one. `--replay` is what catches that, which is why it is a
+gate with an exit code rather than a report — see below.
 
 ```powershell
 python -m watcher.triage --replay 30           # re-judge stored postings; writes nothing

@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import tomllib
 import types
 
 import pytest
@@ -627,3 +628,83 @@ def test_a_template_that_would_deny_the_build_its_own_files_raises(monkeypatch) 
 
     with pytest.raises(RuntimeError, match="deny write access"):
         config.sync_build_settings()
+
+
+# ===========================================================================
+# [triage] — a batch has to be able to finish
+# ===========================================================================
+#
+# `batch_size = 200` with `timeout_seconds = 120` shipped and ran for a day.
+# Every batch timed out, and because triage fails open every posting in a
+# timed-out batch degrades to `unsure` — which keeps it. So the gate was
+# inert, the funnel was wide open, and nothing anywhere said so: a broken
+# fail-open gate and a working one produce the same postings. The only
+# evidence was two ERROR lines in a log nobody reads at 01:15 in the morning.
+#
+# The invariant is not "these two happen to be the numbers we chose". It is
+# that the batch size and the ceiling have to be consistent with how long a
+# batch actually takes, which is why the measurement is written down here
+# instead of living in a commit message.
+
+#: Seconds per posting on a typical call, from timing real batches of live
+#: postings through `score_batch`: 10 items/20.1s, 25/91.5s, 50/128.4s,
+#: 100/188.9s. Cost is close to linear in the item count with almost no fixed
+#: overhead — a batch of 200 needs about six minutes, which is why no ceiling
+#: worth setting would have saved the old size.
+MEASURED_SECONDS_PER_POSTING = 1.9
+
+#: The 25-item call above took 91.5s where that rate predicts 49s — an 87%
+#: overshoot on an identical prompt. Latency varies that much between calls,
+#: so a ceiling only just above the typical duration loses whole batches to
+#: ordinary noise. Doubling covers what was actually observed.
+SLOW_CALL_ALLOWANCE = 2.0
+
+
+def _shipped_config():
+    """The real config.toml, not a default-constructed Config.
+
+    Production runs on the file. A test that only checked `Config()` would
+    have passed happily throughout the outage described above, because the
+    broken values were in the file.
+    """
+    return config._parse_config(
+        tomllib.loads(config.CONFIG_PATH.read_text(encoding="utf-8")))
+
+
+def _sized(label: str):
+    """Both places a batch size can come from: the file, and the fallback.
+
+    They have to hold the invariant separately — the file is what production
+    reads, and the default is what a config.toml with the section deleted
+    falls back to.
+    """
+    return config.Config() if label == "defaults" else _shipped_config()
+
+
+@pytest.mark.parametrize("label", ["defaults", "config.toml"])
+def test_a_triage_batch_finishes_inside_its_timeout_even_on_a_slow_call(
+        label) -> None:
+    cfg = _sized(label)
+    typical = cfg.triage_batch_size * MEASURED_SECONDS_PER_POSTING
+    assert typical * SLOW_CALL_ALLOWANCE <= cfg.triage_timeout, (
+        f"{label}: a batch of {cfg.triage_batch_size} takes about "
+        f"{typical:.0f}s and can take twice that, against a ceiling of "
+        f"{cfg.triage_timeout}s. Batches that overrun degrade to unsure, and "
+        f"triage fails open, so the gate stops gating without failing"
+    )
+
+
+def test_a_full_cycle_of_triage_fits_inside_the_poll_interval() -> None:
+    """`max_per_cycle` is a ceiling; the cycle still has to finish.
+
+    Batches run one after another, so the cap and the interval are coupled:
+    a cap that cannot be triaged within one interval means the scheduler is
+    still in the previous cycle when the next is due.
+    """
+    cfg = _shipped_config()
+    projected = cfg.triage_max_per_cycle * MEASURED_SECONDS_PER_POSTING
+    assert projected <= cfg.interval_minutes * 60, (
+        f"triaging {cfg.triage_max_per_cycle} postings projects to "
+        f"{projected / 60:.0f} minutes, but a poll cycle comes round every "
+        f"{cfg.interval_minutes}"
+    )

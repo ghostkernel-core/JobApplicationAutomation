@@ -54,6 +54,16 @@ log = logging.getLogger("watcher.triage")
 
 DECISIONS = ("keep", "drop", "unsure")
 
+# The paragraph beginning "The test is" is not padding. Without it the model
+# reads the profile, sees it is dominated by AI/ML, and quietly swaps the drop
+# test for a relevance test — "no ML signal in the title, therefore drop". The
+# first honest `--replay 100` caught it doing exactly that to three postings the
+# scorer had rated 68, 68 and 72: a "Software Engineer II", a "Software Engineer
+# - Backend", and a "Data Analyst*in Claims", each dropped with a `why` that
+# said, in so many words, that the title was not about machine learning. Every
+# one of those is a technical role one specialisation away, which the paragraph
+# above it already calls out as never a drop — so the rule was stated and lost
+# anyway. Naming the wrong test is what makes it stick.
 _SYSTEM = """\
 You are the first, cheapest filter in a pipeline that later reads full job \
 postings for one candidate. You see only a title, a company, and a location — \
@@ -76,6 +86,14 @@ profession entirely — nursing, accounting, skilled trades, legal, sales, and \
 the like — never a technical role that is merely one seniority level or one \
 specialisation away from the profile. If a technical role could plausibly be \
 adjacent, that is not a drop.
+
+The test is "is this a different profession?", never "does this title match \
+the candidate's specialisation?". Those two come apart on exactly the titles \
+that matter. A bare "Software Engineer", "Backend Engineer", or "Data Analyst" \
+says nothing either way about specialisation, which makes it unsure. That a \
+title does not mention AI, ML, or data science is not a reason to drop it — it \
+is the ordinary case for a title this short, and the description settles it \
+downstream for free.
 
 unsure means there is not enough here to be sure either way: a generic or \
 ambiguous title, an unfamiliar company, a role that could go either way. An \
@@ -480,20 +498,47 @@ def main(argv: list[str] | None = None) -> int:
                   f"unsure {report.by_decision['unsure']}"
                   f"{f', {report.degraded} degraded' if report.degraded else ''}")
 
-            at_risk = []
+            # The gate's population is the stored >=65 band, and its claim is
+            # that triage kept all of it. A degraded posting was never judged,
+            # so it is evidence of nothing — counting it as "did not come back
+            # drop" is how this gate certified a run in which every one of 300
+            # postings timed out and no decision was made at all. Absence of a
+            # drop and absence of a verdict have to read differently here.
+            band = 0          # postings with a stored score >= 65
+            at_risk = []      # ... that triage would drop
+            uncovered = []    # ... that triage never actually judged
             for row, posting in zip(rows, postings):
-                verdict = results.get(posting.fingerprint)
                 verdict_row = stored.get(row["id"])
-                if (verdict and verdict["decision"] == "drop"
-                        and verdict_row and verdict_row["score"] >= 65):
+                if not (verdict_row and verdict_row["score"] >= 65):
+                    continue
+                band += 1
+                verdict = results.get(posting.fingerprint)
+                if not verdict or verdict.get("degraded"):
+                    uncovered.append((row, verdict_row["score"]))
+                elif verdict["decision"] == "drop":
                     at_risk.append((row, verdict_row["score"]))
+
             if at_risk:
-                print(f"\nWARNING: {len(at_risk)} posting(s) scored >=65 would be "
-                      f"dropped by triage — the acceptance gate expects zero:")
+                # With the denominator, because "3 dropped" reads as a rounding
+                # error and "3 of 24" reads as the 12% of the band it actually
+                # is. The other two verdicts already carry theirs.
+                print(f"\nGATE FAILED: {len(at_risk)} of {band} posting(s) scoring "
+                      f">=65 would be dropped by triage — the gate expects zero:")
                 for row, score in at_risk:
                     print(f"  {score:>3}  {row['company']} — {row['title']}")
-            else:
-                print("\nacceptance gate: no stored score >=65 came back drop.")
+                return 1
+            if not band:
+                print("\nGATE INCONCLUSIVE: no replayed posting has a stored score "
+                      ">=65, so there was nothing to certify.")
+                return 1
+            if uncovered:
+                print(f"\nGATE INCONCLUSIVE: {len(uncovered)} of {band} posting(s) "
+                      f"scoring >=65 were never judged (degraded), so this run says "
+                      f"nothing about them. Fix the degradation and re-run — see the "
+                      f"log for why the batch failed.")
+                return 1
+            print(f"\nacceptance gate passed: all {band} posting(s) scoring >=65 were "
+                  f"judged, none came back drop.")
         return 0
 
     if args.backfill:
