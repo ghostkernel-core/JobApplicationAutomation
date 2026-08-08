@@ -331,7 +331,7 @@ Underneath, the entrypoint is still directly usable, and every sub-command below
 | command | what it does |
 |---|---|
 | `-m watcher.poll --dry-run` | fetch and normalize, store nothing; `--source ats:Bayer` to isolate one |
-| `-m watcher.triage --replay 30` | re-judge the last 30 stored postings against the profile and print a table, plus an acceptance-gate check against their stored scores; writes nothing. Exits 0 only when postings scoring >=65 were actually judged and none came back `drop` — a run where they degraded, or where none scored >=65, exits 1 as inconclusive |
+| `-m watcher.triage --replay 30` | re-judge the last 30 stored postings against the profile and print a table, plus an acceptance-gate check against their stored scores; writes nothing. Exits 0 only when postings scoring >=65 were actually judged and none came back `drop` — a run where they degraded, or where none scored >=65, exits 1 as inconclusive. `--json` is gated identically, with the verdict on stderr so stdout stays parseable |
 | `-m watcher.triage --backfill [--limit N] [--source KEY] [--dry-run]` | fetch, prefilter, and triage a fresh batch the way `poll` would, without storing the postings themselves — the deliberate way to work through more than one cycle's worth at once |
 | `-m watcher.triage --explain` | print the exact prompt a real call would send, no model call |
 | `-m watcher.recall` | re-score a sample of dropped postings and report the miss rate; `--plan` shows the sample without fetching, `--json` for the raw report |
@@ -524,6 +524,27 @@ overruns the ceiling does not slow the cycle down — it degrades the whole batc
 It **fails open**, and that is the whole design. A degraded batch, a malformed reply, a verdict
 that is not the exact string `drop` — all keep the posting. An outage widens the funnel and
 costs a few scored postings; it can never quietly narrow it. Only a deliberate `drop` drops.
+
+Two title-only rules are taken out of the model's hands entirely. First, `profile_kb.md` rules
+out "pure analytics, BI/reporting", and *pure* is a fact about the body of a posting — from a
+title alone the rule is unknowable, so applying it here is guesswork with a permanent cost. Nine
+of the 206 stored postings scoring >=65 carry an analytics-shaped title, topping out at 85.
+Second, triage cannot establish from a title that a technical role one specialisation away — for
+example DevOps, platform, cloud, backend, software, or an AI/data role — is a genuinely different
+profession. A live `--replay 150` showed why prompt wording alone is insufficient: it dropped
+"Data Analyst*in Claims" (stored 68) as "pure BI/analytics", then on the next run dropped
+"DevOps Engineer (Product)" (75) as infrastructure work after previously calling the same title
+`unsure` because it could be MLOps.
+
+So a title matching either the analytics stems (`analyst|analytic|analytik|analyse|reporting|BI|
+business intelligence`) or the deliberately narrow technical-adjacent set (`devops|mlops|SRE|
+platform|cloud|backend|software|machine learning|AI|data|LLM|NLP|computer vision|Python`) can no
+longer be dropped at this stage. The verdict is rewritten to `unsure`, and the posting is scored
+on its description like any other. Both guards are **one-way**: they turn a drop into an unsure
+and never the reverse, so unlike `title_allow` they can only widen the funnel. They cost one
+description read for each caught title that really is a reporting or unrelated technical job, and
+buy that neither category can be lost silently. Overruled verdicts are logged, and marked `~` in
+the `--replay` table.
 
 The cost of failing open is that a *systematically* failing triage is silent: it gates nothing
 and looks exactly like a working one. `--replay` is what catches that, which is why it is a

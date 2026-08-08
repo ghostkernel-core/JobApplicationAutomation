@@ -38,7 +38,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import logging
+import re
 import sqlite3
+import sys
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
@@ -64,6 +66,17 @@ DECISIONS = ("keep", "drop", "unsure")
 # one of those is a technical role one specialisation away, which the paragraph
 # above it already calls out as never a drop — so the rule was stated and lost
 # anyway. Naming the wrong test is what makes it stick.
+#
+# The paragraph after it closes the other route to the same mistake. The kb's
+# Avoid list is handed to this stage and to the matcher alike, but only the
+# matcher can see the thing Avoid is actually about: "pure analytics, BI/
+# reporting" turns on how much of the role is reporting, which is a fact about
+# the description. From a title it is unknowable, and acting on it anyway costs
+# real postings — of the 205 stored postings scoring >=65, nine carry an
+# analytics-shaped title, and they include a Data Engineer at 82, a Data
+# Scientist at 78, and an energy-sector analyst at 85 that sits squarely on the
+# profile. "Data Analyst*in Claims" is indistinguishable from those at this
+# stage, so the honest answer here is unsure and the matcher decides.
 _SYSTEM = """\
 You are the first, cheapest filter in a pipeline that later reads full job \
 postings for one candidate. You see only a title, a company, and a location — \
@@ -94,6 +107,20 @@ says nothing either way about specialisation, which makes it unsure. That a \
 title does not mention AI, ML, or data science is not a reason to drop it — it \
 is the ordinary case for a title this short, and the description settles it \
 downstream for free.
+
+A matching preference is not a shortcut past that test. Preferences that turn \
+on how much of a role is something — "pure" analytics, work that is \
+"primarily" X, a role whose "core" is Y — describe the body of a posting, and \
+a title cannot settle them. "Data Analyst*in Claims" and "Data Engineer \
+Campaign & Analytics" read almost identically from here, yet one may be the \
+reporting job the preferences rule out and the other a data engineering job \
+the scorer rates in the eighties. So a preference of that shape makes a \
+posting unsure, never a drop. "Analyst", "Analytics", "BI" and "Reporting" \
+are the wording of the preference, not the name of a profession: a title \
+carrying one of them is never a drop here, whatever else it says. Only a \
+title naming a genuinely different line of work — "Recruiter", "Sales \
+Executive" — is a drop, and that is the different-profession test doing the \
+work, not the preference.
 
 unsure means there is not enough here to be sure either way: a generic or \
 ambiguous title, an unfamiliar company, a role that could go either way. An \
@@ -199,6 +226,70 @@ def _degraded(reason: str) -> dict[str, Any]:
     return {**_FALLBACK, "degraded": reason}
 
 
+# The two rules the prompt above states and cannot, on its own, keep.
+#
+# Neither is new policy — both are already written into `_SYSTEM` in as many
+# words. What is new is that they no longer depend on the model agreeing with
+# them on any given call, which two live `--replay 150` runs showed it does
+# not. Each run dropped exactly one posting from the stored >=65 band, and a
+# *different* one each time: "Data Analyst*in Claims" (68) reasoning "Data
+# analyst, pure BI/analytics", then "DevOps Engineer (Product)" (75) reasoning
+# "DevOps/infrastructure ops" — a posting the previous run had called unsure
+# with the reason "DevOps, could be MLOps". The same title, judged twice,
+# opposite answers. A rule that survives only when the sampling goes your way
+# is not being enforced, and the postings it fails on are lost silently and
+# permanently.
+#
+# Both guards are one-way, which is the whole of their safety: they turn a
+# drop into an unsure and never the reverse, so they can only widen the
+# funnel. This is not `title_allow` returning — that list decided what was
+# ever *seen*, and nothing here drops anything. A posting either guard touches
+# goes on to be hydrated and scored on its description like any other.
+#
+# The measured price is small and the measured cover is not: of run D's 57
+# drops only 3 would flip, while 186 of the 206 stored postings scoring >=65
+# match one guard or the other.
+_TITLE_ONLY_DROP_RULES = (
+    # profile_kb.md rules out "pure analytics, BI/reporting" — and "pure" is a
+    # fact about the body of a posting, so from a title the rule is unknowable.
+    # Nine of the 206 band postings carry a title like this, topping out at 85.
+    #
+    # No leading word boundary on the stems: German titles compound them, so
+    # `\banalyst` would miss "Datenanalyst" and `\banalytik` would miss
+    # "Datenanalytik" — the exact titles most at risk. Only "BI" needs
+    # boundaries, or it matches inside every other word.
+    ("a preference about proportion needs the description",
+     re.compile(r"(analyst|analytic|analytik|analyse|reporting"
+                r"|\bbi\b|business\s+intelligence)", re.IGNORECASE)),
+    # The profile's own field and everything one specialisation from it. A
+    # narrow list on purpose: "Process Engineer", "Quality Engineer" and
+    # "Hardware Developer" match none of it and still drop, which is most of
+    # what this stage is for.
+    ("a technical role one specialisation away is never a drop",
+     re.compile(r"(devops|mlops|\bsre\b|site\s+reliability|platform|cloud"
+                r"|backend|back-end|software|machine\s+learning|deep\s+learning"
+                r"|\bml\b|\bai\b|\bki\b|\bdata\b|\bllm\b|\bnlp\b"
+                r"|computer\s+vision|\bpython\b)", re.IGNORECASE)),
+)
+
+
+def _overrule_title_only_drop(posting: Posting,
+                              verdict: dict[str, Any]) -> dict[str, Any]:
+    """Downgrade a drop the title alone cannot honestly support."""
+    if verdict.get("decision") != "drop":
+        return verdict
+    for rule, pattern in _TITLE_ONLY_DROP_RULES:
+        if not pattern.search(posting.title):
+            continue
+        log.info("overruling title-only drop (%s): %s (%s) — %s", rule,
+                 posting.title, posting.company,
+                 verdict.get("why") or "no reason given")
+        return {"decision": "unsure",
+                "why": f"overruled: {verdict.get('why') or 'title-only drop'}"[:80],
+                "overruled": rule}
+    return verdict
+
+
 def score_batch(postings: Sequence[Posting], digest: str, kb: str,
                 config: Config) -> dict[str, dict[str, Any]]:
     """Judge one batch. Never raises — a failed batch degrades to unsure."""
@@ -223,7 +314,8 @@ def score_batch(postings: Sequence[Posting], digest: str, kb: str,
     out: dict[str, dict[str, Any]] = {}
     for posting in postings:
         if posting.fingerprint in by_id:
-            out[posting.fingerprint] = by_id[posting.fingerprint]
+            out[posting.fingerprint] = _overrule_title_only_drop(
+                posting, by_id[posting.fingerprint])
         else:
             log.warning("no result for %s (%s) — degrading to unsure",
                         posting.fingerprint, posting.title)
@@ -365,11 +457,62 @@ def _print_replay_table(rows: Sequence[sqlite3.Row], postings: Sequence[Posting]
                         results: dict[str, dict[str, Any]]) -> None:
     for row, posting in zip(rows, postings):
         verdict = results.get(posting.fingerprint, _FALLBACK)
-        flag = "!" if verdict.get("degraded") else " "
+        flag = ("!" if verdict.get("degraded")
+                else "~" if verdict.get("overruled") else " ")
         print(f"{verdict['decision']:<6}{flag} {row['company'][:20]:<20} "
               f"{row['title'][:44]:<44} {row['country'] or '--'}")
         if verdict.get("why"):
             print(f"        {verdict['why']}")
+
+
+def _acceptance_gate(rows: Sequence[sqlite3.Row], postings: Sequence[Posting],
+                     results: dict[str, dict[str, Any]],
+                     stored: dict[str, Any]) -> tuple[int, list[str]]:
+    """Judge a replay against the stored >=65 band.
+
+    Returns the exit code and the lines explaining it, rather than printing
+    and returning, so the caller decides where they go — the JSON path needs
+    them on stderr to keep stdout parseable, and both paths need the code.
+
+    The band is the gate's whole population and its claim is that triage kept
+    all of it. A degraded posting was never judged, so it is evidence of
+    nothing — counting it as "did not come back drop" is how this gate once
+    certified a run in which all 300 postings timed out and no decision was
+    made at all. Absence of a drop and absence of a verdict read differently.
+    """
+    band = 0          # postings with a stored score >= 65
+    at_risk = []      # ... that triage would drop
+    uncovered = []    # ... that triage never actually judged
+    for row, posting in zip(rows, postings):
+        verdict_row = stored.get(row["id"])
+        if not (verdict_row and verdict_row["score"] >= 65):
+            continue
+        band += 1
+        verdict = results.get(posting.fingerprint)
+        if not verdict or verdict.get("degraded"):
+            uncovered.append((row, verdict_row["score"]))
+        elif verdict["decision"] == "drop":
+            at_risk.append((row, verdict_row["score"]))
+
+    if at_risk:
+        # With the denominator, because "3 dropped" reads as a rounding error
+        # and "3 of 24" reads as the 12% of the band it actually is. The other
+        # two verdicts already carry theirs.
+        lines = [f"\nGATE FAILED: {len(at_risk)} of {band} posting(s) scoring "
+                 f">=65 would be dropped by triage — the gate expects zero:"]
+        lines += [f"  {score:>3}  {row['company']} — {row['title']}"
+                  for row, score in at_risk]
+        return 1, lines
+    if not band:
+        return 1, ["\nGATE INCONCLUSIVE: no replayed posting has a stored score "
+                   ">=65, so there was nothing to certify."]
+    if uncovered:
+        return 1, [f"\nGATE INCONCLUSIVE: {len(uncovered)} of {band} posting(s) "
+                   f"scoring >=65 were never judged (degraded), so this run says "
+                   f"nothing about them. Fix the degradation and re-run — see the "
+                   f"log for why the batch failed."]
+    return 0, [f"\nacceptance gate passed: all {band} posting(s) scoring >=65 were "
+               f"judged, none came back drop."]
 
 
 # --------------------------------------------------------------------------
@@ -489,57 +632,28 @@ def main(argv: list[str] | None = None) -> int:
 
         results, report = _triage_all(postings, config, persist=False)
 
+        # The gate runs whichever way the results are rendered. It used to sit
+        # inside the else-branch, so `--replay --json` printed the verdicts,
+        # never reached the band check, and returned 0 no matter how many high
+        # scorers came back drop — the same "reports fine without having
+        # looked" defect the gate itself exists to catch, one branch over.
+        code, gate_lines = _acceptance_gate(rows, postings, results, stored)
+
         if args.json:
             print(_json.dumps(results, ensure_ascii=False, indent=2))
+            # stdout stays byte-identical to what a consumer already parses;
+            # the verdict goes to stderr and the exit code carries the result.
+            for line in gate_lines:
+                print(line, file=sys.stderr)
         else:
             _print_replay_table(rows, postings, results)
             print(f"\n{report.judged} judged — keep {report.by_decision['keep']}, "
                   f"drop {report.by_decision['drop']}, "
                   f"unsure {report.by_decision['unsure']}"
                   f"{f', {report.degraded} degraded' if report.degraded else ''}")
-
-            # The gate's population is the stored >=65 band, and its claim is
-            # that triage kept all of it. A degraded posting was never judged,
-            # so it is evidence of nothing — counting it as "did not come back
-            # drop" is how this gate certified a run in which every one of 300
-            # postings timed out and no decision was made at all. Absence of a
-            # drop and absence of a verdict have to read differently here.
-            band = 0          # postings with a stored score >= 65
-            at_risk = []      # ... that triage would drop
-            uncovered = []    # ... that triage never actually judged
-            for row, posting in zip(rows, postings):
-                verdict_row = stored.get(row["id"])
-                if not (verdict_row and verdict_row["score"] >= 65):
-                    continue
-                band += 1
-                verdict = results.get(posting.fingerprint)
-                if not verdict or verdict.get("degraded"):
-                    uncovered.append((row, verdict_row["score"]))
-                elif verdict["decision"] == "drop":
-                    at_risk.append((row, verdict_row["score"]))
-
-            if at_risk:
-                # With the denominator, because "3 dropped" reads as a rounding
-                # error and "3 of 24" reads as the 12% of the band it actually
-                # is. The other two verdicts already carry theirs.
-                print(f"\nGATE FAILED: {len(at_risk)} of {band} posting(s) scoring "
-                      f">=65 would be dropped by triage — the gate expects zero:")
-                for row, score in at_risk:
-                    print(f"  {score:>3}  {row['company']} — {row['title']}")
-                return 1
-            if not band:
-                print("\nGATE INCONCLUSIVE: no replayed posting has a stored score "
-                      ">=65, so there was nothing to certify.")
-                return 1
-            if uncovered:
-                print(f"\nGATE INCONCLUSIVE: {len(uncovered)} of {band} posting(s) "
-                      f"scoring >=65 were never judged (degraded), so this run says "
-                      f"nothing about them. Fix the degradation and re-run — see the "
-                      f"log for why the batch failed.")
-                return 1
-            print(f"\nacceptance gate passed: all {band} posting(s) scoring >=65 were "
-                  f"judged, none came back drop.")
-        return 0
+            for line in gate_lines:
+                print(line)
+        return code
 
     if args.backfill:
         candidates, poll_report = _backfill_candidates(config, args.source, args.limit)
