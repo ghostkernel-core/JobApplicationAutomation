@@ -168,11 +168,13 @@ class FakePlaywright:
             set_default_timeout=lambda _ms: None)
         self._launch_error = launch_error
         self.launch_kwargs: dict = {}
+        self.launches = 0
         self.stopped = False
         self.chromium = types.SimpleNamespace(
             launch_persistent_context=self._launch)
 
     def _launch(self, profile, **kwargs):
+        self.launches += 1
         self.launch_kwargs = dict(kwargs, profile=profile)
         if self._launch_error:
             raise self._launch_error
@@ -213,6 +215,20 @@ def test_a_second_call_returns_the_context_already_open(
     monkeypatch.setattr(browser, "browser_profile_dir", lambda: tmp_path)
 
     assert browser._open_context(state) == "already here"
+
+
+def test_two_worker_jobs_reuse_one_real_persistent_context(
+        monkeypatch, tmp_path) -> None:
+    """The launch path itself, not a mocked `_open_context`, is reused."""
+    context = FakeContext()
+    playwright = FakePlaywright(context=context)
+    _install_playwright(monkeypatch, playwright)
+    monkeypatch.setattr(browser, "browser_profile_dir", lambda: tmp_path)
+
+    contexts = [browser._submit(lambda ctx: ctx) for _ in range(2)]
+
+    assert contexts == [context, context]
+    assert playwright.launches == 1
 
 
 def test_a_machine_without_playwright_says_how_to_install_it(
@@ -566,6 +582,21 @@ def test_a_context_that_exposes_no_browser_counts_as_alive() -> None:
     assert browser._context_is_dead({"context": FakeContext("persistent")}) is False
 
 
+def test_a_persistent_context_with_live_pages_is_reused() -> None:
+    context = types.SimpleNamespace(pages=[])
+
+    assert browser._context_is_dead({"context": context}) is False
+
+
+def test_a_persistent_context_with_broken_pages_is_dead() -> None:
+    class BrokenPagesContext:
+        @property
+        def pages(self):
+            raise TargetClosedError("target closed")
+
+    assert browser._context_is_dead({"context": BrokenPagesContext()}) is True
+
+
 def test_a_browser_that_went_away_while_idle_is_noticed(
         monkeypatch, tmp_path) -> None:
     """The actual outage: Chromium died between two polls, with nothing in
@@ -596,6 +627,31 @@ def test_a_job_that_hits_a_dead_browser_relaunches_and_retries(monkeypatch) -> N
 
     assert browser._run_job(state, job) == "ran on second"
     assert seen == ["first", "second"]
+
+
+def test_a_replaced_context_does_not_get_an_extra_retry(monkeypatch) -> None:
+    """A cached dead handle must not grant the replacement a retry budget."""
+    first = FakeContext("dead")
+    replacement = FakeContext("replacement")
+    state = {"playwright": None, "context": first, "dead": True}
+    seen: list[str] = []
+
+    def open_context(current):
+        if current["context"] is first:
+            current["context"] = replacement
+            current["dead"] = False
+        return current["context"]
+
+    monkeypatch.setattr(browser, "_open_context", open_context)
+
+    def job(ctx):
+        seen.append(ctx.name)
+        raise TargetClosedError("target closed")
+
+    with pytest.raises(TargetClosedError, match="target closed"):
+        browser._run_job(state, job)
+
+    assert seen == ["replacement"]
 
 
 def test_an_ordinary_failure_does_not_relaunch(monkeypatch) -> None:
