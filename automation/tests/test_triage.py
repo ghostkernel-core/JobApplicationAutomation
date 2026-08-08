@@ -18,6 +18,7 @@ silently discarding the postings it was supposed to defer.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -41,6 +42,19 @@ def posting(job_id: str, title: str = "Data Scientist", company: str = "Acme") -
     return Posting(source="ats", provider="greenhouse", source_job_id=job_id,
                    url=f"https://example.test/{job_id}", company=company,
                    title=f"{title} {job_id}", location="Berlin", country="DE")
+
+
+def droppable(job_id: str) -> Posting:
+    """A posting neither title-only guard protects, for tests that need a drop.
+
+    The guards cover the profile's own field and everything one specialisation
+    from it — which is most of what this watcher ever sees, and deliberately
+    includes the "Data Scientist" that `posting()` defaults to. So a test about
+    the drop path has to reach outside the profile to get a drop at all. That
+    is the real-world semantics, not a fixture workaround: after these guards,
+    a posting anywhere near this candidate's field cannot be dropped on a title.
+    """
+    return posting(job_id, title="Recruiter")
 
 
 def config(**triage_overrides) -> Config:
@@ -71,7 +85,7 @@ def test_claude_error_degrades_every_item_to_unsure_never_drop(monkeypatch):
 
 
 def test_missing_id_in_response_degrades_only_that_posting(monkeypatch):
-    postings = [posting("1"), posting("2")]
+    postings = [droppable("1"), posting("2")]
     monkeypatch.setattr(triage, "run_json", lambda *a, **k: {
         "results": [{"id": postings[0].fingerprint, "decision": "drop", "why": "wrong field"}]})
 
@@ -151,7 +165,7 @@ def test_the_prompt_disarms_the_relevance_test_that_caused_real_drops():
 # --------------------------------------------------------------------------
 
 def test_degraded_batch_writes_zero_drop_rows(db, monkeypatch):
-    postings = [posting("1"), posting("2")]
+    postings = [droppable("1"), droppable("2")]
     monkeypatch.setattr(triage, "run_json", lambda *a, **k: (_ for _ in ()).throw(
         ClaudeError("boom")))
 
@@ -164,7 +178,7 @@ def test_degraded_batch_writes_zero_drop_rows(db, monkeypatch):
 
 
 def test_only_the_drop_decision_is_persisted(db, monkeypatch):
-    postings = [posting("1"), posting("2"), posting("3")]
+    postings = [droppable("1"), posting("2"), posting("3")]
     monkeypatch.setattr(triage, "run_json", lambda *a, **k: {"results": [
         {"id": postings[0].fingerprint, "decision": "drop", "why": "different field"},
         {"id": postings[1].fingerprint, "decision": "keep", "why": ""},
@@ -179,7 +193,7 @@ def test_only_the_drop_decision_is_persisted(db, monkeypatch):
 
 
 def test_known_drops_suppression_issues_zero_calls_on_repeat(db, monkeypatch):
-    p = posting("1")
+    p = droppable("1")
     calls = {"n": 0}
 
     def fake_run_json(*a, **k):
@@ -200,7 +214,7 @@ def test_known_drops_suppression_issues_zero_calls_on_repeat(db, monkeypatch):
 
 
 def test_changed_digest_invalidates_suppression(db, monkeypatch):
-    p = posting("1")
+    p = droppable("1")
     calls = {"n": 0}
 
     def fake_run_json(*a, **k):
@@ -221,7 +235,7 @@ def test_changed_digest_invalidates_suppression(db, monkeypatch):
 
 
 def test_changed_kb_invalidates_suppression(db, monkeypatch):
-    p = posting("1")
+    p = droppable("1")
     calls = {"n": 0}
 
     def fake_run_json(*a, **k):
@@ -242,7 +256,7 @@ def test_changed_kb_invalidates_suppression(db, monkeypatch):
 
 
 def test_dry_run_writes_no_drop_rows(db, monkeypatch):
-    postings = [posting("1"), posting("2")]
+    postings = [droppable("1"), droppable("2")]
     monkeypatch.setattr(triage, "run_json", lambda *a, **k: {"results": [
         {"id": p.fingerprint, "decision": "drop", "why": "x"} for p in postings]})
 
@@ -255,7 +269,7 @@ def test_dry_run_writes_no_drop_rows(db, monkeypatch):
 
 
 def test_cap_defers_rather_than_storing(db, monkeypatch):
-    postings = [posting(str(i)) for i in range(5)]
+    postings = [droppable(str(i)) for i in range(5)]
     monkeypatch.setattr(triage, "run_json", lambda *a, **k: {"results": [
         {"id": p.fingerprint, "decision": "drop", "why": "x"} for p in postings]})
 
@@ -301,6 +315,125 @@ def test_empty_input_returns_empty_without_touching_the_database(db, monkeypatch
 
 
 # --------------------------------------------------------------------------
+# the Avoid clause this stage cannot honestly apply
+# --------------------------------------------------------------------------
+#
+# profile_kb.md rules out "pure analytics, BI/reporting", and "pure" is a fact
+# about the body of a posting — from a title the rule is unknowable. Acting on
+# it anyway is expensive: nine of the 205 stored postings scoring >=65 carry an
+# analytics-shaped title, the best of them at 85.
+#
+# Saying so in the prompt was the first fix and is not sufficient. A live
+# `--replay 150` had "Data Analyst*in Claims" (stored 68) come back drop
+# reasoning "Data analyst, pure BI/analytics", while bare "Data Analyst" came
+# back unsure in the same run — the model reading the title as *naming* the
+# avoided profession. These cover the guard that makes it structural.
+
+
+def _wants_to_drop(postings):
+    """A model that drops everything it is shown, for the stated reason."""
+    return {"results": [{"id": p.fingerprint, "decision": "drop",
+                         "why": "Data analyst, pure BI/analytics"}
+                        for p in postings]}
+
+
+@pytest.mark.parametrize("title", [
+    "Data Analyst*in Claims",                 # the exact production regression
+    "Analystin Energiewirtschaft Strom",      # scored 85 — the costliest miss
+    "Senior Consultants - Data & Analytics",
+    "Business Intelligence Specialist",
+    "BI Developer",
+    "Referent Reporting",
+    "Datenanalytik Expertin",                 # German compound, no word break
+    "Datenanalyst",
+])
+def test_an_analytics_title_is_never_dropped_from_the_title_alone(monkeypatch, title):
+    post = posting("1", title=title)
+    monkeypatch.setattr(triage, "run_json", lambda *a, **k: _wants_to_drop([post]))
+
+    verdict = triage.score_batch([post], "DIGEST", "KB", config())[post.fingerprint]
+
+    assert verdict["decision"] == "unsure"
+    assert "proportion" in verdict["overruled"]
+    # The model's own reason survives, so the log still shows what it wanted.
+    assert "pure BI/analytics" in verdict["why"]
+
+
+@pytest.mark.parametrize("title", [
+    "DevOps Engineer (Product)",     # dropped at stored score 75 in a live replay
+    "MLOps Engineer",
+    "Site Reliability Engineer",
+    "Platform Engineer",
+    "Cloud Solutions Engineer",
+    "Backend Engineer",
+    "Senior Software GUI Engineer",
+    "KI / AI-Engineer",              # the German spelling
+    "Data Solutions Specialist",
+    "NLP Research Scientist",
+])
+def test_a_technical_role_one_specialisation_away_is_never_dropped(monkeypatch, title):
+    """The prompt has always said this; two live replays showed it not holding.
+
+    The same "DevOps Engineer (Product)" came back unsure ("DevOps, could be
+    MLOps") on one run and drop ("DevOps/infrastructure ops") on the next. A
+    rule that survives only when the sampling goes your way is not enforced.
+    """
+    post = posting("1", title=title)
+    monkeypatch.setattr(triage, "run_json", lambda *a, **k: _wants_to_drop([post]))
+
+    verdict = triage.score_batch([post], "DIGEST", "KB", config())[post.fingerprint]
+
+    assert verdict["decision"] == "unsure"
+    assert "specialisation" in verdict["overruled"]
+
+
+@pytest.mark.parametrize("title", [
+    "Recruiter",
+    "Sales Executive Enterprise",
+    "Frontline Process Engineer",
+    "Manager Customer Engagement Events",
+])
+def test_a_genuinely_different_profession_still_drops(monkeypatch, title):
+    """The guard is narrow on purpose: only the rule that needs a body."""
+    post = posting("1", title=title)
+    monkeypatch.setattr(triage, "run_json", lambda *a, **k: _wants_to_drop([post]))
+
+    verdict = triage.score_batch([post], "DIGEST", "KB", config())[post.fingerprint]
+
+    assert verdict["decision"] == "drop"
+    assert "overruled" not in verdict
+
+
+def test_the_guard_only_ever_widens(monkeypatch):
+    """One-way by construction — it can turn a drop into unsure, never a drop.
+
+    This is what separates it from `title_allow`, which decided what was ever
+    seen. Nothing is dropped by this list.
+    """
+    post = posting("1", title="Data Analyst")
+    monkeypatch.setattr(triage, "run_json", lambda *a, **k: {
+        "results": [{"id": post.fingerprint, "decision": "keep", "why": ""}]})
+
+    verdict = triage.score_batch([post], "DIGEST", "KB", config())[post.fingerprint]
+
+    assert verdict["decision"] == "keep"
+    assert "overruled" not in verdict
+
+
+def test_an_overruled_drop_is_not_recorded_as_a_drop(db, monkeypatch):
+    """It must not reach the drops table — an overruled drop is not a drop."""
+    post = posting("1", title="Data Analyst*in Claims")
+    monkeypatch.setattr(triage, "load_config", lambda *a, **k: config())
+    monkeypatch.setattr(triage, "run_json", lambda *a, **k: _wants_to_drop([post]))
+
+    results, report = triage.triage_postings([post], config(), persist=True)
+
+    assert results[post.fingerprint]["decision"] == "unsure"
+    with store.connect(db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM drops").fetchone()[0] == 0
+
+
+# --------------------------------------------------------------------------
 # --replay: the acceptance gate must not certify a run it did not measure
 # --------------------------------------------------------------------------
 #
@@ -322,14 +455,14 @@ def _stored(conn, job_id: str, score: int) -> Posting:
     return post
 
 
-def _replay(monkeypatch, decisions: dict[str, dict], cfg=None):
+def _replay(monkeypatch, decisions: dict[str, dict], cfg=None, extra=()):
     """Run `--replay 10` with triage's answers stubbed to `decisions`."""
     monkeypatch.setattr(triage, "load_config", lambda *a, **k: cfg or config())
     monkeypatch.setattr(
         triage, "score_batch",
         lambda batch, *a, **k: {p.fingerprint: decisions[p.fingerprint]
                                 for p in batch})
-    return triage.main(["--replay", "10"])
+    return triage.main(["--replay", "10", *extra])
 
 
 def test_a_fully_degraded_replay_does_not_pass_the_gate(db, monkeypatch, capsys):
@@ -381,6 +514,87 @@ def test_a_drop_in_the_band_fails_the_gate_outright(db, monkeypatch, capsys):
     # is a very different report from one out of fifty.
     assert "1 of 2" in out
     assert " 88  Acme" in out
+
+
+def test_the_json_replay_enforces_the_gate_too(db, monkeypatch, capsys):
+    """`--json` used to skip the gate and return 0 however bad the run was.
+
+    The band check lived inside the else-branch of the output switch, so the
+    JSON path printed verdicts and fell through to `return 0` — a check that
+    reports success without having looked, which is the exact defect the gate
+    was written to catch. Same replay, same drop, same exit code.
+    """
+    with store.connect(db) as conn:
+        keep = _stored(conn, "1", 70)
+        drop = _stored(conn, "2", 88)
+
+    code = _replay(monkeypatch, {
+        keep.fingerprint: {"decision": "keep", "why": ""},
+        drop.fingerprint: {"decision": "drop", "why": "not a fit"},
+    }, extra=["--json"])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "GATE FAILED" in captured.err
+    assert "1 of 2" in captured.err
+
+
+def test_the_json_replay_keeps_stdout_machine_readable(db, monkeypatch, capsys):
+    """The gate's verdict must not corrupt the data the flag exists to emit.
+
+    That risk is why the hole was reported rather than patched blind: prose on
+    stdout would break any consumer parsing it. So the exit code carries the
+    result and the explanation goes to stderr, leaving stdout pure JSON even
+    on the failing path.
+    """
+    with store.connect(db) as conn:
+        keep = _stored(conn, "1", 70)
+        drop = _stored(conn, "2", 88)
+
+    code = _replay(monkeypatch, {
+        keep.fingerprint: {"decision": "keep", "why": ""},
+        drop.fingerprint: {"decision": "drop", "why": "not a fit"},
+    }, extra=["--json"])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    payload = json.loads(captured.out)          # would raise on stray prose
+    assert payload[drop.fingerprint]["decision"] == "drop"
+    assert "GATE" not in captured.out
+
+
+def test_a_clean_json_replay_still_returns_zero(db, monkeypatch, capsys):
+    with store.connect(db) as conn:
+        posts = [_stored(conn, str(i), 70 + i) for i in range(3)]
+
+    code = _replay(monkeypatch, {p.fingerprint: {"decision": "keep", "why": ""}
+                                 for p in posts}, extra=["--json"])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert json.loads(captured.out)
+    assert "acceptance gate passed" in captured.err
+
+
+def test_the_prompt_refuses_to_drop_on_a_preference_alone():
+    """An Avoid rule about *how much* of a role is something needs the body.
+
+    profile_kb.md says "pure analytics, BI/reporting", and that word "pure" is
+    a fact about the description — a title cannot settle it. Both triage and
+    the matcher get that same kb, so acting on it from a title alone is how
+    "Data Analyst*in Claims" (scored 68) gets dropped while "Data Engineer
+    Campaign & Analytics" (79) and an energy analyst role (85) sit one
+    indistinguishable title away. Downgrading those to unsure is the fix.
+    """
+    prompt = triage.build_prompt([], "DIGEST", "KB")
+
+    assert "A matching preference is not a shortcut" in prompt
+    assert "unsure, never a drop" in prompt
+    # The escape hatch stays, but it no longer reads as licensing an analytics
+    # title: that phrasing is what the live replay had the model lean on when
+    # it dropped "Data Analyst*in Claims" anyway.
+    assert "not the name of a profession" in prompt
+    assert "genuinely different line of work" in prompt
 
 
 def test_a_clean_replay_passes_and_says_what_it_covered(db, monkeypatch, capsys):
