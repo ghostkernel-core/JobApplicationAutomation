@@ -126,20 +126,22 @@ def _context_is_dead(state: dict[str, Any]) -> bool:
     only dispatches events when it is called into, so it can lag. The
     `is_connected()` probe catches what the flag missed.
 
-    A persistent context may expose no `.browser` at all; that is not evidence
-    of death, so it falls back to the flag rather than forcing a relaunch every
-    single poll (which would re-trigger the Cloudflare challenge every 30
-    minutes — exactly what the persistent profile exists to avoid).
+    A persistent context may expose no `.browser` at all. In that case, reading
+    its channel-backed `pages` property is a non-mutating liveness probe: an
+    empty page list is fine, but an exception means the handle is unusable. A
+    minimal test fake need expose neither surface and still counts as alive.
     """
-    if state.get("context") is None:
+    context = state.get("context")
+    if context is None:
         return False
     if state.get("dead"):
         return True
     try:
-        owner = getattr(state["context"], "browser", None)
-        if owner is None:
-            return False
-        return not owner.is_connected()
+        owner = getattr(context, "browser", None)
+        if owner is not None:
+            return not owner.is_connected()
+        getattr(context, "pages", None)
+        return False
     except Exception:  # noqa: BLE001 - an unusable handle is a dead one
         return True
 
@@ -249,11 +251,12 @@ def _run_job(state: dict[str, Any], func):
     this very job reports itself closed, relaunching into the same fault would
     just double the cost of every real error.
     """
-    cached = state.get("context") is not None
+    cached = state.get("context")
+    context = _open_context(state)
     try:
-        return func(_open_context(state))
+        return func(context)
     except Exception as exc:  # noqa: BLE001
-        if not cached or not _is_disconnect(exc):
+        if cached is None or context is not cached or not _is_disconnect(exc):
             raise
         log.warning("browser died mid-job (%s) — relaunching and retrying once", exc)
         _shutdown(state)
